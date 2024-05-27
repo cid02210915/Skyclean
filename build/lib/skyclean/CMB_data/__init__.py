@@ -1,0 +1,1 @@
+from CMB_data import CMB_data

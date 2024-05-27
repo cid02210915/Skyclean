@@ -1,0 +1,20 @@
+Metadata-Version: 2.1
+Name: skyclean
+Version: 0.0.1
+Summary: A package that allows simple manipulation and noise reduction of CMB data using wavelet and component separation methods
+Home-page: UNKNOWN
+Author: Zhaoqi Wang
+Author-email: <maxwang0829@gmail.com>
+License: UNKNOWN
+Keywords: python,CMB,component separation methods,wavelets
+Platform: UNKNOWN
+Classifier: Development Status :: 1 - Planning
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: Unix
+Classifier: Operating System :: MacOS :: MacOS X
+Classifier: Operating System :: Microsoft :: Windows
+License-File: LICENSE
+
+UNKNOWN
+
