@@ -1,0 +1,6 @@
+*.csv
+*.DS_Store
+*.fits
+s2fft/
+s2wav/
+*.npy

@@ -1,0 +1,9 @@
+# For console message:
+"JAX is not using 64-bit precision. 
+This will dramatically affect numerical precision at even moderate L."
+
+import jax
+jax.config.update("jax_enable_x64", True)
+
+# If any JAX-related modules (like jax.numpy or jax.random) are imported before 
+# this setting is enabled, then those modules will not be in 64-bit mode.

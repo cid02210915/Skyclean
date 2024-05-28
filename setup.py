@@ -21,7 +21,8 @@ setup(
     author_email="<maxwang0829@gmail.com>",
     description=DESCRIPTION,
     packages=find_packages(),
-    install_requires=['opencv-python', 'pyautogui', 'pyaudio'],
+    python_requires='>=3.8',
+    install_requires=[ 'numpy', 'matplotlib', 'healpy', 's2wav'],
     keywords=['python', 'CMB', 'component separation methods', 'wavelets'],
     classifiers=[
         "Development Status :: 1 - Planning",
