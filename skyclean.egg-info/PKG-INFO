@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: skyclean
-Version: 0.0.1
+Version: 0.0.2.2
 Summary: A package that allows simple manipulation and noise reduction of CMB data using wavelet and component separation methods
 Author: Zhaoqi Wang
 Author-email: <maxwang0829@gmail.com>

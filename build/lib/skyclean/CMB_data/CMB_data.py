@@ -39,15 +39,38 @@ class CMB_Data():
         self.reconstructed_mw_alm = None
 
 
-        print("hello from CMB_Data")
-        pass
+        print("CMB_Data object created, (use show_attributes() to check the attributes)")
+
     @classmethod
-    def show_existing_CMB_Data(cls):
+    def show_attributes(self):
         '''
         class -->())
         '''
-        print(cls.existing_CMB_Data)
-        pass
+
+        attributes = [["path", self.path],
+                      ["nside", self.nside],
+                      ["lmax usually 2 * nisde", self.lmax]]
+        
+        maps = [["original_hp_map", "Available" if self.original_hp_map != None else None],
+                ["original_mw_map", "Available" if self.original_mw_map != None else None],
+                ["reconstructed_hp_map", "Available" if self.reconstructed_hp_map != None else None],
+                ["reconstructed_mw_map", "Available" if self.reconstructed_mw_map != None else None]]    
+        
+        alms = [["original_hp_alm", "Available" if self.original_hp_alm != None else None],
+                ["reconstructed_hp_alm", "Available" if self.reconstructed_hp_alm != None else None]]
+        
+        wavelet = [["wavelet_coeff", "Available" if self.wavelet_coeff != None else None],
+                   ["Scaling_coeff", "Available" if self.Scaling_coeff != None else None]]
+        
+
+        print("Attributes:\n", attributes)
+        print("Maps:\n", maps)
+        print("Alms:\n", alms)
+        print("Wavelet_related:\n", wavelet)
+
+
+
+        
     
 
 
@@ -100,18 +123,18 @@ class CMB_Data():
         
         return healpix_alm
         
-    def plot_mollview (self, map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K"):
+    def plot_mollview (self, map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K",min=-300, max=300, enhence = 1e6):
 
         '''
         Plot the Mollweide view of the map
         '''
-        hp.mollview(map, title = title)
+        
         hp.mollview(
-            map*1e6,
+            map*enhence,
             coord=coord,
             title=title,
             unit=unit,
-            min=-300, 
-            max=300,
+            min=min, 
+            max=max,
         )
 
