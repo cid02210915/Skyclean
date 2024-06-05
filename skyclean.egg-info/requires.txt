@@ -1,3 +1,4 @@
-opencv-python
-pyautogui
-pyaudio
+numpy
+matplotlib
+healpy
+s2wav

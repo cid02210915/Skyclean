@@ -9,3 +9,5 @@ skyclean.egg-info/requires.txt
 skyclean.egg-info/top_level.txt
 skyclean/CMB_data/CMB_data.py
 skyclean/CMB_data/__init__.py
+skyclean/CMB_data/cmb_data.py
+skyclean/CMB_data/test.py
