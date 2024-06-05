@@ -2,7 +2,6 @@ LICENSE
 README.md
 setup.py
 skyclean/__init__.py
-skyclean/cmb_data.py
 skyclean.egg-info/PKG-INFO
 skyclean.egg-info/SOURCES.txt
 skyclean.egg-info/dependency_links.txt

@@ -10,7 +10,7 @@ class CMB_Data():
     ''' help(CMB_Data())
     Class to hold the CMB map 
     '''
-    existing_CMB_Data = []
+    #existing_CMB_Data = []
     def __init__(self, path):
 
         # local path of the Healpix map 
@@ -18,9 +18,9 @@ class CMB_Data():
         
         # Map data before the wavelet transform (analysis)
         self.original_hp_map = hp.read_map(self.path)
-        self.original_hp_alm = None
-        self.original_mw_map = None
-        self.original_mw_alm = None
+        self.original_hp_alm = np.array([])
+        self.original_mw_map = np.array([])
+        self.original_mw_alm = np.array([])
 
         # Parameters
         self.nside = hp.get_nside(self.original_hp_map)
@@ -28,15 +28,15 @@ class CMB_Data():
 
 
         # Wavelet transform
-        self.wavelet_coeff = None   # Wavelet coefficients
-        self.Scaling_coeff = None # Scaling coefficients
+        self.wavelet_coeff = np.array([])   # Wavelet coefficients
+        self.Scaling_coeff = np.array([]) # Scaling coefficients
 
         # After the wavelet transform 
-        self.reconstructed_hp_map = None
-        self.reconstructed_hp_alm = None
+        self.reconstructed_hp_map = np.array([])
+        self.reconstructed_hp_alm = np.array([])
 
-        self.reconstructed_mw_map = None
-        self.reconstructed_mw_alm = None
+        self.reconstructed_mw_map = np.array([])
+        self.reconstructed_mw_alm = np.array([])
 
 
         print("CMB_Data object created, (use show_attributes() to check the attributes)")
@@ -51,16 +51,16 @@ class CMB_Data():
                       ["nside", self.nside],
                       ["lmax usually 2 * nisde", self.lmax]]
         
-        maps = [["original_hp_map", "Available" if self.original_hp_map != None else None],
-                ["original_mw_map", "Available" if self.original_mw_map != None else None],
-                ["reconstructed_hp_map", "Available" if self.reconstructed_hp_map != None else None],
-                ["reconstructed_mw_map", "Available" if self.reconstructed_mw_map != None else None]]    
+        maps = [["original_hp_map", "Available" if self.original_hp_map.any() else None],
+                ["original_mw_map", "Available" if self.original_mw_map.any() else None],
+                ["reconstructed_hp_map", "Available" if self.reconstructed_hp_map.any() else None],
+                ["reconstructed_mw_map", "Available" if self.reconstructed_mw_map.any() else None]]    
         
-        alms = [["original_hp_alm", "Available" if self.original_hp_alm != None else None],
-                ["reconstructed_hp_alm", "Available" if self.reconstructed_hp_alm != None else None]]
+        alms = [["original_hp_alm", "Available" if self.original_hp_alm.any() else None],
+                ["reconstructed_hp_alm", "Available" if self.reconstructed_hp_alm.any() else None]]
         
-        wavelet = [["wavelet_coeff", "Available" if self.wavelet_coeff != None else None],
-                   ["Scaling_coeff", "Available" if self.Scaling_coeff != None else None]]
+        wavelet = [["wavelet_coeff", "Available" if self.wavelet_coeff.any() else None],
+                   ["Scaling_coeff", "Available" if self.Scaling_coeff.any() else None]]
         
 
         print("Attributes:\n", attributes)
@@ -74,7 +74,7 @@ class CMB_Data():
     
 
 
-    def hp_alm_to_mw_alm(hp_alm,lmax):
+    def hp_alm_to_mw_alm(self, hp_alm,lmax):
         '''
         It takes the healpix-style alm (Spherical harmonic Coefficient) and lmax (level of details) and returns the MW_alm
         mapping the coefficients from 1D array to 2D array.
@@ -94,7 +94,7 @@ class CMB_Data():
 
         return MW_alm
 
-    def mw_alm_to_hp_alm(MW_alm, lmax):
+    def mw_alm_to_hp_alm(self, MW_alm, lmax):
         '''
         It takes the MW_alm (Spherical harmonic Coefficient) and lmax (level of details) and returns the healpix-style alm
         mapping the coefficients from 2D array to 1D array.
@@ -123,7 +123,7 @@ class CMB_Data():
         
         return healpix_alm
         
-    def plot_mollview ( map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K",min=-300, max=300, enhence = 1e6):
+    def plot_mollview (self, map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K",min=-300, max=300, enhence = 1e6):
 
         '''
         Plot the Mollweide view of the map
