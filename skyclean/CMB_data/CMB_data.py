@@ -41,7 +41,7 @@ class CMB_Data():
 
         print("CMB_Data object created, (use show_attributes() to check the attributes)")
 
-    @classmethod
+    
     def show_attributes(self):
         '''
         Display all the attributes of the CMB_Data object
@@ -74,7 +74,7 @@ class CMB_Data():
     
 
 
-    def hp_alm_to_mw_alm(self, hp_alm,lmax):
+    def hp_alm_to_mw_alm(hp_alm,lmax):
         '''
         It takes the healpix-style alm (Spherical harmonic Coefficient) and lmax (level of details) and returns the MW_alm
         mapping the coefficients from 1D array to 2D array.
@@ -123,7 +123,7 @@ class CMB_Data():
         
         return healpix_alm
         
-    def plot_mollview (self, map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K",min=-300, max=300, enhence = 1e6):
+    def plot_mollview ( map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K",min=-300, max=300, enhence = 1e6):
 
         '''
         Plot the Mollweide view of the map
