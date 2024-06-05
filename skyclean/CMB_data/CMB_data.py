@@ -23,7 +23,7 @@ class CMB_Data():
         self.original_mw_alm = None
 
         # Parameters
-        self.nside = hp.get_nside(self.hp_map)
+        self.nside = hp.get_nside(self.original_hp_map)
         self.lmax = self.nside * 2
 
 
@@ -48,6 +48,28 @@ class CMB_Data():
         '''
         print(cls.existing_CMB_Data)
         pass
+    
+
+
+    def hp_alm_to_mw_alm(self, hp_alm,lmax):
+        '''
+        It takes the healpix-style alm (Spherical harmonic Coefficient) and lmax (level of details) and returns the MW_alm
+        mapping the coefficients from 1D array to 2D array.
+
+        '''
+        # Rearrange coefficients for s2wav: from 1 dimensional to 2 dimensional
+        # s2fft only works with alm in 2d
+        MW_alm = np.zeros((lmax, 2 * lmax - 1), dtype=np.complex128)
+
+        for l in range(lmax):
+            for m in range(-l, l + 1):
+                index = hp.Alm.getidx(lmax - 1, l, abs(m))
+                if m < 0:
+                    MW_alm[l, lmax + m - 1] = (-1)**m * np.conj(hp_alm[index])
+                else:
+                    MW_alm[l, lmax + m - 1] = hp_alm[index]
+
+        return MW_alm
 
     def mw_alm_to_hp_alm(MW_alm, lmax):
         '''
@@ -78,3 +100,18 @@ class CMB_Data():
         
         return healpix_alm
         
+    def plot_mollview (self, map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K"):
+
+        '''
+        Plot the Mollweide view of the map
+        '''
+        hp.mollview(map, title = title)
+        hp.mollview(
+            map*1e6,
+            coord=coord,
+            title=title,
+            unit=unit,
+            min=-300, 
+            max=300,
+        )
+
