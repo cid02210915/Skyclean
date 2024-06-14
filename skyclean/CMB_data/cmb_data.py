@@ -65,8 +65,8 @@ class CMB_Data():
         alms = [["original_hp_alm", "Available" if self.original_hp_alm.any() else None],
                 ["reconstructed_hp_alm", "Available" if self.reconstructed_hp_alm.any() else None]]
         
-        wavelet = [["wavelet_coeff", "Available" if self.wavelet_coeff.any() else None],
-                   ["Scaling_coeff", "Available" if self.Scaling_coeff.any() else None]]
+        wavelet = [["wavelet_coeff", "Available" if self.wavelet_coeffs_in_mw_alm.any() else None],
+                   ["Scaling_coeff", "Available" if self.scaling_coeffs_in_mw_map.any() else None]]
         
 
         print("Attributes:\n", attributes)
