@@ -8,7 +8,7 @@ import s2wav
 
 class CMB_Data():
     ''' help(CMB_Data())
-    Class to hold the CMB map 
+    Class to hold the CMB map, and perform superical transform and wavelet transform on it.
     '''
     #existing_CMB_Data = []
     def __init__(self, path):
@@ -28,8 +28,14 @@ class CMB_Data():
 
 
         # Wavelet transform
-        self.wavelet_coeff = np.array([])   # Wavelet coefficients
-        self.Scaling_coeff = np.array([]) # Scaling coefficients
+        # In pixel space
+        self.wavelet_coeffs_in_mw_map = np.array([])   # Wavelet coefficients
+        self.scaling_coeffs_in_mw_map = np.array([]) # Scaling coefficients
+
+        self.wavelet_coeffs_in_mw_alm = np.array([]) # Wavelet coefficients in alm
+        self.wavelet_coeffs_in_hp_alm = np.array([])
+        self.wavelet_coeffs_in_hp_map = np.array([])
+
 
         # After the wavelet transform 
         self.reconstructed_hp_map = np.array([])
