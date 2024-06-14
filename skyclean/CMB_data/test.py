@@ -7,8 +7,8 @@ map1 = CMB_Data("/home/max/CMB_plot/data/planck_simulation/ffp10_newdust_total_0
 
 #print(map1.hp_alm_to_mw_alm(hp.map2alm(map1.original_hp_map), map1.nside*2).shape)
 
-map1.show_attributes()
-map1.hp_alm_to_mw_alm(map1.original_hp_map,map1.lmax)
+# map1.show_attributes()
+# map1.hp_alm_to_mw_alm(map1.original_hp_map,map1.lmax)
 
 
 # Skyclean 

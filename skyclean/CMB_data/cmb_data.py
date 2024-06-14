@@ -80,7 +80,7 @@ class CMB_Data():
     
 
 
-    def hp_alm_to_mw_alm(self, hp_alm,lmax):
+    def hp_alm_to_mw_alm(self, hp_alm,lmax, Store = False, path = None):
         '''
         It takes the healpix-style alm (Spherical harmonic Coefficient) and lmax (level of details) and returns the MW_alm
         mapping the coefficients from 1D array to 2D array.
@@ -97,6 +97,14 @@ class CMB_Data():
                     MW_alm[l, lmax + m - 1] = (-1)**m * np.conj(hp_alm[index])
                 else:
                     MW_alm[l, lmax + m - 1] = hp_alm[index]
+        if Store == True:
+            if path == None:
+                # print("Please provide a path to store the MW_alm")
+                
+                np.save("MW_alm.npy", MW_alm)
+            else:
+                np.save(path, MW_alm)
+            
 
         return MW_alm
 
@@ -128,7 +136,20 @@ class CMB_Data():
                     healpix_alm[alm_index] = MW_alm[l, lmax + m - 1]
         
         return healpix_alm
-        
+
+    def hp_map_to_mw_map(self, hp_map, lmax):
+        '''
+        It takes the healpix-style map and lmax (level of details) and returns the MW_map
+        '''
+        hp_alm = hp.map2alm(hp_map, lmax=lmax)
+        MW_alm = self.hp_alm_to_mw_alm(hp_alm, lmax)
+        MW_map = s2wav.inverse(MW_alm)
+
+        return MW_map
+
+
+
+
     def plot_mollview (self, map, title = "Map in Mollweide view", coord = ["G"], unit=r"$\mu$K",min=-300, max=300, enhence = 1e6):
 
         '''
