@@ -7,7 +7,10 @@ skyclean.egg-info/SOURCES.txt
 skyclean.egg-info/dependency_links.txt
 skyclean.egg-info/requires.txt
 skyclean.egg-info/top_level.txt
-skyclean/CMB_data/CMB_data.py
 skyclean/CMB_data/__init__.py
 skyclean/CMB_data/cmb_data.py
 skyclean/CMB_data/test.py
+skyclean/tools/__init__.py
+skyclean/tools/drawing_functions.py
+skyclean/tools/map_functions.py
+skyclean/tools/useful_functions.py
