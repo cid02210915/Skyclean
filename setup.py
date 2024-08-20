@@ -10,8 +10,8 @@ this_directory = Path(__file__).parent
 # with codecs.open(os.path.join(here, "README.md"), encoding="utf-8") as fh:
 #     long_description = "\n" + fh.read()
 
-VERSION = '0.0.3.3'
-DESCRIPTION = 'A package that allows simple manipulation and noise reduction of CMB data using wavelet and component separation methods'
+VERSION = '0.0.4.0'
+DESCRIPTION = 'A package that allows simple manipulation and noise reduction of CMB data using wavelet transform and component separation methods'
 
 # Setting up
 setup(
@@ -22,8 +22,8 @@ setup(
     description=DESCRIPTION,
     packages=find_packages(),
     python_requires='>=3.8',
-    install_requires=[ 'numpy', 'matplotlib', 'healpy', 's2wav'],
-    keywords=['python', 'CMB', 'component separation methods', 'wavelets'],
+    install_requires=[ 'numpy', 'matplotlib', 'healpy', 's2wav', 's2fft', 'mathplotlib'],
+    keywords=['python', 'CMB', 'component separation methods', 'wavelet transform', "ILC"],
     classifiers=[
         "Development Status :: 1 - Planning",
         "Intended Audience :: Developers",

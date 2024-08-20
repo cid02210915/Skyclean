@@ -3,10 +3,9 @@ jax.config.update("jax_enable_x64", True)
 import s2fft
 import healpy as hp
 import numpy as np
-import s2wav
-import s2wav.filters as filters
+# import s2wav
 import matplotlib.pyplot as plt
-import os
+# import os
 from astropy.io import fits #For beam deconvolution
 
 
@@ -39,6 +38,23 @@ def hp_alm_2_mw_alm(hp_alm, L_max):
                 MW_alm[l, L_max + m - 1] = hp_alm[index]
 
     return MW_alm
+
+
+def mw_alm_2_hp_alm(MW_alm, lmax):
+    '''MW_alm: 2D array of shape (Lmax, 2*Lmax-1) (MW sampling, McEwen & Wiaux)
+    '''
+    # Initialize the 1D hp_alm array with the appropriate size
+    hp_alm = np.zeros(hp.Alm.getsize(lmax), dtype=np.complex128)
+        
+    for l in range(lmax + 1):
+        for m in range(-l, l + 1):
+            index = hp.Alm.getidx(lmax, l, abs(m))
+            if m < 0:
+                hp_alm[index] = (-1)**m * np.conj(MW_alm[l, lmax + m])
+            else:
+                hp_alm[index] = MW_alm[l, lmax + m]
+
+    return hp_alm
 
 def reduce_hp_map_resolution(hp_map, lmax, nside):
     """
@@ -106,3 +122,34 @@ def beam_deconvolution(hp_map, frequency, lmax, standard_fwhm_rad, beam_path, LF
     return deconvolved_map
 
 
+def visualize_MW_Pix_map(MW_Pix_Map, title, coord=["G"], unit = r"K"):
+    """
+    Processes a MW pixel wavelet coefficient map and visualizes it using HEALPix mollview.
+
+    Parameters:
+        MW_Pix_Map (numpy array): Array representing the wavelet coefficient map.
+        title (str): Title for the visualization plot.
+
+    Returns:
+        Only Displays a mollview map.
+    """
+    # The newly generated wavelet coefficient map is in three dimensions
+    if len(MW_Pix_Map.shape) == 3:
+        L_max = MW_Pix_Map.shape[1]
+    else:
+        L_max = MW_Pix_Map.shape[0]
+    original_map_alm = s2fft.forward(MW_Pix_Map, L=L_max)
+    print("Original map alm shape:", original_map_alm.shape)
+    
+    original_map_hp_alm = mw_alm_2_hp_alm(original_map_alm, L_max - 1)
+    original_hp_map = hp.alm2map(original_map_hp_alm, nside=(L_max - 1)//2)
+
+    hp.mollview(
+        original_hp_map,
+        coord=coord,
+        title=title,
+        unit=unit,
+        # min=min, max=max,  # Uncomment and adjust these as necessary for better visualization contrast
+    )
+    # plt.figure(dpi=1200)
+    plt.show()

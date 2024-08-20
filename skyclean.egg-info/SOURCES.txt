@@ -14,3 +14,4 @@ skyclean/tools/__init__.py
 skyclean/tools/drawing_functions.py
 skyclean/tools/map_functions.py
 skyclean/tools/useful_functions.py
+skyclean/tools/wavelets_functions.py
