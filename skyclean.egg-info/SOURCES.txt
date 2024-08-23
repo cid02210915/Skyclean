@@ -10,6 +10,7 @@ skyclean.egg-info/top_level.txt
 skyclean/CMB_data/__init__.py
 skyclean/CMB_data/cmb_data.py
 skyclean/CMB_data/test.py
+skyclean/tools/ILC_functions.py
 skyclean/tools/__init__.py
 skyclean/tools/drawing_functions.py
 skyclean/tools/map_functions.py

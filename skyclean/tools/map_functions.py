@@ -3,11 +3,9 @@ jax.config.update("jax_enable_x64", True)
 import s2fft
 import healpy as hp
 import numpy as np
-# import s2wav
 import matplotlib.pyplot as plt
 # import os
 from astropy.io import fits #For beam deconvolution
-
 
 def hp_alm_2_mw_alm(hp_alm, L_max):
     """
@@ -56,12 +54,61 @@ def mw_alm_2_hp_alm(MW_alm, lmax):
 
     return hp_alm
 
+def hp_fits_map_to_MW_map(file_path):
+    """
+    Process a FITS file containing a HEALPix map and convert it into a map 
+    using spherical harmonics and molecular wave (MW) coefficients.
+
+    Parameters:
+    -----------
+    file_path : str
+        Path to the FITS file containing the HEALPix map.
+
+    Returns:
+    --------
+    np.ndarray
+        A numpy array representing the real part of the map obtained from the 
+        inverse transformation of MW alm coefficients.
+
+    Notes:
+    ------
+    - This function reads a HEALPix map from a FITS file.
+    - It calculates the maximum multipole order (L_max) based on the nside of the map.
+    - The map is converted to spherical harmonics (alm coefficients).
+    - The HEALPix alm coefficients are then converted to MW (Molecular Wave) alm coefficients.
+    - Finally, the MW alm coefficients are transformed back to a map, and the real part 
+      of the result is returned.
+
+    Example:
+    --------
+    >>> file_path = "CMB_total/CSN_HP_Map_F100_L128_R0000.fits"
+    >>> resulting_map = process_fits_to_map(file_path)
+    """
+    # Read the input map from a FITS file
+    hp_map = hp.read_map(file_path)
+    
+    # Determine the maximum multipole order
+    L_max = hp.get_nside(hp_map) * 2
+    
+    # Convert the map to spherical harmonics (alm coefficients)
+    hp_alm = hp.map2alm(hp_map, lmax=L_max - 1)
+    
+    # Convert the HEALPix alm coefficients to MW (Molecular Wave) alm coefficients
+    MW_alm = hp_alm_2_mw_alm(hp_alm, L_max)
+    
+    # Convert the MW alm coefficients back to a map (real part only)
+    MW_map = np.real(s2fft.inverse(MW_alm, L=L_max))
+    
+    return MW_map
+
+
+
 def reduce_hp_map_resolution(hp_map, lmax, nside):
     """
     Processes a Healpix map by converting it to spherical harmonics and back,
     and reducing the resolution.
     
-    Args:
+    Parameters:
         map_data (numpy.ndarray): Input map data.
         lmax (int): Maximum multipole moment for spherical harmonics.
         nside (int): Desired nside resolution for the output map.
@@ -139,7 +186,7 @@ def visualize_MW_Pix_map(MW_Pix_Map, title, coord=["G"], unit = r"K"):
     else:
         L_max = MW_Pix_Map.shape[0]
     original_map_alm = s2fft.forward(MW_Pix_Map, L=L_max)
-    print("Original map alm shape:", original_map_alm.shape)
+    print(" Alm shape (Lmax, 2 * Lmax -1): ", original_map_alm.shape)
     
     original_map_hp_alm = mw_alm_2_hp_alm(original_map_alm, L_max - 1)
     original_hp_map = hp.alm2map(original_map_hp_alm, nside=(L_max - 1)//2)

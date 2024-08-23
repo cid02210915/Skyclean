@@ -10,8 +10,8 @@ this_directory = Path(__file__).parent
 # with codecs.open(os.path.join(here, "README.md"), encoding="utf-8") as fh:
 #     long_description = "\n" + fh.read()
 
-VERSION = '0.0.4.0'
-DESCRIPTION = 'A package that allows simple manipulation and noise reduction of CMB data using wavelet transform and component separation methods'
+VERSION = '0.0.4.1'
+DESCRIPTION = 'A package that allows simple manipulation and noise reduction of CMB fits data using wavelet transform and Internal Linear Combination (ILC) methods.'
 
 # Setting up
 setup(
