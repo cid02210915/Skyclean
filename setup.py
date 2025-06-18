@@ -22,7 +22,7 @@ setup(
     description=DESCRIPTION,
     packages=find_packages(),
     python_requires='>=3.8',
-    install_requires=[ 'numpy', 'matplotlib', 'healpy', 's2wav', 's2fft', 'mathplotlib'],
+    install_requires=[ 'numpy', 'matplotlib', 'healpy', 's2wav', 's2fft'],
     keywords=['python', 'CMB', 'component separation methods', 'wavelet transform', "ILC"],
     classifiers=[
         "Development Status :: 1 - Planning",

@@ -1,4 +1,4 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: skyclean
 Version: 0.0.4.1
 Summary: A package that allows simple manipulation and noise reduction of CMB fits data using wavelet transform and Internal Linear Combination (ILC) methods.
@@ -19,3 +19,11 @@ Requires-Dist: healpy
 Requires-Dist: s2wav
 Requires-Dist: s2fft
 Requires-Dist: mathplotlib
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
