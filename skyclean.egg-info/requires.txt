@@ -3,4 +3,3 @@ matplotlib
 healpy
 s2wav
 s2fft
-mathplotlib

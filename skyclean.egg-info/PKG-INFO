@@ -18,7 +18,6 @@ Requires-Dist: matplotlib
 Requires-Dist: healpy
 Requires-Dist: s2wav
 Requires-Dist: s2fft
-Requires-Dist: mathplotlib
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier
