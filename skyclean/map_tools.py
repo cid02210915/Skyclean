@@ -10,11 +10,11 @@ import s2fft
 import s2wav
 import s2wav.filters as filters
 
-class HPMapTools():
+class HPTools():
     """Tools to process healpy/MW maps"""
 
     @staticmethod
-    def reduce_hp_map_resolution(hp_map: np.ndarray, lmax: int, nside: int) -> tuple:
+    def reduce_hp_map_resolution(hp_map: np.ndarray, lmax: int, nside: int):
         """
         Processes a Healpix map by converting it to spherical harmonics and back,
         and reducing the resolution.
@@ -32,10 +32,14 @@ class HPMapTools():
         return processed_map, hp_alm
     
     @staticmethod
-    def beam_convolve(hp_map, lmax: int, standard_fwhm_rad: float) -> np.ndarray: 
+    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float): 
         """
         Converts healpix map to alm space, deconvolves the pixel window function,
         applies a standard beam, and converts back to map space.
+
+        #### Notes: In future, will use CMB data with simulated beams; for now, use theoretical CMB.
+        #### You will need to add functionality to *deconvolve* the CMB beam, then convolve with the
+        #### standard beam as performed here.
 
         Parameters:
             hp_map (numpy.ndarray): Input healpix map.
@@ -52,7 +56,7 @@ class HPMapTools():
         # Pixel window function
         pixwin = hp.sphtfunc.pixwin(nside, lmax=lmax, pol=False)
         # Divide out pixel window function
-        alm_deconv = hp.almxfl(alm_deconv, 1/pixwin)
+        alm_deconv = hp.almxfl(alm, 1/pixwin)
         # Apply standard beam
         alm_reconv = hp.almxfl(alm_deconv, Standard_bl)
         # Convert back to map
@@ -60,7 +64,7 @@ class HPMapTools():
         return hp_map_reconv
     
     @staticmethod
-    def unit_convert(hp_map: np.ndarray, frequency: str) -> np.ndarray:
+    def unit_convert(hp_map: np.ndarray, frequency: str):
         """
         Convert the units of the given healpix map based on the frequency.
 
@@ -77,19 +81,40 @@ class HPMapTools():
         if frequency == "857":
             unit_conversion = 2.2681
             hp_map /= unit_conversion
+        else:
+            hp_map = hp_map  # No conversion for other frequencies
         return hp_map
+    
+    @staticmethod
+    def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float):
+        """
+        Convolve a Healpix map with a standard beam and reduce its resolution.
+        
+        Parameters:
+            hp_map (numpy.ndarray): Input Healpix map.
+            lmax (int): Maximum multipole moment for spherical harmonics.
+            nside (int): Desired nside resolution for the output map.
+            standard_fwhm_rad (float): Standard beam FWHM in radians.
+        
+        Returns:
+            numpy.ndarray: Processed Healpix map after convolution and resolution reduction.
+        """
+        hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
+        return hp_map_reduced
+    
 
-class MWMapTools():
+class MWTools():
     """Tools to process maps in MW (McEwen & Wiaux) sampling"""
 
     @staticmethod
-    def wavelet_transform(mw_map: jnp.ndarray, L_max: int, N_directions: int, lam: float = 2.0,) -> tuple:
+    def wavelet_transform(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0,):
         """
         Performs a wavelet transform on a MW map using the S2WAV library.   
 
         Parameters: 
             mw_map (jnp.ndarray): The input MW map to be transformed.
-            L_max (int): Maximum multipole moment for the wavelet transform.
+            L (int): Maximum multipole moment for the wavelet transform; lmax+1.
             N_directions (int): Number of directions for the wavelet transform.
             lam (float, optional): Wavelet parameter, default is 2.0.   
 
@@ -97,11 +122,11 @@ class MWMapTools():
             tuple: A tuple containing the wavelet coefficients and scaling coefficients.
         """
         # default JAX path
-        j_filter = filters.filters_directional_vectorised(L_max, N_directions, lam = lam)
+        j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
             mw_map,
             N       = N_directions,
-            L       = L_max,
+            L       = L,
             lam     = lam,
             filters = j_filter,
             reality = False,
@@ -112,14 +137,16 @@ class MWMapTools():
         return wavelet_coeffs, scaling_coeffs
 
     @staticmethod
-    def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, frequency: str, realization: int, wav_template: str, scal_template: str) -> None:
+    def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, comp: str, frequency: str, realisation: int, lmax: int, wav_template: str, scal_template: str):
         """ Saves the wavelet and scaling coefficients to files.    
 
         Parameters:
+            comp (str): The component for which the coefficients are saved (e.g., 'sync', 'noise').
             wavelet_coeffs (list): List of wavelet coefficients for each scale.
             scaling_coeffs (np.ndarray): Scaling coefficients.  
             frequency (str): Frequency of the map.
-            realization (int): Realization number for the map.
+            realisation (int): realisation number for the map.
+            lmax (int): Maximum multipole for the wavelet transform.
             wav_template (str): Template for the wavelet coefficient file path.
             scal_template (str): Template for the scaling coefficient file path.
 
@@ -129,33 +156,33 @@ class MWMapTools():
         # Save wavelet coefficients
         for scale, wav in enumerate(wavelet_coeffs):
             np_wav = np.array(wav)  # Convert JAX array to numpy array
-            np.save(wav_template.format(frequency=frequency, scale=scale, realization=realization), np_wav)
+            np.save(wav_template.format(comp = comp, frequency=frequency, scale=scale, realisation=realisation, lmax = lmax), np_wav)
         
         # Scaling coefficient is the same for all scales'
         np_scaling = np.array(scaling_coeffs)  # Convert JAX array to numpy array
-        np.save(scal_template.format(frequency=frequency, realization=realization), np_scaling)
+        np.save(scal_template.format(comp = comp, frequency=frequency, realisation=realisation, lmax = lmax), np_scaling)
 
     @staticmethod
-    def load_wavelet_scaling_coeffs(frequency, num_wavelets, realization, wav_template, scal_template):
+    def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
         """
         Loads the wavelet and scaling coefficients from files.
 
         Parameters:
             frequency (str): Frequency of the map.
             num_wavelets (int): Number of wavelet coefficients to load.
-            realization (int): Realization number for the map.  
+            realisation (int): realisation number for the map.  
             wav_template (str): Template for the wavelet coefficient file path.
             scal_template (str): Template for the scaling coefficient file path.
         
         Returns:
             tuple: A tuple containing the wavelet coefficients and scaling coefficients.
         """
-        wavelet_coeffs = [np.real(np.load(wav_template.format(frequency=frequency, scale=scale, realization=realization))) for scale in range(num_wavelets)]
-        scaling_coeffs = np.real(np.load(scal_template.format(frequency=frequency, realization=realization)))
+        wavelet_coeffs = [np.real(np.load(wav_template.format(frequency=frequency, scale=scale, realisation=realisation))) for scale in range(num_wavelets)]
+        scaling_coeffs = np.real(np.load(scal_template.format(frequency=frequency, realisation=realisation)))
         return wavelet_coeffs, scaling_coeffs
     
     @staticmethod
-    def visualise_mw_map(mw_map, title, coord=["G"], unit = r"K"):
+    def visualise_mw_map(mw_map: np.ndarray, title: str, coord: list = ["G"], unit: str = r"K", method = "jax_cuda"):
         """
         Visualizes a MW pixel wavelet coefficient map using HEALPix mollview.
 
@@ -169,12 +196,12 @@ class MWMapTools():
         ncols = mw_map.shape[0]
         fig = plt.figure(figsize=(5*ncols, 5*nrows))
         
-        L_max = mw_map.shape[1]
+        lmax = mw_map.shape[1]
         for i in range(ncols):
-            original_map_alm = s2fft.forward(mw_map[i], L=L_max, method = "jax_cuda")
+            original_map_alm = s2fft.forward(mw_map[i], L=lmax, method = method)
             #print("ME alm shape:", original_map_alm.shape)
             original_map_hp_alm = mw_alm_2_hp_alm(original_map_alm)
-            original_hp_map = hp.alm2map(original_map_hp_alm, nside=L_max//2)
+            original_hp_map = hp.alm2map(original_map_hp_alm, nside=lmax//2)
             panel = i + 1
             hp.mollview(
                 original_hp_map,
@@ -188,22 +215,88 @@ class MWMapTools():
             # plt.figure(dpi=1200)
         plt.show()
 
+class SamplingConverters():
+    """Converters between Healpy and MW sampling"""
+    
+    @staticmethod
+    def hp_alm_2_mw_alm(hp_alm: np.ndarray, lmax: int):
+        """
+        Converts spherical harmonics (alm) from healpy to a matrix representation for use in MW sampling.
 
-class ProcessMaps():
-    """Process downloaded maps."""
-    def __init__(self, components: list, frequencies: list, realisations: int, directory: str = "data/CMB_realisations", noise: bool = True): 
+        This function takes 1D Healpix spherical harmonics coefficients (alm) and converts them into a matrix form 
+        that is in (MW sampling, McEwen & Wiaux) sampling. The matrix form is complex-valued and indexed by multipole 
+        moment and azimuthal index.
+
+        Parameters:
+            hp_alm (numpy.ndarray): The input healpix spherical harmonics coefficients (alm).
+            lmax (int): The maximum multipole moment to be represented in the output matrix.
+        
+        Note: # lmax = 4 | l = 0,1,2,3 , m = -3...0...(lmax-1 = 3)| number of m = 2(lmax-1)+1 = 2lmax-1
+        MW sampling fills in positive and negative m, while healpy only stores m >= 0.
+
+        Returns:
+            MW_alm (numpy.ndarray): 2D array of shape (Lmax, 2*Lmax-1) MW spherical harmonics coefficients 
         """
-        Parameters: 
-            components (list): List of foreground components to download. Includes: 'sync' (synchrotron)
-            directory (str): Directory to save the downloaded data.
-            frequencies (list): Frequencies of the data to be downloaded.
-            realisations (int): Number of realisations to download.
-            noise (bool, optional): Whether to download noise realisations.
+        L = lmax + 1 # L as defined in MW sampling
+        MW_alm = np.zeros((L, 2 * L - 1), dtype=np.complex128) # MW does not invoke reality theorem
+        for l in range(L):
+            for m in range(l + 1):
+                index = hp.Alm.getidx(lmax, l, m)
+                col = m + L - 1
+                hp_point = hp_alm[index]
+                MW_alm[l, col] = hp_point
+                if m > 0: 
+                    MW_alm[l, L-m-1] = (-1)**m * hp_point.conj() # fill m < 0 by symmetry
+        return MW_alm
+        
+    
+    @staticmethod
+    def mw_alm_2_hp_alm(mw_alm: np.ndarray):
         """
-        self.components = components
-        self.frequencies = frequencies
-        self.realisations = realisations
-        self.directory = directory
-        self.noise = noise
+        Converts spherical harmonics (alm) from MW sampling to healpy representation.
+
+        This function takes a 2D alm array in MW form (MW Sampling, McEwen & Wiaux) and converts them 
+        into a 1D array used in healpy sampling. The matrix form is complex-valued and indexed by multipole 
+        moment and azimuthal index.
+
+        Notea: MW sampling runs from 1,...,L while healpy runs from 0,...,L-1. Hence the lmax param from Healpy
+        is L-1 in MW sampling.
+        Healpy only stores m >= 0, while MW sampling fills in both positive and negative m.
+        
+        Parameters:
+            MW_alm (numpy.ndarray): The input MW spherical harmonics coefficients in matrix form.
+        
+        Returns:
+            hp_alm (numpy.ndarray): 1D array of healpy spherical harmonics coefficients
+        """
+        L = mw_alm.shape[0]
+        lmax = L-1 # lmax as defined in healpy sampling
+        hp_alm = np.zeros(hp.Alm.getsize(lmax), np.complex128)
+        for l in range(L):
+            for m in range(l+1):
+                col = lmax + m
+                idx = hp.Alm.getidx(lmax, l, m)
+                hp_alm[idx] = mw_alm[l, col]
+        return hp_alm
+    
+    @staticmethod
+    def hp_map_2_mw_map(hp_map: np.ndarray, lmax: int, method = "jax_cuda"):
+        """
+        Converts a Healpix map to a MW map by transforming the map to spherical harmonics and then converting the alm to MW sampling.
+
+        Parameters:
+            hp_map (numpy.ndarray): The input Healpix map.
+            lmax (int): The maximum multipole moment for the spherical harmonics.
+        
+        Returns:
+            mw_map (numpy.ndarray): The converted MW map in spherical harmonics representation.
+        """
+        L = lmax + 1
+        hp_alm = hp.map2alm(hp_map, lmax=lmax)
+        mw_alm = SamplingConverters.hp_alm_2_mw_alm(hp_alm, lmax)
+        mw_map = s2fft.inverse(mw_alm, L=L, method=method)
+        return mw_alm
+
+        
 
     
