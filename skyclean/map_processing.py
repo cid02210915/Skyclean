@@ -5,17 +5,19 @@ import healpy as hp
 
 class ProcessMaps():
     """Process downloaded maps."""
-    def __init__(self, components: list, frequencies: list, realisations: int, desired_lmax:int, directory: str = "data/", method = "jax_cuda"): 
+    def __init__(self, foreground_components: list, wavelet_components: list, frequencies: list, realisations: int, desired_lmax:int, directory: str = "data/", method = "jax_cuda"): 
         """
         Parameters: 
-            components (list): List of foreground components to process. Includes: 'sync' (synchrotron)
+            foreground_components (list): List of foreground components to process. Includes: 'sync' (synchrotron)
+            wavelet_components (list): List of components to produce wavelet transforms for.
             directory (str): Directory where data is stored / saved to.
             frequencies (list): Frequencies of maps to be processed.
             realisations (int): Number of realisations to process.
             desired_lmax (int): Desired maximum multipole for the processed maps.
             method (str): s2fft method
         """
-        self.components = components
+        self.foreground_components = foreground_components
+        self.wavelet_components = wavelet_components
         self.frequencies = frequencies
         self.realisations = realisations
         self.desired_lmax = desired_lmax
@@ -69,7 +71,7 @@ class ProcessMaps():
         standard_fwhm_rad = np.radians(5/60)
         nside = desired_lmax // 2 # desired n
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
-        for comp in self.components:
+        for comp in self.foreground_components:
             output_path = self.output_paths[comp].format(frequency=frequency, realisation=realisation, lmax = desired_lmax)
             if os.path.exists(output_path):
                 # Certain foreground components are frequency-independent, so we can skip processing
@@ -147,12 +149,11 @@ class ProcessMaps():
         return wavelet_coeffs, scaling_coeffs
     
 
-    def produce_and_save_wavelet_transforms(self, comp: str, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
+    def produce_and_save_wavelet_transforms(self, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
         """
         Produce and save wavelet transforms for all components across realisations and frequencies.
 
         Parameters:
-            lmax (int): The maximum multipole for the wavelet transform.
             N_directions (int): Number of directions for the wavelet transform.
             lam (float): lambda factor (scaling) for the wavelet transform.
             method (str): Method to use for visualisation.
@@ -162,10 +163,11 @@ class ProcessMaps():
             None
         """
         lmax = self.desired_lmax
-        for realisation in range(self.realisations):
-            for frequency in self.frequencies:
-                self.create_wavelet_transform(comp, frequency, realisation, lmax, N_directions=N_directions, lam=lam, method=method, visualise=visualise)
-                print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation + 1} saved.")
+        for comp in self.wavelet_components:
+            for realisation in range(self.realisations):
+                for frequency in self.frequencies:
+                    self.create_wavelet_transform(comp, frequency, realisation, lmax, N_directions=N_directions, lam=lam, method=method, visualise=visualise)
+                    print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation + 1} saved.")
 
 processor = ProcessMaps(components=["cmb", "sync"], frequencies=["030", "044"], realisations=2, directory="data/")
 processor.produce_and_save_cfns(desired_lmax=1024)

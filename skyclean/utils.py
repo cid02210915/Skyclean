@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 import os
+import numpy as np
 
 def create_dir(directory: str):
     """
@@ -49,3 +50,16 @@ def detect_scales(directory: str, comp: str, realisation: int = 0, pad: int = 5)
 
     return sorted(scales)
 
+def np_save_and_load(data, filename: str):
+    """
+    Save data to a file and then load it back.
+
+    Parameters:
+        data: The data to save.
+        filename (str): The name of the file to save the data to.
+    
+    Returns:
+        The loaded data.
+    """
+    np.save(filename, data)
+    return np.load(filename)
