@@ -132,9 +132,41 @@ class MWTools():
             reality = False,
         )
         #scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
-        scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)    # -> shape (N,1,1)
+        scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
+
+    @staticmethod
+    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0, visualise: bool = False):
+        """
+        Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
+
+        Parameters:
+            wavelet_coeffs (list): List of wavelet coefficients.
+            L (int): Maximum multipole moment for the wavelet transform; lmax+1.
+            N_directions (int, options): Number of directions for the wavelet transform, default is 1.
+            lam (float, optional): Wavelet parameter, default is 2.0.
+            visualise (bool, optional): Whether to visualize the MW map, default is False.
+
+        Returns:
+            jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
+        """
+        j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
+        f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
+        wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
+        mw_map = s2wav.synthesis(
+            wavelet_coeffs,
+            L       = L,
+            f_scal  = f_scal,
+            lam     = lam,
+            filters = j_filter,
+            reality = False,
+            N = N_directions
+        )
+        if visualise: 
+            title = f"Synthesized ILC MW Map at Realisation {realisation}"
+            MWTools.visualise_mw_map(mw_map, title, method = method)
+        return mw_map
 
     @staticmethod
     def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, comp: str, frequency: str, realisation: int, lmax: int, wav_template: str, scal_template: str):
@@ -154,13 +186,14 @@ class MWTools():
             None
         """
         # Save wavelet coefficients
+        np_scaling = np.array(scaling_coeffs)  # Convert JAX array to numpy array
+        np.save(scal_template.format(comp = comp, frequency=frequency, realisation=realisation, lmax = lmax), np_scaling)
+
+        # Save each wavelet coefficient map at each scale. (scale 0 = scaling coefficients.)
         for scale, wav in enumerate(wavelet_coeffs):
             np_wav = np.array(wav)  # Convert JAX array to numpy array
             np.save(wav_template.format(comp = comp, frequency=frequency, scale=scale, realisation=realisation, lmax = lmax), np_wav)
         
-        # Scaling coefficient is the same for all scales'
-        np_scaling = np.array(scaling_coeffs)  # Convert JAX array to numpy array
-        np.save(scal_template.format(comp = comp, frequency=frequency, realisation=realisation, lmax = lmax), np_scaling)
 
     @staticmethod
     def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
@@ -296,6 +329,26 @@ class SamplingConverters():
         mw_alm = SamplingConverters.hp_alm_2_mw_alm(hp_alm, lmax)
         mw_map = s2fft.inverse(mw_alm, L=L, method=method)
         return mw_alm
+
+    @staticmethod
+    def mw_map_2_hp_map(mw_map: np.ndarray, lmax: int, method = "jax_cuda"):
+        """
+        Converts a MW map to a Healpix map by transforming the map to spherical harmonics and then converting the alm to Healpix sampling.
+
+        Parameters:
+            mw_map (numpy.ndarray): The input MW map in spherical harmonics representation.
+            lmax (int): The maximum multipole moment for the spherical harmonics.
+        
+        Returns:
+            hp_map (numpy.ndarray): The converted Healpix map.
+        """
+        L = lmax 
+        mw_alm = s2fft.forward(mw_map, L=L, method=method)
+        hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm)
+        hp_map = hp.alm2map(hp_alm, nside=lmax//2)
+        return hp_map
+
+
 
         
 

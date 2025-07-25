@@ -75,8 +75,6 @@ class SILCTools():
                                                         method)
                 # Save the computed covariance matrix
                 # np.save(f"ILC/covariance_matrix/cov_MW_Pix2_F{frequencies[i]}_F{frequencies[fq]}_S{scale}", full_array[i, fq])
-        f = '_'.join(frequencies)
-        
         # Testing if single process output is the same as multiprocessing output
         # np.save(f"ILC/covariance_matrix/half_original_{scale}_R{realisation}", full_array)
         # Fill the symmetric part of the matrix
@@ -120,20 +118,27 @@ class SILCTools():
         return Rmap
 
     @staticmethod
-    def double_and_save_wavelet_maps(original_wavelet_c_j, frequencies, scales, realisation, method):
+    def double_wavelet_maps(original_wavelet_c_j, frequencies, scales, realisation, method):
         """
-        Doubles the resolution of wavelet maps and saves them with the realisation number in the file name.
+        Doubles the resolution of wavelet maps and returns them as a dictionary.
 
         Parameters:
             original_wavelet_c_j (dict): Dictionary containing the original wavelet maps.
             frequencies (list): List of frequency strings.
             scales (list): List of scale indices.
             realisation (int): The realisation number for file naming.
+            method (str): s2fft method to use for forward/inverse.
+
+        Returns:
+            dict: A dictionary with keys as (frequency, scale) and values as doubled wavelet maps.
         """
+        doubled_MW_wav_c_j = {}
         for i in frequencies:
             for j in scales:
                 # Perform the doubling of the wavelet map for the given frequency and scale
                 wavelet_mw_map_doubled = SILCTools.Single_Map_doubleworker(original_wavelet_c_j[(i, j)], method)
+                doubled_MW_wav_c_j[(i, j)] = wavelet_mw_map_doubled
+        return doubled_MW_wav_c_j
 
     @staticmethod
     def compute_weight_vector(R,scale,realisation):
@@ -156,7 +161,6 @@ class SILCTools():
         # print(R.shape)
         # Swap the axes to get R_Pix
         R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3) #(pix,pix,freq,freq)
-        
         # Get dimensions for looping and size of sub-matrices
         dim1, dim2, subdim1, subdim2 = R_Pix.shape
         # print(dim1, dim2, subdim1, subdim2)
@@ -170,23 +174,15 @@ class SILCTools():
         singular_matrices = []
         for i in range(dim1):
             for j in range(dim2):
-                
                 det = np.linalg.det(R_Pix[i, j])
                 if det == 0:
-                    print(i,j)
-                    print(R_Pix[i, j].shape)
-                    print(det)
-                    print(R_Pix[i, j])
-                    print("Pixel", i,j)
-                    print("The matrix is singular.")
-                    # np.linalg.inv(R_Pix[i, j])
+                    #print(R_Pix[i, j])
+                    #print(f"Pixel {i,j} matrix is singular (scale {scale}, realisation {realisation}).")
                     zeros = np.zeros((subdim1))
 
                     singular_matrices_location.append((i,j))
                     singular_matrices.append(R_Pix[i, j])
                     weight_vectors[i, j] = zeros
-                    np.save(f"data/ILC/weight_vector_data/inverse_singular_matrix_{i}_{j}_S{scale}_R{realisation}.npy", R_Pix[i,j])
-                    print("saved at ", f"ILC/weight_vector_data/inverse_singular_matrix_{i}_{j}_S{scale}_R{realisation}.npy")
                     
                 else:
                     # print("The matrix is not singular.")
@@ -198,7 +194,7 @@ class SILCTools():
                     denominator = np.dot(np.dot(inverses[i, j], identity_vector),identity_vector)
                     weight_vectors[i, j] = numerator / denominator
 
-        return inverses, weight_vectors,singular_matrices_location,singular_matrices
+        return weight_vectors
     
     @staticmethod
     def compute_ILC_for_pixel(i, j, frequencies, scale, weight_vector_load, doubled_MW_wav_c_j):
@@ -285,61 +281,36 @@ class SILCTools():
         return mw_map_original
     
     @staticmethod
-    def load_frequency_data(base_path, file_template, frequencies, scales=None, realisation = None, lmax = None):
+    def load_frequency_data(file_template: str, comp: str, frequencies: list, scales=None, realisation=None, lmax=None):
         """
         Load NumPy arrays from dynamically generated file paths for each frequency and scale.
         
         Parameters:
-            base_path (str): The base path where the files are located.
             file_template (str): The template for the file names, with placeholders for frequency and scale.
             frequencies (list): A list of frequency names.
-            scales_: A lists of scales.
-            
+            scales (list): A list of scales.
+            realisation (int): The realisation index.
+            lmax (int): The maximum multipole.
+
         Returns:
             dict: A dictionary where keys are tuples of (frequency, scale) and values are loaded NumPy arrays.
         """
         frequency_data = {}
-        realisation = str(realisation)
         for frequency in frequencies:
             for scale in scales:
                 # Generate the file path using the template and the current frequency and scale
-                path = os.path.join(base_path, file_template.format(frequency, scale, realisation, lmax))
+                path = file_template.format(comp=comp, frequency=frequency, scale=scale, realisation=realisation, lmax=lmax)
                 try:
                     frequency_data[(frequency, scale)] = np.load(path)
                 except Exception as e:
                     print(f"Error loading {path} for frequency {frequency} and scale {scale}: {e}, realisation {realisation}")
         return frequency_data
-    
-    @staticmethod
-    def synthesise_ilc_scales(ILC_trimmed_wav_maps: list, realisation: int, scales: list, lmax: int, N_directions: int = 1, lam: float = 2.0, visualise = False, method = "jax_cuda"):
-        """
-        Synthesise the ILC map from the trimmed wavelet maps.
-
-        Parameters:
-            ILC_trimmed_wav_maps (list): List of trimmed wavelet maps for each scale
-            realisation (int): The realisation index.
-            scales (list): List of scales to synthesise.
-            lmax (int): Maximum multipole for the wavelet transform.
-            N_directions (int): Number of directions for the wavelet transform.
-            lam (float): lambda factor (scaling) for the wavelet transform.
-            visualise (bool): Whether to visualise the synthesised map.
-            method (str): s2fft method to use for forward/inverse.
-        Returns:
-            mw_pix (np.ndarray): The synthesised MW pixel map.
-        """
-        filter = filters.filters_directional_vectorised(lmax, N_directions, lam = lam)
-        f_scal = ILC_trimmed_wav_maps[0]
-        ILC_trimmed_wav_maps = ILC_trimmed_wav_maps[1:]
-        mw_pix = s2wav.synthesis(ILC_trimmed_wav_maps, L = lmax, f_scal = f_scal, lam = lam, filters = filter, N = 1)
-        if visualise: 
-            title = f"Synthesized ILC MW Map at Realisation {realisation}"
-            MWTools.visualise_mw_map(MW_pix, title, method = method)
-        return mw_pix
 
 
 class ProduceSILC():
     """Perform  Scale-discretised, directional wavelet ILC (SILC)."""
-    def __init__(self, ilc_components: list, frequencies: list, realisations: int, lmax: int, synthesise = True, directory: str = "data/", method: str = "jax_cuda"):
+    def __init__(self, ilc_components: list, frequencies: list, realisations: int, lmax: int, 
+    N_directions: int = 1, lam: float = 2.0, synthesise = True, directory: str = "data/", method: str = "jax_cuda"):
         """
         Parameters:
             ilc_components (list): List of components to produce an ILC for.
@@ -354,6 +325,8 @@ class ProduceSILC():
         self.frequencies = frequencies
         self.realisations = realisations
         self.lmax = lmax
+        self.N_directions = N_directions  
+        self.lam = lam
         self.synthesise = synthesise
         self.directory = directory
         self.method = method
@@ -365,15 +338,15 @@ class ProduceSILC():
 
         self.ilc_wavelet_paths = {} 
         for comp in self.ilc_components:
-            self.ilc_wavelet_paths[comp] = os.path.join(wavelet_map_directories, f"{comp}_wavelet_f{{frequency}}_s{{scale}}_r{{realisation:05d}}_lmax{{lmax}}.npy")
+            self.ilc_wavelet_paths[comp] = os.path.join(wavelet_map_directories, f"{{comp}}_wavelet_f{{frequency}}_s{{scale}}_r{{realisation:05d}}_lmax{{lmax}}.npy")
 
         silc_output_dir = {
             "doubled_maps": os.path.join(output_dir, "doubled_maps"),
             "covariance_matrix": os.path.join(output_dir, "covariance_matrix"),
             "weight_vector_data": os.path.join(output_dir, "weight_vector_data"),
-            "ILC_doubled_wavelet_maps": os.path.join(output_dir, "ILC_doubled_wavelet_maps"),
-            "ILC_trimmed_maps": os.path.join(output_dir, "trimmed_ILC_maps"),
-            "ILC_synthesised_maps": os.path.join(output_dir, "ILC_synthesised_maps"),
+            "ilc_doubled_wavelet_maps": os.path.join(output_dir, "ilc_doubled_wavelet_maps"),
+            "ilc_trimmed_maps": os.path.join(output_dir, "ilc_trimmed_maps"),
+            "ilc_synthesised_maps": os.path.join(output_dir, "ilc_synthesised_maps"),
         }
         for _, value in silc_output_dir.items():
             create_dir(value)
@@ -382,15 +355,15 @@ class ProduceSILC():
         self.output_paths = {
             'doubled_maps': os.path.join(silc_output_dir["doubled_maps"], "doubled_maps_F{frequency}_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
             'covariance_matrices': os.path.join(silc_output_dir["covariance_matrix"],"cov_MW_F{frequencies}_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'weight_vector_matrices': os.path.join(silc_output_dir["weight_vector_data"], "weight_{type}_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'ilc_doubled_maps': os.path.join(silc_output_dir["ILC_doubled_wavelet_maps"], "ILC_doubled_Map_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'ilc_trimmed_maps': os.path.join(silc_output_dir["ILC_trimmed_maps"], "ILC_trimmed_wav_Map_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'ilc_synthesised_maps': os.path.join(silc_output_dir["ILC_synthesised_maps"], "ILC_synthesised_Map_R{realisation:04d}_lmax{lmax}.npy"),
+            'weight_vector_matrices': os.path.join(silc_output_dir["weight_vector_data"], "weight_vector_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
+            'ilc_doubled_maps': os.path.join(silc_output_dir["ilc_doubled_wavelet_maps"], "ILC_doubled_Map_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
+            'ilc_trimmed_maps': os.path.join(silc_output_dir["ilc_trimmed_maps"], "ILC_trimmed_wav_Map_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
+            'ilc_synthesised_maps': os.path.join(silc_output_dir["ilc_synthesised_maps"], "ILC_synthesised_Map_R{realisation:04d}_lmax{lmax}.npy"),
         }
 
         self.scales = detect_scales(
             directory=wavelet_map_directories,
-            comp=self.components[0],  # Assuming all components have the same scales
+            comp=self.ilc_components[0],  # Assuming all components have the same scales
             realisation=0,  # Use a dummy realisation to detect scales
             pad=5
         )
@@ -410,74 +383,98 @@ class ProduceSILC():
         scales = self.scales # assuming all components have the same scales
         method = self.method
         lmax = self.lmax
-
+        L = self.lmax + 1 
+        N_directions = self.N_directions
+        lam = self.lam
         for comp in self.ilc_components:
             for realisation in range(self.realisations):
                 print(f"Processing realisation {realisation} for component {comp}...")
-                path_test = self.output_paths['trimmed_maps'].format(scale=scales[-1], realisation=realisation, lmax=lmax)
+                path_test = self.output_paths['ilc_synthesised_maps'].format(realisation=realisation, lmax=lmax)
                 if os.path.exists(path_test):
-                        print(f"File {path_test} already exists.")
-                        continue
-                else:
-                    original_wavelet_c_j = SILCTools.load_frequency_data(self.directory, self.ilc_wavelet_paths[comp], frequencies, scales, realisation, lmax)
-                
-                # Double the resolution of the wavelet maps
-                doubled_MW_wav_c_j = SILCTools.double_and_save_wavelet_maps(original_wavelet_c_j, frequencies, scales, realisation, method = method)
-                if save_intermediates:
-                    for i in frequencies:
-                        for j in scales:
-                            np.save(self.output_paths['doubled_maps'].format(frequency=i, scale=j, realisation=realisation, lmax = lmax), doubled_MW_wav_c_j[(i, j)])
-                            print(f"Saved doubled map for frequency {i}, scale {j}, realisation {realisation}.")
-                
-            
-                # Calculate the covariance matrices for each scale
-                for scale in scales:   
-                    R_covariance = SILCTools.calculate_covariance_matrix(frequencies, doubled_MW_wav_c_j, scale, realisation, method = method)
-                    if save_intermediates:
-                        f_str = '_'.join(frequencies)
-                        np.save(self.output_paths['covariance_matrices'].format(frequencies=f_str, scale=scale, realisation=realisation, lmax = lmax), R_covariance[i])
-                        print(f"Saved covariance matrix for scale {i}, realisation {realisation}.")
+                    print(f"File {path_test} already exists. Skipping to the next realisation.")
+                    continue
 
-                # Calculate the weight vectors for each frequency wavelet coefficient map using covariance matrix and the euqation.
+                # Load original wavelet maps
+                original_wavelet_c_j = SILCTools.load_frequency_data(self.ilc_wavelet_paths[comp], comp, frequencies, scales, realisation, lmax)
+                # Double the resolution of the wavelet maps
+                doubled_MW_wav_c_j = {}
+                for i in frequencies:
+                    for j in scales:
+                        doubled_map_path = self.output_paths['doubled_maps'].format(frequency=i, scale=j, realisation=realisation, lmax=lmax)
+                        if os.path.exists(doubled_map_path):
+                            doubled_MW_wav_c_j[(i, j)] = np.load(doubled_map_path)
+                            print(f"Doubled map for frequency {i}, scale {j} already exists. Skipping doubling.")
+                        else:
+                            doubled_MW_wav_c_j[(i, j)] = SILCTools.Single_Map_doubleworker(original_wavelet_c_j[(i, j)], method)
+                            if save_intermediates:
+                                np.save(doubled_map_path, doubled_MW_wav_c_j[(i, j)])
+                                print(f"Saved doubled map for frequency {i}, scale {j}.")
+
+                # Calculate the covariance matrices for each scale
+                R_covariance = {}
+                for scale in scales:
+                    covariance_path = self.output_paths['covariance_matrices'].format(frequencies='_'.join(frequencies), scale=scale, realisation=realisation, lmax=lmax)
+                    if os.path.exists(covariance_path):
+                        print(f"Covariance matrix for scale {scale}, realisation {realisation} already exists. Skipping covariance calculation.")
+                        R_covariance[scale] = np.load(covariance_path)
+                    else:
+                        R_covariance[scale] = SILCTools.calculate_covariance_matrix(frequencies, doubled_MW_wav_c_j, scale, realisation, method)
+                        if save_intermediates:
+                            np.save(covariance_path, R_covariance[scale])
+                            print(f"Saved covariance matrix for scale {scale}, realisation {realisation}.")
+                # Calculate the weight vectors for each scale
                 weight_vectors = []
                 for scale in scales:
-                    # print(scale)
-                    weight_vector_scale = SILCTools.compute_weight_vector(R_covariance[scale], scale, realisation)
-                    weight_vectors.append(weight_vector_scale)
-                    if save_intermediates:
-                        np.save(self.output_paths['weight_vector_matrices'].format(type='weight_vector', scale=scale, realisation=realisation, lmax=lmax), weight_vector_scale)
-                        print(f"Saved weight vector for scale {scale}, realisation {realisation}.")
+                    weight_vector_path = self.output_paths['weight_vector_matrices'].format(scale=scale, realisation=realisation, lmax=lmax)
+                    if os.path.exists(weight_vector_path):
+                        print(f"Weight vector for scale {scale}, realisation {realisation} already exists. Skipping weight vector calculation.")
+                        weight_vectors.append(np.load(weight_vector_path))
+                    else:
+                        weight_vector_scale = SILCTools.compute_weight_vector(R_covariance[scale], scale, realisation)
+                        weight_vectors.append(weight_vector_scale)
+                        if save_intermediates:
+                            np.save(weight_vector_path, weight_vector_scale)
+                            print(f"Saved weight vector for scale {scale}, realisation {realisation}.")
 
-                doubled_maps = []
                 # Create the doubled resolution ILC map for each scale
+                doubled_maps = []
                 for scale in scales:
-                    doubled_map_scale = SILCTools.create_doubled_ILC_map(frequencies, scale, weight_vectors, doubled_MW_wav_c_j, realisation=realisation)
-                    doubled_maps.append(doubled_map_scale)
-                    if save_intermediates:
-                        np.save(self.output_paths['ilc_doubled_maps'].format(scale=scale, realisation=realisation, lmax=lmax), doubled_map_scale)
-                        print(f"Saved ILC map for scale {scale}, realisation {realisation}.")
-                
-                trimmed_maps = [] 
+                    ilc_doubled_map_path = self.output_paths['ilc_doubled_maps'].format(scale=scale, realisation=realisation, lmax=lmax)
+                    if os.path.exists(ilc_doubled_map_path):
+                        print(f"ILC doubled map for scale {scale}, realisation {realisation} already exists. Skipping ILC map creation.")
+                        doubled_maps.append(np.load(ilc_doubled_map_path))
+                    else:
+                        doubled_map_scale = SILCTools.create_doubled_ILC_map(frequencies, scale, weight_vectors, doubled_MW_wav_c_j, realisation)
+                        doubled_maps.append(doubled_map_scale)
+                        if save_intermediates:
+                            np.save(ilc_doubled_map_path, doubled_map_scale)
+                            print(f"Saved ILC doubled map for scale {scale}, realisation {realisation}.")
+
+                # Trim the doubled resolution ILC map back to its original resolution
+                trimmed_maps = []
                 for i, scale in enumerate(scales):
-                    # Trim the doubled resolution ILC map back to its original resolution
-                    trimmed_map = SILCTools.trim_to_original(doubled_maps[i], scale, realisation, method = method)
-                    trimmed_maps.append(trimmed_map)
-                    np.save(self.output_paths['ilc_trimmed_maps'].format(scale=scale, realisation=realisation, lmax=lmax), trimmed_map)
-                    print(f"Saved trimmed map for scale {scale}, realisation {realisation}.")
-                
+                    ilc_trimmed_map_path = self.output_paths['ilc_trimmed_maps'].format(scale=scale, realisation=realisation, lmax=lmax)
+                    if os.path.exists(ilc_trimmed_map_path):
+                        print(f"ILC trimmed map for scale {scale}, realisation {realisation} already exists. Skipping trimming.")
+                        trimmed_maps.append(np.load(ilc_trimmed_map_path))
+                    else:
+                        trimmed_map = SILCTools.trim_to_original(doubled_maps[i], scale, realisation, method)
+                        trimmed_maps.append(trimmed_map)
+                        np.save(ilc_trimmed_map_path, trimmed_map)
+                        print(f"Saved trimmed map for scale {scale}, realisation {realisation}.")
 
-                if visualise: 
-                    for i in range(len(scales)):
-                        tilte = "ILC wavelet coefficient map at scale: "
-                        MWTools.visualise_mw_map(mw_map=trimmed_map, title=tilte + str(scales[i]), method = method)
-
+                # Synthesise the ILC map from the trimmed wavelet maps
                 if self.synthesise:
-                    # Synthesise the ILC map from the trimmed wavelet maps
-                    mw_pix = SILCTools.synthesise_ilc_scales(trimmed_maps, realisation, scales, lmax, visualise=visualise, method = method)
-                    np.save(self.output_paths['ilc_synthesised_maps'].format(realisation=realisation, lmax=lmax), mw_pix)
-                    print(f"Saved synthesised ILC map for realisation {realisation}.")
+                    ilc_synthesised_map_path = self.output_paths['ilc_synthesised_maps'].format(realisation=realisation, lmax=lmax)
+                    if os.path.exists(ilc_synthesised_map_path):
+                        print(f"ILC synthesised map for realisation {realisation} already exists. Skipping synthesis.")
+                    else:
+                        mw_pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions, lam)
+                        np.save(ilc_synthesised_map_path, mw_pix)
+                        print(f"Saved synthesised ILC map for realisation {realisation}.")
                     
-                return trimmed_maps
+        return None
 
 
-
+# ilc_producer = ProduceSILC(ilc_components = ["cfn"], frequencies = ["030", "070"], realisations=1, lmax=1024, directory="/Scratch/matthew/data/", synthesise=True, method="jax_cuda")
+# ilc_producer.process_wavelet_maps(save_intermediates=True, visualise=False)

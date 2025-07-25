@@ -9,7 +9,7 @@ class DownloadData():
     def __init__(self, components: list, frequencies: list, realisations: int, directory: str = "data/", noise: bool = True): 
         """
         Parameters: 
-            components (list): List of foreground components to download. Includes: 'sync' (synchrotron)
+            components (list): List of components to download. Includes: 'cmb', 'sync', 'dust' (synchrotron)
             directory (str): Directory to save the downloaded data.
             frequencies (list): Frequencies of the data to be downloaded.
             realisations (int): Number of realisations to download.
@@ -24,11 +24,12 @@ class DownloadData():
         output_dir = os.path.join(directory, "CMB_realisations/")
         create_dir(output_dir)
         base_url = "http://pla.esac.esa.int/pla/aio/"
-        # create dictionary where key is component and value is a list of [template, realisation_digit, filename]
+        # create dictionary where key is component and value is a list of [template, filename]
         self.component_templates = {
             "sync": [os.path.join(base_url, "product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits"),
-                      os.path.join(output_dir, "sync_f{frequency}.fits")]
-
+                      os.path.join(output_dir, "sync_f{frequency}.fits")],
+            "dust": [os.path.join(base_url, "product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermaldust-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits"),
+                     os.path.join(output_dir, "dust_f{frequency}.fits")],
         }
         # realisation digit is the number of digits in the realisation number, e.g. 4 for 0001, 0002, etc.
         if noise:
@@ -63,7 +64,6 @@ class DownloadData():
 
         # Format the URL with the current frequency and realisation
         url = template.format(frequency=frequency, realisation=realisation)
-        print(url)
         # Send a GET request to the URL
         response = requests.get(url)
         # Check if the request was successful
@@ -73,7 +73,7 @@ class DownloadData():
                 f.write(response.content)
             print(f"Downloaded {component} data for frequency {frequency}.")
         else:
-            print(f"Failed to download {component} data for frequency {frequency}. Status code: {response.status_code}")
+            raise ValueError(f"Failed to download {component} data for frequency {frequency}. Status code: {response.status_code}")
     def download_cmb_spectrum(self):
         # UNFINISHED, right now, just use data/cmb_spectrum.txt
         pass
@@ -111,7 +111,7 @@ class DownloadData():
         # Download foreground, which have only one realisation.
         print("Downloading foreground components...")
         for component in self.components:
-            if component == "noise":
+            if component == "cmb":
                 continue
             else:
                 for frequency in self.frequencies:
@@ -125,11 +125,11 @@ class DownloadData():
                 for frequency in self.frequencies:
                     self.download_foreground_component("noise", frequency, realisation)
 
-components = ["sync"]
-frequencies = ["030", "044"]
-realisations = 2
-downloader = DownloadData(components, frequencies, realisations, directory = "/Scratch/matthew/data/", noise=True)
-downloader.download_all()
+# components = ["sync", "dust"]
+# frequencies = ["030", "070", "143", "217", "353"]
+# realisations = 2
+# downloader = DownloadData(components, frequencies, realisations, directory = "/Scratch/matthew/data/", noise=True)
+# downloader.download_all()
 
 
 
