@@ -11,7 +11,7 @@ import healpy as hp
 
 class SILCTools():
     @staticmethod
-    def Single_Map_doubleworker(mw_map, method):
+    def Single_Map_doubleworker(mw_map: np.ndarray, method: str):
         """
         Doubles the resolution of a single MW pixel map using s2fft.
 
@@ -25,7 +25,7 @@ class SILCTools():
         
         # use jax/numpy
         #print(mw_map.shape)
-        alm = s2fft.forward(mw_map, L=mw_map.shape[1], method = method, spmd = False)
+        alm = s2fft.forward(mw_map, L=mw_map.shape[1], method = method, spmd = False, reality = False)
 
         L = alm.shape[0]
         H = 2*L - 1
@@ -36,12 +36,12 @@ class SILCTools():
         start = mid_out - mid_in
         padded[:L, start:start+alm.shape[1]] = alm
 
-        x2 = np.real(s2fft.inverse(padded, L=H, method = method, spmd = False))
+        x2 = np.real(s2fft.inverse(padded, L=H, method = method, spmd = False, reality = False))
 
         return x2
 
     @staticmethod
-    def calculate_covariance_matrix(frequencies, doubled_MW_wav_c_j, scale, realisation, method):
+    def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int, realisation: int, method: str):
         """
         Calculates the covariance matrices for given frequencies and saves them to disk,
         accommodating any size of the input data arrays.
@@ -85,10 +85,10 @@ class SILCTools():
         return full_array
 
     @staticmethod
-    def smoothed_covariance(MW_Map1, MW_Map2, method):
+    def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method: str):
         """
         Parameters:
-            MW_Map1, MW_Map2: same‐shape complex np.ndarray wavelet maps
+            MW_Map1, MW_Map2 (np.ndarray): same‐shape complex np.ndarray wavelet maps
 
         Returns:
             R_covariance_map: real‐valued covariance map as np.ndarray
@@ -100,7 +100,7 @@ class SILCTools():
         Rpix = np.multiply(map1, map2) + 0.j
 
         # 2) forward (smooth in harmonic space for efficieny)
-        Ralm = s2fft.forward(Rpix, L=smoothing_L, method = method, spmd = False)
+        Ralm = s2fft.forward(Rpix, L=smoothing_L, method = method, spmd = False, reality = False)
 
         # 3) Gaussian beam
         nsamp = 1200.0
@@ -113,12 +113,12 @@ class SILCTools():
         convolved = np.zeros_like(Ralm, dtype=np.complex128)
         convolved = Ralm * gauss_beam[:,None]
         # 5) inverse
-        Rmap = np.real(s2fft.inverse(convolved, L=smoothing_L, method = method, spmd = False))
+        Rmap = np.real(s2fft.inverse(convolved, L=smoothing_L, method = method, spmd = False, reality = False))
 
         return Rmap
 
     @staticmethod
-    def double_wavelet_maps(original_wavelet_c_j, frequencies, scales, realisation, method):
+    def double_wavelet_maps(original_wavelet_c_j: dict, frequencies: list, scales: list, realisation: int, method: str):
         """
         Doubles the resolution of wavelet maps and returns them as a dictionary.
 
@@ -141,7 +141,7 @@ class SILCTools():
         return doubled_MW_wav_c_j
 
     @staticmethod
-    def compute_weight_vector(R,scale,realisation):
+    def compute_weight_vector(R: np.ndarray, scale: int, realisation: int):
         """
         Processes the given 4D matrix R by computing and saving the weight vectors for each matrix in the first two dimensions.
         Also stores results in memory as arrays and saves them to disk. Adjusts the size of the identity vector based on sub-matrix size.
@@ -176,79 +176,47 @@ class SILCTools():
             for j in range(dim2):
                 det = np.linalg.det(R_Pix[i, j])
                 if det == 0:
-                    #print(R_Pix[i, j])
-                    #print(f"Pixel {i,j} matrix is singular (scale {scale}, realisation {realisation}).")
                     zeros = np.zeros((subdim1))
-
                     singular_matrices_location.append((i,j))
                     singular_matrices.append(R_Pix[i, j])
                     weight_vectors[i, j] = zeros
-                    
                 else:
-                    # print("The matrix is not singular.")
-                    # Invert the matrix at position (i, j)
                     inverses[i, j] = np.linalg.inv(R_Pix[i, j])
-                
-                    # Compute the weight vector
                     numerator = np.dot(inverses[i, j], identity_vector)
                     denominator = np.dot(np.dot(inverses[i, j], identity_vector),identity_vector)
                     weight_vectors[i, j] = numerator / denominator
-
+        if len(singular_matrices_location) > 0:
+            print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
         return weight_vectors
     
     @staticmethod
-    def compute_ILC_for_pixel(i, j, frequencies, scale, weight_vector_load, doubled_MW_wav_c_j):
+    def create_doubled_ILC_map(frequencies, scale, weight_vector, doubled_MW_wav_c_j):
         """
-        Computes the Internal Linear Combination (ILC) value for a specific pixel using the provided wavelet coefficients and weight vectors.
+        Builds a single (H,W,F) array of wavelet coefficients,
+        then does one broadcasted multiply+sum per scale.
 
         Parameters:
-            i (int): The row index of the pixel in the map.
-            j (int): The column index of the pixel in the map.
-            frequencies (list): A list of frequency identifiers corresponding to different channels.
-            scale (int): The scale of the wavelet coefficient map.
-            weight_vector_load (list): A list where each element corresponds to the weight vector map at a scale.
-            doubled_MW_wav_c_j (dict): A dictionary with keys as tuples of (frequency, scale) and values as 2D arrays of wavelet coefficients for each pixel.
+            frequencies (list): List of frequency bands.
+            scale (int): Wavelet scale.
+            weight_vector (np.ndarray): Weight vector for the ILC at given scale.
+            doubled_MW_wav_c_j (dict): Dictionary of doubled MW wavelet coefficients.
 
         Returns:
-            float: The ILC value computed for the pixel at position (i, j).
+            np.ndarray: The doubled ILC map for the given scale.
         """
-        # Create a vector of pixel values of all frequencies at the given pixel position
-        pix_vector = np.array([
-            doubled_MW_wav_c_j[(frequencies[k], scale)][i, j] for k in range(len(frequencies))
-        ])
-        return np.dot(weight_vector_load[scale][i, j], pix_vector)
+        wav_coeffs = np.stack(
+            [doubled_MW_wav_c_j[(f, scale)] for f in frequencies],
+            axis=-1
+        )  # shape = (H, W, F)
 
-    @staticmethod
-    def create_doubled_ILC_map(frequencies, scale, weight_vector_load, doubled_MW_wav_c_j, realisation):
-        
-        """
-        Creates a doubled Internal Linear Combination (ILC) map for a given scale and realisation.
-        Doubled because the resolution of the wavelet coefficient map is doubled.
-        
-        Parameters:
-            frequencies (list): A list of frequency identifiers corresponding to different channels.
-            scale (int): The wavelet coefficient scale.
-            weight_vector_load (list): A list where each element corresponds to the weight vector map at a scale.
-            doubled_MW_wav_c_j (dict): A dictionary with keys as tuples of (frequency, scale) and values as 2D arrays of wavelet coefficients for each pixel.
-            realisation (int): The realisation index used for saving the resulting ILC map.
+        # 2) do the ILC multiply & sum over frequency axis.
+        doubled_map = np.sum(weight_vector[scale] * wav_coeffs, axis=-1)
 
-        Returns:
-            doubled_map (np.ndarray): The generated ILC map as a 2D numpy array.
-        """
-        # Get the size of the wavelet map
-        size = doubled_MW_wav_c_j[(frequencies[0],scale)].shape
-        
-        # Initialize the doubled map
-        doubled_map = np.zeros((size[0], size[1]))
-        
-        # Compute the ILC value for each pixel in the map
-        for i in range(doubled_map.shape[0]):
-            for j in range(doubled_map.shape[1]):
-                doubled_map[i, j] = SILCTools.compute_ILC_for_pixel(i, j, frequencies, scale,weight_vector_load, doubled_MW_wav_c_j)
         return doubled_map
 
+
     @staticmethod
-    def trim_to_original(MW_Doubled_Map, scale, realisation, method):
+    def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str):
         """
         Trim a doubled‐resolution MW Pixel map back to its original resolution,
         using either NumPy or PyTorch spherical transforms.
@@ -270,12 +238,12 @@ class SILCTools():
         end_col = start_col + inner_h
         # numpy pathway
         # forward
-        alm_doubled = s2fft.forward(MW_Doubled_Map, L=L2, method = method, spmd = False)
+        alm_doubled = s2fft.forward(MW_Doubled_Map, L=L2, method = method, spmd = False, reality = False)
 
         # trim
         trimmed_alm = alm_doubled[:inner_v, start_col:end_col]
         # inverse
-        pix = s2fft.inverse(trimmed_alm, L=inner_v, method = method, spmd = False)
+        pix = s2fft.inverse(trimmed_alm, L=inner_v, method = method, spmd = False, reality = False)
         mw_map_original = pix[np.newaxis, ...]
 
         return mw_map_original
@@ -379,6 +347,7 @@ class ProduceSILC():
         Returns:
             None
         """
+        ### UNFINISHED TASK: CHECK PROCESS WORKS FOR N_DIRECTIONS>1
         frequencies = self.frequencies
         scales = self.scales # assuming all components have the same scales
         method = self.method
@@ -409,7 +378,6 @@ class ProduceSILC():
                             if save_intermediates:
                                 np.save(doubled_map_path, doubled_MW_wav_c_j[(i, j)])
                                 print(f"Saved doubled map for frequency {i}, scale {j}.")
-
                 # Calculate the covariance matrices for each scale
                 R_covariance = {}
                 for scale in scales:
@@ -435,7 +403,6 @@ class ProduceSILC():
                         if save_intermediates:
                             np.save(weight_vector_path, weight_vector_scale)
                             print(f"Saved weight vector for scale {scale}, realisation {realisation}.")
-
                 # Create the doubled resolution ILC map for each scale
                 doubled_maps = []
                 for scale in scales:
@@ -444,7 +411,7 @@ class ProduceSILC():
                         print(f"ILC doubled map for scale {scale}, realisation {realisation} already exists. Skipping ILC map creation.")
                         doubled_maps.append(np.load(ilc_doubled_map_path))
                     else:
-                        doubled_map_scale = SILCTools.create_doubled_ILC_map(frequencies, scale, weight_vectors, doubled_MW_wav_c_j, realisation)
+                        doubled_map_scale = SILCTools.create_doubled_ILC_map(frequencies, scale, weight_vectors, doubled_MW_wav_c_j)
                         doubled_maps.append(doubled_map_scale)
                         if save_intermediates:
                             np.save(ilc_doubled_map_path, doubled_map_scale)

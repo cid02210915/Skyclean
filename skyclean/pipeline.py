@@ -23,6 +23,8 @@ class Pipeline:
             visualise (bool): Whether to visualise the wavelet transforms.
             directory (str): Directory where data is stored / saved to.
         """
+        ## Note: a further OOP abstraction task is to pass the file templates into 
+        ## each class rather than defining them in each initialisation. 
         self.components = components
         self.wavelet_components = wavelet_components
         self.ilc_components = ilc_components
@@ -63,17 +65,17 @@ class Pipeline:
         end_time = time.perf_counter()
         print(f"PIPELINE COMPLETED SUCCESFULLY IN {end_time - start_time} SECONDS!")
 
-components = ["cmb", "sync", "dust"]
+components = ["cmb", "sync"]
 wavelet_components = ["cfn"]
 ilc_components = ["cfn"]
-frequencies = ["030", "044", "070"]
+frequencies = ["030", "044"]
 realisations = 1
 N_directions = 1
-lam = 4.0
+lam = 4
 lmax = 1024
 N_directions = 1 
 method = "jax_cuda"
-noise = True
+noise = False
 visualise = False
 save_ilc_intermediates = False
 

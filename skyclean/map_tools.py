@@ -108,9 +108,9 @@ class MWTools():
     """Tools to process maps in MW (McEwen & Wiaux) sampling"""
 
     @staticmethod
-    def wavelet_transform(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0,):
+    def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0,):
         """
-        Performs a wavelet transform on a MW map using the S2WAV library.   
+        Performs a wavelet transform on MW map using the S2WAV library.   
 
         Parameters: 
             mw_map (jnp.ndarray): The input MW map to be transformed.
@@ -123,6 +123,7 @@ class MWTools():
         """
         # default JAX path
         j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
+        
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
             mw_map,
             N       = N_directions,
@@ -131,13 +132,41 @@ class MWTools():
             filters = j_filter,
             reality = False,
         )
-        #scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
-
+    
     @staticmethod
-    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0, visualise: bool = False):
+    def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
+        """
+        Performs a wavelet transform on MW alm using the S2WAV library.
+
+        Parameters:
+            mw_alm (jnp.ndarray): The input MW alm to be transformed.
+            L (int): Maximum multipole moment for the wavelet transform; lmax+1.
+            N_directions (int): Number of directions for the wavelet transform.
+            lam (float, optional): Wavelet parameter, default is 2.0.
+
+        Returns:
+            tuple: A tuple containing the wavelet coefficients and scaling coefficients.
+        """
+        j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
+        # remove the last filter (temporary)
+        wavelet_coeffs, scaling_coeffs = s2wav.flm_to_analysis(
+            mw_alm,
+            N       = N_directions,
+            L       = L,
+            lam     = lam,
+            filters = j_filter,
+            reality = False,
+        )
+        scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
+        scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
+        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        return wavelet_coeffs, scaling_coeffs
+    
+    @staticmethod
+    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0,):
         """
         Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
 
@@ -146,7 +175,6 @@ class MWTools():
             L (int): Maximum multipole moment for the wavelet transform; lmax+1.
             N_directions (int, options): Number of directions for the wavelet transform, default is 1.
             lam (float, optional): Wavelet parameter, default is 2.0.
-            visualise (bool, optional): Whether to visualize the MW map, default is False.
 
         Returns:
             jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
@@ -163,9 +191,6 @@ class MWTools():
             reality = False,
             N = N_directions
         )
-        if visualise: 
-            title = f"Synthesized ILC MW Map at Realisation {realisation}"
-            MWTools.visualise_mw_map(mw_map, title, method = method)
         return mw_map
 
     @staticmethod
@@ -215,7 +240,7 @@ class MWTools():
         return wavelet_coeffs, scaling_coeffs
     
     @staticmethod
-    def visualise_mw_map(mw_map: np.ndarray, title: str, coord: list = ["G"], unit: str = r"K", method = "jax_cuda"):
+    def visualise_mw_map(mw_map: np.ndarray, title: str = None, coord: list = ["G"], unit: str = r"K", directional: bool = False, method = "jax_cuda",):
         """
         Visualizes a MW pixel wavelet coefficient map using HEALPix mollview.
 
@@ -223,29 +248,63 @@ class MWTools():
             mw_map (numpy array): Array representing the wavelet coefficient map.
             title (str): Title for the visualization plot.  
             coord (list): List of coordinate systems to use for the visualization.
+            directional (bool): If plotting wavelet transform maps, set to True (even if N_directions = 1). If plotting normal MW maps, set to False. 
             unit (str): Unit of the map data, default is Kelvin (K).  
-        """  
-        nrows = 1
-        ncols = mw_map.shape[0]
-        fig = plt.figure(figsize=(5*ncols, 5*nrows))
-        
-        lmax = mw_map.shape[1]
-        for i in range(ncols):
-            original_map_alm = s2fft.forward(mw_map[i], L=lmax, method = method)
-            #print("ME alm shape:", original_map_alm.shape)
-            original_map_hp_alm = mw_alm_2_hp_alm(original_map_alm)
-            original_hp_map = hp.alm2map(original_map_hp_alm, nside=lmax//2)
-            panel = i + 1
+        """
+        if directional:
+            nrows = 1
+            ncols = mw_map.shape[0] # number of directions
+            fig = plt.figure(figsize=(5*ncols, 5*nrows))
+            
+            lmax = mw_map.shape[1] - 1
+            for i in range(ncols):
+                hp_map = SamplingConverters.mw_map_2_hp_map(mw_map[i], lmax, method=method)
+                panel = i + 1
+                hp.mollview(
+                    hp_map,
+                    coord=coord,
+                    title=title+f", dir {i+1}",
+                    unit=unit,
+                    fig = fig.number,
+                    sub = (nrows, ncols, panel)
+                    # min=min, max=max,  # Uncomment and adjust these as necessary for better visualization contrast
+                )
+                # plt.figure(dpi=1200)
+        else:
+            lmax = mw_map.shape[0] - 1
+            hp_map = SamplingConverters.mw_map_2_hp_map(mw_map, lmax, method=method)
             hp.mollview(
-                original_hp_map,
+                hp_map,
                 coord=coord,
-                title=title+f", dir {i+1}",
+                title=title,
                 unit=unit,
-                fig = fig.number,
-                sub = (nrows, ncols, panel)
                 # min=min, max=max,  # Uncomment and adjust these as necessary for better visualization contrast
-            )
-            # plt.figure(dpi=1200)
+            )                                           
+        plt.savefig(f'{title}')
+        plt.show()
+    
+    @staticmethod
+    def plot_axisym_wavelets(L: int, lam: float = 2.0):
+        """
+        Plots the wavelet filters for the given parameters.
+        Only works for axisymmetric wavelets (N_directions = 1).
+
+        Parameters:
+            L (int): Maximum multipole moment for the wavelet transform; lmax+1
+            lam (float): Wavelet parameter, default is 2.0. 
+        """
+        j_filter = filters.filters_directional_vectorised(L=L, N=1, lam=lam)[0]
+        shape = j_filter.shape
+        l_list = np.arange(L)
+        middle_m = shape[2]//2 # m = 0 along which the axisymmetric wavelet is defined
+        for i in range(shape[0]):
+            plt.plot(l_list, np.real(j_filter[i][:,middle_m]), label = f"scale {i}")
+            plt.xlabel("l", fontsize=16)
+            plt.ylabel("Real part of wavelet filter", fontsize=16)
+            plt.title(f"$m=0$, $\lambda = {lam}$ axisymmetric")
+            plt.xscale('log')
+            plt.legend()
+            plt.grid(ls=':')
         plt.show()
 
 class SamplingConverters():
@@ -302,7 +361,7 @@ class SamplingConverters():
         Returns:
             hp_alm (numpy.ndarray): 1D array of healpy spherical harmonics coefficients
         """
-        L = mw_alm.shape[0]
+        L = mw_alm.shape[0] 
         lmax = L-1 # lmax as defined in healpy sampling
         hp_alm = np.zeros(hp.Alm.getsize(lmax), np.complex128)
         for l in range(L):
@@ -327,9 +386,9 @@ class SamplingConverters():
         L = lmax + 1
         hp_alm = hp.map2alm(hp_map, lmax=lmax)
         mw_alm = SamplingConverters.hp_alm_2_mw_alm(hp_alm, lmax)
-        mw_map = s2fft.inverse(mw_alm, L=L, method=method)
-        return mw_alm
-
+        mw_map = s2fft.inverse(mw_alm, L=L, method=method, reality = False)
+        return mw_map
+    
     @staticmethod
     def mw_map_2_hp_map(mw_map: np.ndarray, lmax: int, method = "jax_cuda"):
         """
@@ -342,8 +401,8 @@ class SamplingConverters():
         Returns:
             hp_map (numpy.ndarray): The converted Healpix map.
         """
-        L = lmax 
-        mw_alm = s2fft.forward(mw_map, L=L, method=method)
+        L = lmax + 1 
+        mw_alm = s2fft.forward(mw_map, L=L, method=method, reality = False)
         hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm)
         hp_map = hp.alm2map(hp_alm, nside=lmax//2)
         return hp_map

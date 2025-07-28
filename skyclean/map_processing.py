@@ -63,13 +63,6 @@ class ProcessMaps():
         Returns:
             np.ndarray: The CFN map in HP format.
         """
-        def save_map(hp_map, filepath):
-            """Save the processed map to the specified filepath."""
-            if save:
-                if os.path.exists(filepath):
-                    print(f"File {filepath} already exists. Skipping saving.")
-                else:
-                    hp.write_map(filepath, hp_map)
         desired_lmax = self.desired_lmax
         standard_fwhm_rad = np.radians(5/60)
         nside = desired_lmax // 2 # desired n
@@ -145,11 +138,11 @@ class ProcessMaps():
             print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation + 1} already exist. Skipping generation.")
             return None
         hp_map = hp.read_map(filepath)
-        mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax)
-        wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform(mw_map, L=lmax, N_directions=N_directions, lam=lam)
+        L = lmax + 1
+        mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method = method)
+        MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)
+        wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=N_directions, lam=lam)
         MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, realisation, lmax, wavelet_coeffs_path, scaling_coeffs_path)
-        if visualise:
-            MWTools.visualise_mw_map(mw_map, title=f"{comp} map at {frequency} GHz", coord=["G"], unit="K", method=method)
         return wavelet_coeffs, scaling_coeffs
     
 
@@ -173,7 +166,7 @@ class ProcessMaps():
                     self.create_wavelet_transform(comp, frequency, realisation, N_directions=N_directions, lam=lam, method=method, visualise=visualise)
                     print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation + 1} saved.")
 
-# processor = ProcessMaps(components=["cmb", "dust", "sync"], wavelet_components=["cfn"], frequencies = ["030", "070", "143", "217", "353"], realisations=2, desired_lmax=1024, directory="/Scratch/matthew/data/")
+# processor = ProcessMaps(components=["cmb", "sync"], wavelet_components=["cfn"], frequencies = ["030", "044"], realisations=0, desired_lmax=256, directory="/Scratch/matthew/data/")
 # processor.produce_and_save_cfns()
 # processor.produce_and_save_wavelet_transforms(N_directions=1, lam=4.0, method="jax_cuda", visualise=False)
 

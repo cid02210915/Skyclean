@@ -232,8 +232,16 @@ class Visualise():
 
         plt.show()
     
-    @staticmethod
     def compute_and_save_ilc_power_spec(self, fp: str):
+        """
+        Compute and save the ILC power spectrum from the ILC map. 
+        This takes longer than hp maps since ILC  is in MW form and must be converted.
+        Parameters:
+            fp (str): File path to the ILC map.
+        
+        Returns:
+            cl (np.ndarray): The computed power spectrum.
+        """
         ilc_path = self.ilc_spectrum_output_path.format(realisation=self.realisation, lmax=self.lmax)
         # Recommended to run this first if computing ilc
         if os.path.exists(ilc_path):
@@ -241,10 +249,11 @@ class Visualise():
         else:
             print(f"Existing ILC power spec not found at {ilc_path}, computing now...")
             ilc_mw = np.load(fp)
-            hp_ilc = MW_to_hp_map(ilc_mw)*1E6  #
-            cl = hp.sphtfunc.anafast(hp_ilc, lmax=lmax)
-            cl /= hp.pixwin(hp.get_nside(hp_ilc), lmax=lmax)**2
-            np.save(self.ilc_output_path.format(realization=realization), cl)
+            hp_ilc = SamplingConverters.mw_map_2_hp_map(ilc_mw,self.lmax)*1E6  #
+            cl = hp.sphtfunc.anafast(hp_ilc, lmax=self.lmax)
+            nside = self.lmax // 2
+            cl /= hp.pixwin(nside, lmax=self.lmax)**2
+            np.save(self.ilc_spectrum_output_path.format(realisation=self.realisation, lmax = self.lmax), cl)
         return cl
 
     def visualise_power_spectra(self, comps = ['cmb', 'cfn', 'ilc']):
@@ -254,11 +263,7 @@ class Visualise():
         The ILC map is loaded only once (at the first frequency) via `if idx==0`.
 
         Parameters:
-            frequencies (list): List of frequency identifiers (e.g. ["030", "044"]).
-            realisation (int): The realisation number to visualise.
-            lmax (int): Maximum multipole for the power spectrum.
-            file_templates (dict): Mapping from component name to a Python format-string for its filename.
-            ilc_output_path (str, optional): Path to save the ILC map if needed.
+            comps (list): List of components to visualise. e.g. ['sync', 'cmb', 'noise'].
         """
         frequencies = self.frequencies
         realisation = self.realisation
@@ -310,7 +315,7 @@ class Visualise():
 
                 if comp == 'ilc_synthesised':
                     # load ILC only once at the first frequency
-                    cl = Visualise.compute_and_save_ilc_power_spec()
+                    cl = self.compute_and_save_ilc_power_spec(self.file_templates['ilc_synthesised'].format(lmax = lmax, realisation=realisation))
                 else:
                     hp_map, _ = hp.read_map(fp, h=True)
                     hp_map*=1E6
@@ -326,7 +331,7 @@ class Visualise():
                     color=color,
                     linewidth=1.5
                 )
-                #ax.set_ylim(1E3,1E6)
+                ax.set_ylim(5E3,1E5)
 
             ax.legend(title="Component", fontsize=10)
             ax.grid(True, which='both', linestyle=':', linewidth=0.5)
@@ -379,9 +384,9 @@ class Visualise():
                     realisation=realisation
                 )
             # --- load and compute spectrum for comp_a ---
-            if comp_a == 'ilc':
+            if comp_a == 'ilc_synthesised':
                 # load ILC only once at the first frequency
-                cl_a = compute_and_save_ilc_power_spec(fp_a)
+                cl_a = self.compute_and_save_ilc_power_spec(fp_a.format(lmax = lmax, realisation=realisation))
             else:
                 map_a = hp.read_map(fp_a)*1E6
                 cl_a = hp.sphtfunc.anafast(map_a, lmax=lmax)
@@ -392,17 +397,16 @@ class Visualise():
                     lmax=lmax,
                     realisation=realisation
                 )
-            if comp_b == 'ilc':
-                cl_b = compute_and_save_ilc_power_spec(fp_b)
+            if comp_b == 'ilc_synthesised':
+                cl_b = self.compute_and_save_ilc_power_spec(fp_b.format(lmax = lmax, realisation=realisation))
             else:
                 map_b = hp.read_map(fp_b, verbose=False)*1E6
                 cl_b = hp.sphtfunc.anafast(map_b, lmax=lmax)
             # --- ratio and plot ---
             ratio = cl_a / cl_b
             ax.plot(ell, ratio, linewidth=1.5)
-            ax.set_xscale('log')
             ax.set_xlim(1, lmax)
-            #ax.set_ylim(0.5,1.5)
+            ax.set_ylim(0.5,1.5)
             ax.set_xlabel(r'$\ell$', fontsize = 16)
             ax.set_ylabel("Ratio", fontsize = 16)
             ax.set_title(f"{freq} GHz")
@@ -414,7 +418,7 @@ class Visualise():
             ax.set_visible(False)
 
         plt.tight_layout()
-        plt.savefig('plots/component_ratio_power_spectra.pdf')
+        #plt.savefig('plots/component_ratio_power_spectra.pdf')
         plt.show()
 
     def visualise_freq_ratio_spectra(self, comps: str, freq1: str, freq2: str):
@@ -433,7 +437,7 @@ class Visualise():
         realisation = self.realisation
         lmax = self.lmax
         ell = np.arange(lmax+1)
-        n_comp = len(components)
+        n_comp = len(comps)
         ncols  = min(3, n_comp)
         nrows  = int(np.ceil(n_comp / ncols))
 
@@ -447,7 +451,7 @@ class Visualise():
             fontsize=20, fontweight='bold')
         axes_flat = axes.flatten()
 
-        for idx, comp in enumerate(components):
+        for idx, comp in enumerate(comps):
             ax = axes_flat[idx]
 
             # Load map at freq1
@@ -497,7 +501,7 @@ frequencies = ["030", "044"]
 realisation = 0
 lmax = 1024
 directory = "/Scratch/matthew/data/"
-map_comps = ["cmb", "sync", "dust", "cfn", "ilc_synthesised"]
+map_comps = ["cmb", "cfn", "ilc_synthesised"]
 
 visualiser = Visualise(
     frequencies=frequencies,
@@ -508,3 +512,5 @@ visualiser = Visualise(
 
 #visualiser.visualise_maps(map_comps)
 visualiser.visualise_power_spectra(map_comps)
+visualiser.visualise_component_ratio_power_spectra("cmb", "ilc_synthesised")
+
