@@ -321,12 +321,12 @@ class ProduceSILC():
         # Example usage
 
         self.output_paths = {
-            'doubled_maps': os.path.join(silc_output_dir["doubled_maps"], "doubled_maps_F{frequency}_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'covariance_matrices': os.path.join(silc_output_dir["covariance_matrix"],"cov_MW_F{frequencies}_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'weight_vector_matrices': os.path.join(silc_output_dir["weight_vector_data"], "weight_vector_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'ilc_doubled_maps': os.path.join(silc_output_dir["ilc_doubled_wavelet_maps"], "ILC_doubled_Map_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'ilc_trimmed_maps': os.path.join(silc_output_dir["ilc_trimmed_maps"], "ILC_trimmed_wav_Map_S{scale}_R{realisation:04d}_lmax{lmax}.npy"),
-            'ilc_synthesised_maps': os.path.join(silc_output_dir["ilc_synthesised_maps"], "ILC_synthesised_Map_R{realisation:04d}_lmax{lmax}.npy"),
+            'doubled_maps': os.path.join(silc_output_dir["doubled_maps"], "doubled_maps_f{frequency}_s{scale}_r{realisation:04d}_lmax{lmax}.npy"),
+            'covariance_matrices': os.path.join(silc_output_dir["covariance_matrix"],"cov_MW_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}.npy"),
+            'weight_vector_matrices': os.path.join(silc_output_dir["weight_vector_data"], "weight_vector_s{scale}_r{realisation:04d}_lmax{lmax}.npy"),
+            'ilc_doubled_maps': os.path.join(silc_output_dir["ilc_doubled_wavelet_maps"], "ILC_doubled_Map_s{scale}_r{realisation:04d}_lmax{lmax}.npy"),
+            'ilc_trimmed_maps': os.path.join(silc_output_dir["ilc_trimmed_maps"], "ilc_trimmed_wav_Map_s{scale}_r{realisation:04d}_lmax{lmax}.npy"),
+            'ilc_synthesised_maps': os.path.join(silc_output_dir["ilc_synthesised_maps"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}.npy"),
         }
 
         self.scales = detect_scales(

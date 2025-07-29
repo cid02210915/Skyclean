@@ -37,7 +37,7 @@ class Visualise():
             "noise": os.path.join(self.saved_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
             "wavelet_coeffs": os.path.join(self.saved_directories["wavelet_coeffs"], "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}.npy"),
             "scaling_coeffs": os.path.join(self.saved_directories["scaling_coeffs"], "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
-            "ilc_synthesised": os.path.join(self.saved_directories["ilc_synthesised"], "ILC_synthesised_Map_R{realisation:04d}_lmax{lmax}.npy"),
+            "ilc_synthesised": os.path.join(self.saved_directories["ilc_synthesised"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}.npy"),
         }
 
         self.ilc_spectrum_output_path = os.path.join(self.saved_directories["ilc_synthesised"], "ilc_power_spectrum_R{realisation:04d}_lmax{lmax}.npy")

@@ -65,17 +65,17 @@ class Pipeline:
         end_time = time.perf_counter()
         print(f"PIPELINE COMPLETED SUCCESFULLY IN {end_time - start_time} SECONDS!")
 
-components = ["cmb", "sync"]
+components = ["cmb", "sync", "dust"]
 wavelet_components = ["cfn"]
 ilc_components = ["cfn"]
 frequencies = ["030", "044"]
-realisations = 1
+realisations = 1000
 N_directions = 1
 lam = 4
-lmax = 1024
+lmax = 256
 N_directions = 1 
 method = "jax_cuda"
-noise = False
+noise = True
 visualise = False
 save_ilc_intermediates = False
 
