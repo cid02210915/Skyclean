@@ -20,8 +20,8 @@ import optax
 from flax import nnx
 import tensorflow as tf
 import tensorflow_datasets as tfds
+import matplotlib.pyplot as plt
 
-from data import get_pano3d_dataloaders
 from model import S2_UNET
 from data import CMBFreeILC
 from utils import *
@@ -29,7 +29,7 @@ from utils import *
 import matplotlib.pyplot as plt
 
 class Train: 
-    def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, 
+    def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, rngs: nnx.Rngs = nnx.Rngs(0), 
                  directory: str = "data/", ):
@@ -39,6 +39,7 @@ class Train:
             realisations (int): Number of realisations to process.
             lmax (int): Maximum multipole for the wavelet transform.
             N_directions (int): Number of directions for the wavelet transform.
+            lam (float): lambda factor (scaling) for the wavelet transform.
             batch_size (int): Size of the batches for training.
             shuffle (bool): Whether to shuffle the dataset.
             split (list): List of train/validation/test split ratios.
@@ -52,6 +53,7 @@ class Train:
         self.realisations = realisations
         self.lmax = lmax
         self.N_directions = N_directions
+        self.lam = lam
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.split = split
@@ -61,7 +63,7 @@ class Train:
         self.rngs = rngs
         self.directory = directory
 
-        self.dataset = CMBFreeILC(frequencies, realisations, lmax, N_directions, batch_size, shuffle, split, directory)
+        self.dataset = CMBFreeILC(frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory)
 
         self.save_dir = os.path.join(self.directory, "ML/model")
         if not os.path.exists(self.save_dir):
@@ -163,15 +165,12 @@ class Train:
         epochs = self.epochs
         batch_size = self.batch_size
         N_freq = len(self.frequencies)
-        N_train = self.realisations
-        steps_per_epoch = N_train // batch_size
-
         
         L = self.lmax + 1 
         print("Constructing the CMB-Free ILC dataset")
         train_ds, test_ds = self.dataset.prepare_data()
         train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
-    
+        training_steps_per_epoch, testing_steps_per_epoch = len(train_ds), len(test_ds)
         print("Constructing the model")
         model = S2_UNET(L, N_freq, rngs = self.rngs)
 
@@ -203,7 +202,7 @@ class Train:
         print("Starting training")
         for epoch in range(1, epochs + 1):
             # Commence training for the current epoch
-            for _ in range(steps_per_epoch):
+            for _ in range(training_steps_per_epoch):
                 batch_x, batch_y = next(train_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
@@ -217,7 +216,7 @@ class Train:
             metrics.reset()
 
             # Evaluate at the end of the current epoch
-            for _ in range(steps_per_epoch):
+            for _ in range(testing_steps_per_epoch):
                 batch_x, batch_y = next(test_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
@@ -238,4 +237,38 @@ class Train:
                 )
             )
             np.save(self.save_dir + "training_log.npy", metrics_history)
+            # Plot sample input and predictions
+            fig,ax=plt.subplots(1,3)
+            foreground, residual = test_batch
+            input_ex = jnp.asarray(foreground[0, :, :, 0])
+            output_ex = jnp.asarray(residual[0, :, :, 0])
+            pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]
+            ax[0].imshow(input_ex)
+            ax[0].set_title("Input")
+            ax[1].imshow(output_ex)
+            ax[1].set_title("Output")
+            ax[2].imshow(pred_ex)
+            ax[2].set_title(f"Prediction (acc = {metrics_history['eval_accuracy'][-1]:.3f})")
+            plt.show()
+
+
+## Test usage 
+frequencies = ["030", "044"]
+realisations = 16
+lmax = 255
+N_directions = 1
+lam = 4.0
+batch_size = 2
+shuffle = True
+split = [0.8, 0.2]
+epochs = 10
+learning_rate = 1e-3
+momentum = 0.9
+rngs = nnx.Rngs(0)
+directory = "/Scratch/matthew/data/"
+
+trainer = Train(frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, epochs, learning_rate, momentum, rngs, directory)
+trainer.execute_training_procedure()
+
+
 

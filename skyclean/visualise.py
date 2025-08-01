@@ -2,45 +2,32 @@ from utils import *
 from map_tools import *
 import healpy as hp
 import matplotlib.pyplot as plt
+from file_templates import FileTemplates
 
 
 ### WIP: need to implement file templates. Plotting functions work otherwise.
 
 
 class Visualise(): 
-    def __init__(self, frequencies: list, realisation: int, lmax: int, directory: str = "data/"):
+    def __init__(self, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/"):
         """
         Parameters:
             frequencies (list): List of frequencies to visualise.
             realisation (int): The realisation number to visualise.
             lmax (int): Maximum multipole for the visualisation.
+            lam_list (list): List of lambda values for the ILC. 
             directory (str): Directory where data is stored / saved to.
         """
         self.frequencies = frequencies
         self.realisation = realisation
         self.lmax = lmax
         self.directory = directory
+        self.lam_list = lam_list
 
-        self.saved_directories = {
-            "cfn": os.path.join(self.directory, "CFN_realisations"),
-            "processed_maps": os.path.join(self.directory, "processed_maps"),
-            "wavelet_coeffs": os.path.join(self.directory, "wavelet_transforms/wavelet_coeffs"),
-            "scaling_coeffs": os.path.join(self.directory, "wavelet_transforms/scaling_coeffs"),
-            "ilc_synthesised": os.path.join(self.directory, "SILC/ilc_synthesised_maps"),
-        }
+        files = FileTemplates(directory)
+        self.file_templates = files.file_templates
 
-        self.file_templates = {
-            "cfn": os.path.join(self.saved_directories["cfn"], "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
-            "cmb": os.path.join(self.saved_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
-            "sync": os.path.join(self.saved_directories["processed_maps"], "processed_sync_f{frequency}_lmax{lmax}.npy"),
-            "dust": os.path.join(self.saved_directories["processed_maps"], "processed_dust_f{frequency}_lmax{lmax}.npy"),
-            "noise": os.path.join(self.saved_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
-            "wavelet_coeffs": os.path.join(self.saved_directories["wavelet_coeffs"], "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}.npy"),
-            "scaling_coeffs": os.path.join(self.saved_directories["scaling_coeffs"], "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
-            "ilc_synthesised": os.path.join(self.saved_directories["ilc_synthesised"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}.npy"),
-        }
-
-        self.ilc_spectrum_output_path = os.path.join(self.saved_directories["ilc_synthesised"], "ilc_power_spectrum_R{realisation:04d}_lmax{lmax}.npy")
+        
 
     def visualise_maps(self, comps: list):
         """
@@ -62,7 +49,7 @@ class Visualise():
         for i,(comp,file_template) in enumerate(file_templates.items()):
             for j, freq in enumerate(frequencies):
                 fp = file_template.format(frequency=freq, realisation = realisation, lmax=lmax)
-                if comp == "ilc_synthesised":
+                if comp == "ilc_synth":
                     mw_map = np.load(fp)
                     hp_map = SamplingConverters.mw_map_2_hp_map(mw_map, lmax=lmax)
                 else:
@@ -232,7 +219,7 @@ class Visualise():
 
         plt.show()
     
-    def compute_and_save_ilc_power_spec(self, fp: str):
+    def compute_and_save_ilc_power_spec(self, fp: str, lam: float = 2.0):
         """
         Compute and save the ILC power spectrum from the ILC map. 
         This takes longer than hp maps since ILC  is in MW form and must be converted.
@@ -242,7 +229,7 @@ class Visualise():
         Returns:
             cl (np.ndarray): The computed power spectrum.
         """
-        ilc_path = self.ilc_spectrum_output_path.format(realisation=self.realisation, lmax=self.lmax)
+        ilc_path = self.file_templates['ilc_spectrum'].format(realisation=self.realisation, lmax=self.lmax, lam=lam)
         # Recommended to run this first if computing ilc
         if os.path.exists(ilc_path):
             cl = np.load(ilc_path)
@@ -251,32 +238,41 @@ class Visualise():
             ilc_mw = np.load(fp)
             hp_ilc = SamplingConverters.mw_map_2_hp_map(ilc_mw,self.lmax)*1E6  #
             cl = hp.sphtfunc.anafast(hp_ilc, lmax=self.lmax)
-            nside = self.lmax // 2
+            nside = HPTools.get_nside_from_lmax(self.lmax)
             cl /= hp.pixwin(nside, lmax=self.lmax)**2
-            np.save(self.ilc_spectrum_output_path.format(realisation=self.realisation, lmax = self.lmax), cl)
+            np.save(self.file_templates['ilc_spectrum'].format(realisation=self.realisation, lmax=self.lmax, lam=lam), cl)
         return cl
 
-    def visualise_power_spectra(self, comps = ['cmb', 'cfn', 'ilc']):
+    def visualise_power_spectra(self, comps=['cmb', 'cfn', 'ilc'], cross_correlation_indices=None):
         """
         Arrange one subplot per frequency (max 3 columns per row) in a single figure,
         plotting C_ell for every component (including frequency-independent ILC).
-        The ILC map is loaded only once (at the first frequency) via `if idx==0`.
+        Optionally includes cross-correlations between specified components.
 
         Parameters:
             comps (list): List of components to visualise. e.g. ['sync', 'cmb', 'noise'].
+            cross_correlation_indices (list): List of pairs [i, j] where i and j are indices 
+                                             into comps to compute cross-correlations between.
+                                             E.g. [[0, 2]] for cross-correlation between comps[0] and comps[2].
         """
         frequencies = self.frequencies
         realisation = self.realisation
         lmax = self.lmax
-        file_templates = {}
-        for comp in comps:
-            file_templates[comp] = self.file_templates[comp]
-        # build color map for components
-        colours   = plt.rcParams['axes.prop_cycle'].by_key()['color']
-        components = list(file_templates.keys())
+        
+        lam = self.lam_list[0]
+        
+        colours = plt.rcParams['axes.prop_cycle'].by_key()['color']
+        all_plot_items = comps.copy()
+        
+        # Add cross-correlation labels to the plots
+        if cross_correlation_indices:
+            for i, j in cross_correlation_indices:
+                cross_label = f"{comps[i]} × {comps[j]}"
+                all_plot_items.append(cross_label)
+        
         comp_color = {
-            comp: colours[i % len(colours)]
-            for i, comp in enumerate(components)
+            item: colours[i % len(colours)]
+            for i, item in enumerate(all_plot_items)
         }
 
         # layout: at most 3 columns
@@ -297,41 +293,106 @@ class Visualise():
         # loop on frequencies
         for i, freq in enumerate(frequencies):
             ax = axes_flat[i]
-            #ax.set_xlim(10, lmax)
-            #ax.set_ylim(1E4, 1E5)
             #ax.set_xscale('log')
             ax.set_yscale('log')
             ax.set_xlabel(r'$\ell$', fontsize = 14)
-            ax.set_ylabel(r'$(\ell^2 C_\ell)/(2\pi)$ ($\mu K^2$)', fontsize = 14)
+            ax.set_ylabel(r'$D_{\ell}$ ($\mu K^2$)', fontsize = 14)
             ax.set_title(f"{freq} GHz", fontsize=14)
+            ax.set_xlim(0,lmax)
+            ax.set_ylim(1E4,1E5)
 
-            for comp, template in file_templates.items():
+            # Store loaded maps for cross-correlation computation
+            loaded_maps = {}
+
+            # Plot auto-correlations for each component
+            for comp in comps:
+                template = self.file_templates[comp]
                 color = comp_color[comp]
-                fp = template.format(
+                
+                if comp == 'ilc_synth':
+                    # Loop over lambda values for ILC component
+                    for j, lam in enumerate(self.lam_list):
+                        fp = template.format(
+                            comp=comp,
+                            frequency=freq,
+                            lmax=lmax,
+                            realisation=realisation,
+                            lam=lam
+                        )
+                        # load ILC for each lambda value
+                        cl = self.compute_and_save_ilc_power_spec(fp, lam=lam)
+                        ell = np.arange(len(cl))
+                        D_ell = (ell*(ell+1)*cl)/2*np.pi
+                        
+                        # Use different line styles or colors for different lambda values
+                        label = f"{comp} (λ={lam})" if len(self.lam_list) > 1 else comp
+                        
+                        ax.plot(
+                            ell, D_ell,
+                            label=label,
+                            color=color,
+                            linewidth=1.5
+                        )
+                        
+                        # Store the map for potential cross-correlation
+                        if cross_correlation_indices:
+                            ilc_mw = np.load(fp)
+                            hp_ilc = SamplingConverters.mw_map_2_hp_map(ilc_mw, lmax)*1E6
+                            # Only store the map for the first lambda value for cross-correlation
+                            if j == 0:  # j is the index in the lambda loop
+                                loaded_maps[comp] = hp_ilc
+                else:
+                    fp = template.format(
+                        comp=comp,
                         frequency=freq,
                         lmax=lmax,
-                        realisation=realisation
+                        realisation=realisation,
                     )
-
-                if comp == 'ilc_synthesised':
-                    # load ILC only once at the first frequency
-                    cl = self.compute_and_save_ilc_power_spec(self.file_templates['ilc_synthesised'].format(lmax = lmax, realisation=realisation))
-                else:
                     hp_map, _ = hp.read_map(fp, h=True)
                     hp_map*=1E6
                     cl  = hp.sphtfunc.anafast(hp_map, lmax=lmax)
                     cl /= hp.pixwin(hp.get_nside(hp_map), lmax=lmax)**2  # correct for pixel window function
-                ell = np.arange(len(cl))
-                ell_sq_cl = (ell*(ell+1)*cl)/2*np.pi
-                if freq == "030":
-                    cl_copy = np.copy(cl)
-                ax.plot(
-                    ell, ell_sq_cl,
-                    label=comp,
-                    color=color,
-                    linewidth=1.5
-                )
-                ax.set_ylim(5E3,1E5)
+                    ell = np.arange(len(cl))
+                    D_ell = (ell*(ell+1)*cl)/2*np.pi
+                    if freq == "030":
+                        cl_copy = np.copy(cl)
+                    ax.plot(
+                        ell, D_ell,
+                        label=comp,
+                        color=color,
+                        linewidth=1.5
+                    )
+                    
+                    # Store the map for potential cross-correlation
+                    if cross_correlation_indices:
+                        loaded_maps[comp] = hp_map
+
+            # Plot cross-correlations if requested
+            if cross_correlation_indices:
+                for idx_i, idx_j in cross_correlation_indices:
+                    comp_i = comps[idx_i]
+                    comp_j = comps[idx_j]
+                    cross_label = f"{comp_i} × {comp_j}"
+                    color = comp_color[cross_label]
+                    
+                    # Cross-correlation between components (using first lambda for ILC)
+                    map_i = loaded_maps[comp_i]
+                    map_j = loaded_maps[comp_j]
+                    
+                    cl_cross = hp.sphtfunc.anafast(map_i, map2=map_j, lmax=lmax)
+                    cl_cross /= (hp.pixwin(hp.get_nside(map_i), lmax=lmax) * 
+                               hp.pixwin(hp.get_nside(map_j), lmax=lmax))
+                    
+                    ell = np.arange(len(cl_cross))
+                    D_ell = (ell*(ell+1)*cl_cross)/2*np.pi
+                    
+                    ax.plot(
+                        ell, D_ell,
+                        label=cross_label,
+                        color=color,
+                        linestyle='--',
+                        linewidth=1.5
+                    )
 
             ax.legend(title="Component", fontsize=10)
             ax.grid(True, which='both', linestyle=':', linewidth=0.5)
@@ -341,26 +402,26 @@ class Visualise():
             ax.set_visible(False)
 
         plt.tight_layout()
-        plt.savefig('power_spectra.pdf')
         plt.show()
 
-    def visualise_component_ratio_power_spectra(self, comp_a: str, comp_b: str):
+    def visualise_component_ratio_power_spectra(self, comp_a: str, comp_b: str, include_cross_correlation: bool = True, ratio: bool = True):
         """
-        Visualise the ratio of power spectra between two components across frequencies.
+        Visualise the ratio or residual of power spectra between two components across frequencies.
+        Optionally includes cross-correlation analysis.
 
         Parameters:
-            file_templates (dict): Mapping from component name to a Python format-string for its filename.
             comp_a (str): The first component to compare.
             comp_b (str): The second component to compare.
-            ilc_output_path (str, optional): Path to save the ILC map if needed
+            include_cross_correlation (bool): Whether to include cross-correlation analysis.
+            ratio (bool): If True, calculate ratios (comp_a/comp_b). If False, calculate residuals (comp_b - comp_a).
         """
-        file_templates = {}
-        for comp in [comp_a, comp_b]:
-            file_templates[comp] = self.file_templates[comp]
         frequencies = self.frequencies
         realisation = self.realisation
         lmax = self.lmax
         ell = np.arange(lmax+1)
+        
+        # Use only the first lambda value for cross-correlations
+        lam = self.lam_list[0]
 
         # Figure layout
         n_freq = len(frequencies)
@@ -372,145 +433,219 @@ class Visualise():
             squeeze=False
         )
         fig.suptitle(
-            f"Power Spectrum Ratio: {comp_a} / {comp_b}",
+            f"Power Spectrum {'Ratio' if ratio else 'Residual'}: {'$D_{\\ell}$ Ratio' if ratio else '$\\Delta D_{\\ell}$'}",
             fontsize=20, fontweight='bold')
         axes_flat = axes.flatten()
 
         for idx, freq in enumerate(frequencies):
             ax = axes_flat[idx]
-            fp_a = file_templates[comp_a].format(
+            
+            # Store loaded maps for cross-correlation computation
+            loaded_maps = {}
+            
+            # Check if either component is ILC to determine if we need to loop over lambda
+            if comp_a == 'ilc_synth' or comp_b == 'ilc_synth':
+                # Loop over lambda values when ILC is involved (for auto-correlation ratios)
+                for j, lam_val in enumerate(self.lam_list):
+                    # --- load and compute spectrum for comp_a ---
+                    if comp_a == 'ilc_synth':
+                        fp_a = self.file_templates[comp_a].format(
+                            frequency=freq,
+                            lmax=lmax,
+                            realisation=realisation,
+                            lam=lam_val
+                        )
+                        cl_a = self.compute_and_save_ilc_power_spec(fp_a, lam=lam_val)
+                        
+                        # Store map for cross-correlation (only first lambda)
+                        if include_cross_correlation and j == 0:
+                            ilc_mw = np.load(fp_a)
+                            hp_ilc = SamplingConverters.mw_map_2_hp_map(ilc_mw, lmax)*1E6
+                            loaded_maps[comp_a] = hp_ilc
+                    else:
+                        fp_a = self.file_templates[comp_a].format(
+                            frequency=freq,
+                            lmax=lmax,
+                            realisation=realisation
+                        )
+                        map_a = hp.read_map(fp_a)*1E6
+                        cl_a = hp.sphtfunc.anafast(map_a, lmax=lmax)
+                        
+                        # Store map for cross-correlation (only once)
+                        if include_cross_correlation and j == 0:
+                            loaded_maps[comp_a] = map_a
+
+                    # --- load and compute spectrum for comp_b ---
+                    if comp_b == 'ilc_synth':
+                        fp_b = self.file_templates[comp_b].format(
+                            frequency=freq,
+                            lmax=lmax,
+                            realisation=realisation,
+                            lam=lam_val
+                        )
+                        cl_b = self.compute_and_save_ilc_power_spec(fp_b, lam=lam_val)
+                        
+                        # Store map for cross-correlation (only first lambda)
+                        if include_cross_correlation and j == 0:
+                            ilc_mw = np.load(fp_b)
+                            hp_ilc = SamplingConverters.mw_map_2_hp_map(ilc_mw, lmax)*1E6
+                            loaded_maps[comp_b] = hp_ilc
+                    else:
+                        fp_b = self.file_templates[comp_b].format(
+                            frequency=freq,
+                            lmax=lmax,
+                            realisation=realisation
+                        )
+                        map_b = hp.read_map(fp_b, verbose=False)*1E6
+                        cl_b = hp.sphtfunc.anafast(map_b, lmax=lmax)
+                        
+                        # Store map for cross-correlation (only once)
+                        if include_cross_correlation and j == 0:
+                            loaded_maps[comp_b] = map_b
+                    
+                    # --- Auto-correlation ratio/residual and plot ---
+                    D_ell_a = (ell * (ell + 1) * cl_a) / (2 * np.pi)
+                    D_ell_b = (ell * (ell + 1) * cl_b) / (2 * np.pi)
+                    
+                    if ratio:
+                        result = D_ell_a / D_ell_b
+                        label = f"Auto: $\\lambda$={lam_val}" if len(self.lam_list) > 1 else f"Auto: ({comp_a}×{comp_a})/({comp_b}×{comp_b})"
+                    else:
+                        result = D_ell_b - D_ell_a
+                        label = f"Residual: $\\lambda$={lam_val}" if len(self.lam_list) > 1 else f"({comp_b}-{comp_a})"
+                    
+                    ax.plot(ell, result, linewidth=1.5, label=label, linestyle='-')
+            else:
+                # Neither component is ILC, so no lambda loop needed
+                fp_a = self.file_templates[comp_a].format(
                     frequency=freq,
                     lmax=lmax,
                     realisation=realisation
                 )
-            # --- load and compute spectrum for comp_a ---
-            if comp_a == 'ilc_synthesised':
-                # load ILC only once at the first frequency
-                cl_a = self.compute_and_save_ilc_power_spec(fp_a.format(lmax = lmax, realisation=realisation))
-            else:
                 map_a = hp.read_map(fp_a)*1E6
                 cl_a = hp.sphtfunc.anafast(map_a, lmax=lmax)
 
-            # --- load and compute spectrum for comp_b ---
-            fp_b = file_templates[comp_b].format(
+                fp_b = self.file_templates[comp_b].format(
                     frequency=freq,
                     lmax=lmax,
                     realisation=realisation
                 )
-            if comp_b == 'ilc_synthesised':
-                cl_b = self.compute_and_save_ilc_power_spec(fp_b.format(lmax = lmax, realisation=realisation))
-            else:
                 map_b = hp.read_map(fp_b, verbose=False)*1E6
                 cl_b = hp.sphtfunc.anafast(map_b, lmax=lmax)
-            # --- ratio and plot ---
-            ratio = cl_a / cl_b
-            ax.plot(ell, ratio, linewidth=1.5)
+                
+                # --- Auto-correlation ratio/residual and plot ---
+                D_ell_a = (ell * (ell + 1) * cl_a) / (2 * np.pi)
+                D_ell_b = (ell * (ell + 1) * cl_b) / (2 * np.pi)
+                
+                if ratio:
+                    result = D_ell_a / D_ell_b
+                    label = f"Auto: ({comp_a}×{comp_a})/({comp_b}×{comp_b})"
+                else:
+                    result = D_ell_b - D_ell_a
+                    label = f"({comp_b}-{comp_a})"
+                    
+                ax.plot(ell, result, linewidth=1.5, label=label, linestyle='-')
+                
+                # Store maps for cross-correlation
+                if include_cross_correlation:
+                    loaded_maps[comp_a] = map_a
+                    loaded_maps[comp_b] = map_b
+            
+            # Plot cross-correlation ratio if requested
+            if include_cross_correlation:
+                # Cross-correlation between comp_a and comp_b
+                map_a_cross = loaded_maps[comp_a]
+                map_b_cross = loaded_maps[comp_b]
+                
+                cl_cross = hp.sphtfunc.anafast(map_a_cross, map2=map_b_cross, lmax=lmax)
+                cl_cross /= (hp.pixwin(hp.get_nside(map_a_cross), lmax=lmax) * 
+                           hp.pixwin(hp.get_nside(map_b_cross), lmax=lmax))
+                
+                # Auto-correlation of comp_b (using first lambda if ILC)
+                if comp_b == 'ilc_synth':
+                    fp_b_auto = self.file_templates[comp_b].format(
+                        frequency=freq,
+                        lmax=lmax,
+                        realisation=realisation,
+                        lam=lam
+                    )
+                    cl_b_auto = self.compute_and_save_ilc_power_spec(fp_b_auto, lam=lam)
+                else:
+                    cl_b_auto = hp.sphtfunc.anafast(map_b_cross, lmax=lmax)
+                    cl_b_auto /= hp.pixwin(hp.get_nside(map_b_cross), lmax=lmax)**2
+                
+                # Auto-correlation of comp_a (using first lambda if ILC)
+                if comp_a == 'ilc_synth':
+                    fp_a_auto = self.file_templates[comp_a].format(
+                        frequency=freq,
+                        lmax=lmax,
+                        realisation=realisation,
+                        lam=lam
+                    )
+                    cl_a_auto = self.compute_and_save_ilc_power_spec(fp_a_auto, lam=lam)
+                else:
+                    cl_a_auto = hp.sphtfunc.anafast(map_a_cross, lmax=lmax)
+                    cl_a_auto /= hp.pixwin(hp.get_nside(map_a_cross), lmax=lmax)**2
+                
+                # Cross-correlation / auto-correlation ratio or residual
+                D_ell_cross = (ell * (ell + 1) * cl_cross) / (2 * np.pi)
+                D_ell_b_auto = (ell * (ell + 1) * cl_b_auto) / (2 * np.pi)
+                D_ell_a_auto = (ell * (ell + 1) * cl_a_auto) / (2 * np.pi)
+                
+                if ratio:
+                    cross_result = D_ell_cross / D_ell_b_auto
+                    cross_label = f"Cross: ({comp_a}×{comp_b})/({comp_b}×{comp_b})"
+                else:
+                    # Cross-correlation residual: cross_correlation - comp_a_auto
+                    cross_result = D_ell_cross - D_ell_a_auto
+                    cross_label = f"Cross residual: ({comp_a}×{comp_b})-({comp_a}×{comp_a})"
+                
+                ax.plot(ell, cross_result, linewidth=1.5, 
+                       label=cross_label, 
+                       linestyle='--', color='red')
+            
             ax.set_xlim(1, lmax)
-            ax.set_ylim(0.5,1.5)
-            ax.set_xlabel(r'$\ell$', fontsize = 16)
-            ax.set_ylabel("Ratio", fontsize = 16)
+            if ratio:
+                ax.set_ylim(0.7, 1.2)
+                ax.set_ylabel("Ratio of $D_{\\ell}$", fontsize=16)
+                ax.axhline(1, ls=':', color='red')
+            else:
+                ax.set_ylabel(r'$\Delta D_{\ell}$ ($\mu K^2$)', fontsize=16)
+                ax.axhline(0, ls=':', color='black', alpha=0.7)
+            
+            ax.set_xlabel(r'$\ell$', fontsize=16)
             ax.set_title(f"{freq} GHz")
-            ax.axhline(1, ls=':', color='red')
             ax.grid(True, which='both', linestyle=':', linewidth=0.5)
+            
+            # Add legend if multiple lambda values are plotted or cross-correlation is included
+            if ((comp_a == 'ilc_synth' or comp_b == 'ilc_synth') and len(self.lam_list) > 1) or include_cross_correlation:
+                ax.legend(fontsize=10)
 
         # hide any unused subplots
         for ax in axes_flat[n_freq:]:
             ax.set_visible(False)
-
+        plt.legend(loc = 'upper right')
         plt.tight_layout()
-        #plt.savefig('plots/component_ratio_power_spectra.pdf')
+        filename = 'component_ratio_power_spectra.pdf' if ratio else 'component_residual_power_spectra.pdf'
+        plt.savefig(filename)
         plt.show()
 
-    def visualise_freq_ratio_spectra(self, comps: str, freq1: str, freq2: str):
-        """
-        Visualise the ratio of power spectra between two frequencies for specified components.
-
-        Parameters:
-            comps (list): List of components to visualise.
-            freq1 (str): The first frequency to compare.
-            freq2 (str): The second frequency to compare.
-            file_templates (dict): Mapping from component name to a Python format-string for its filename.
-        """
-        file_templates = {}
-        for comp in comps:
-            file_templates[comp] = self.file_templates[comp]
-        realisation = self.realisation
-        lmax = self.lmax
-        ell = np.arange(lmax+1)
-        n_comp = len(comps)
-        ncols  = min(3, n_comp)
-        nrows  = int(np.ceil(n_comp / ncols))
-
-        fig, axes = plt.subplots(
-            nrows, ncols,
-            figsize=(5*ncols, 4*nrows),
-            squeeze=False
-        )
-        fig.suptitle(
-            f"Power spectrum frequency ratio: {freq1} GHz / {freq2} GHz",
-            fontsize=20, fontweight='bold')
-        axes_flat = axes.flatten()
-
-        for idx, comp in enumerate(comps):
-            ax = axes_flat[idx]
-
-            # Load map at freq1
-            fp1 = file_templates[comp].format(
-                frequency=freq1,
-                lmax=lmax,
-                realisation=realisation
-            )
-            map1 = hp.read_map(fp1, verbose=False)
-            cl1 = hp.sphtfunc.anafast(map1, lmax=lmax)
-
-            # Load map at freq2
-            fp2 = file_templates[comp].format(
-                frequency=freq2,
-                lmax=lmax,
-                realisation=realisation
-            )
-            if fp2.endswith('.npy'):
-                map2 = np.load(fp2)
-            else:
-                map2 = hp.read_map(fp2, verbose=False)
-            cl2 = hp.sphtfunc.anafast(map2, lmax=lmax)
-
-            # Ratio and plotting
-            ratio = cl1 / cl2
-            ax.plot(ell, ratio, linewidth=1.5)
-            ax.set_xscale('log')
-            ax.set_xlim(1, lmax)
-            ax.set_ylim(ratio[1:].min()*0.9, ratio[1:].max()*1.1)
-            ax.set_xlabel(r'$\ell$', fontsize = 16)
-            ax.set_ylabel(
-                f"Ratio", fontsize = 16
-            )
-            ax.set_title(comp.upper())
-            ax.axhline(1, ls=':', color='red')
-            ax.grid(True, which='both', linestyle=':', linewidth=0.5)
-
-        # hide unused axes
-        for ax in axes_flat[n_comp:]:
-            ax.set_visible(False)
-
-        plt.tight_layout()
-        plt.show()
-
-
-frequencies = ["030", "044"]
+frequencies = ["030"]
 realisation = 0
-lmax = 1024
+lmax = 500
+lam_list = [2.0]
 directory = "/Scratch/matthew/data/"
-map_comps = ["cmb", "cfn", "ilc_synthesised"]
+map_comps = ["ilc_synth", "cmb"]
 
 visualiser = Visualise(
     frequencies=frequencies,
     realisation=realisation,
     lmax=lmax,
+    lam_list=lam_list,
     directory=directory
 )
 
 #visualiser.visualise_maps(map_comps)
-visualiser.visualise_power_spectra(map_comps)
-visualiser.visualise_component_ratio_power_spectra("cmb", "ilc_synthesised")
+#visualiser.visualise_power_spectra(map_comps, cross_correlation_indices=[[0, 1]])  
+visualiser.visualise_component_ratio_power_spectra("ilc_synth", "cmb", include_cross_correlation=True, ratio=False)
 

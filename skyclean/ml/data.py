@@ -12,7 +12,7 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
 class CMBFreeILC(): 
-    def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, 
+    def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
                  batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.2], directory: str = "data/", ):
         """
         Parameters:
@@ -29,6 +29,7 @@ class CMBFreeILC():
         self.realisations = realisations
         self.lmax = lmax
         self.N_directions = N_directions
+        self.lam = lam
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.split = split
@@ -49,17 +50,17 @@ class CMBFreeILC():
         self.file_templates = {
             "cfn": os.path.join(self.saved_directories["cfn"], "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
             "cmb": os.path.join(self.saved_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
-            "ilc_synthesised": os.path.join(self.saved_directories["ilc_synthesised"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}.npy"),
+            "ilc_synthesised": os.path.join(self.saved_directories["ilc_synthesised"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}.npy"), #add _lam 
             "foreground_estimate": os.path.join(self.saved_directories["ml"], "foreground_estimate_r{realisation:04d}_lmax{lmax}.npy"),
             "ilc_residual": os.path.join(self.saved_directories["ml"], "ilc_residual_r{realisation:04d}_lmax{lmax}.npy"),
         }
         # retrieve shapes
         ilc_map_temp = np.load(self.file_templates["ilc_synthesised"].format(realisation=0, lmax=self.lmax))
-        self.H = ilc_map_temp.shape[0]
-        self.W = ilc_map_temp.shape[1]
+        self.H = ilc_map_temp.shape[0]+1
+        self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
     
-    def create_residual_maps(self, realisation: int): 
-        """For a single realisation, create the ILC residual maps (CMB free) in MW sampling format. 
+    def create_residual_mwss_maps(self, realisation: int): 
+        """For a single realisation, create the ILC residual maps (CMB free) in MWSS sampling format. 
 
         Parameters:
             realisation (int): The realisation number to process.
@@ -68,7 +69,8 @@ class CMBFreeILC():
             foreground_estimate (np.ndarray): F(i) = CFN(i) - ILC where i is the frequency component (hence have N_freq input channels) of shape (H, W, N_freq)
             ilc_residual (np.ndarray): ILC - CMB of shape (H, W, 1). 
         """
-        H, W, lmax = self.H, self.W, self.lmax
+        H, W, lmax, lam = self.H, self.W, self.lmax, self.lam
+        L = lmax + 1
         frequencies = self.frequencies
         if os.path.exists(self.file_templates["foreground_estimate"].format(realisation=realisation, lmax=lmax)) and os.path.exists(self.file_templates["ilc_residual"].format(realisation=realisation, lmax=lmax)):
             foreground_estimate = np.load(self.file_templates["foreground_estimate"].format(realisation=realisation, lmax=lmax))
@@ -77,25 +79,27 @@ class CMBFreeILC():
             print(f"Creating residual maps for realisation {realisation}...")
             # load ilc (already in MW sampling)
             ilc_map_mw = np.load(self.file_templates["ilc_synthesised"].format(realisation=realisation, lmax=lmax))
+            ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
             cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float64)
             cmb_map_mw = SamplingConverters.hp_map_2_mw_map(cmb_map_hp, lmax) # highly expensive? involves s2fft.forwards.
+            cmb_map_mwss = SamplingConverters.mw_map_2_mwss_map(cmb_map_mw, L=L)
             # load cfn maps across frequencies and convert to MW sampling
             cfn_maps_hp = [hp.read_map(self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=lmax), dtype=np.float64) for frequency in frequencies]
             cfn_maps_mw = [SamplingConverters.hp_map_2_mw_map(cfn_map_hp, lmax) for cfn_map_hp in cfn_maps_hp]
+            cfn_maps_mwss = [SamplingConverters.mw_map_2_mwss_map(cfn_map_mw, L=L) for cfn_map_mw in cfn_maps_mw]
             # create foreground estimate and ilc residual
             foreground_estimate = np.zeros((H, W, len(frequencies)), dtype=np.float64)
             ilc_residual = np.zeros((H, W, 1), dtype=np.float64)
-            for i, frequency in enumerate(frequencies):
-                foreground_estimate[:, :, i] = cfn_maps_mw[i] - ilc_map_mw
-                ilc_residual[:, :, 0] = ilc_map_mw - cmb_map_mw
+            for i, _ in enumerate(frequencies):
+                foreground_estimate[:, :, i] = cfn_maps_mwss[i] - ilc_map_mwss
+                ilc_residual[:, :, 0] = ilc_map_mwss - cmb_map_mwss
             # save the maps
             np.save(self.file_templates["foreground_estimate"].format(realisation=realisation, lmax=lmax), foreground_estimate)
             np.save(self.file_templates["ilc_residual"].format(realisation=realisation, lmax=lmax), ilc_residual)
         return foreground_estimate, ilc_residual
 
-    @staticmethod
-    def concatenate_maps(self): 
+    def process_and_concatenate_maps(self): 
         """Concatenate maps across realisations, appending another axis to the arrays, resulting in a shape of (realisations, H, W, N_freq) 
         for foreground_estimate and (realisations, H, W, 1) for ilc_residual."""
         realisations = self.realisations
@@ -104,7 +108,7 @@ class CMBFreeILC():
         X = np.zeros((realisations, H, W, N_freq), dtype=np.float64)
         Y = np.zeros((realisations, H, W, 1), dtype=np.float64)
         for realisation in range(realisations):
-            foreground_estimate, ilc_residual = self.create_residual_maps(realisation)
+            foreground_estimate, ilc_residual = self.create_residual_mwss_maps(realisation)
             X[realisation, :, :, :] = foreground_estimate
             Y[realisation, :, :, :] = ilc_residual
         return X, Y
@@ -145,10 +149,32 @@ class CMBFreeILC():
 
     def prepare_data(self):
         print("Preparing datasets...")
-        X, Y = self.concatenate_maps()
+        X, Y = self.process_and_concatenate_maps()
         X_train, Y_train, X_test, Y_test = self.split_data(X, Y)
         train_ds = self.prepare_tf_dataset(X_train, Y_train)
         test_ds = self.prepare_tf_dataset(X_test, Y_test)
         return train_ds, test_ds
 
 
+## TESTING
+# from model import S2_UNET
+# import tensorflow_datasets as tfds
+# import matplotlib.pyplot as plt
+# import jax.numpy as jnp
+# lmax = 255
+# L = lmax+1
+# obj = CMBFreeILC(frequencies=["030", "044"], realisations=10, lmax=lmax, N_directions=1, batch_size=3, shuffle=True, split=[0.8, 0.2], directory="/Scratch/matthew/data/")
+# train_ds, test_ds = obj.prepare_data()
+# model = S2_UNET(L,ch_in = 2, )
+# train_iter = iter(tfds.as_numpy(train_ds))
+# batch_x, batch_y = next(train_iter)
+# image = jnp.asarray(batch_x)
+# print(image.shape)
+# output = model(image) #shape (3,257,513,2)
+# print(output.shape)
+# input_ex = image[0, :, :, 0]# First channel of the first image in the batch
+# output_ex = output[0, :, :, 0]  # First channel of the first
+
+# fig,ax=plt.subplots(1,2)
+# ax[0].imshow(input_ex,)
+# ax[1].imshow(output_ex,)

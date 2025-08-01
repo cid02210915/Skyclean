@@ -82,21 +82,16 @@ class Tests():
         cfn_match = re.search(cfn_regex, cfn_files[0])
         if not cfn_match:
             pytest.skip("Could not parse frequency from CFN filename")
-        
-        cfn_frequency, cfn_realisation, cfn_lmax = cfn_match.group(1), int(cfn_match.group(2)), int(cfn_match.group(3))
-        
+    
         # Load the files
         ilc_mw = np.load(ilc_files[0])  # MW map form
-        ilc_hp = MWTools.mw_map_2_hp_map(ilc_mw, lmax=ilc_lmax)
+        ilc_hp = SamplingConverters.mw_map_2_hp_map(ilc_mw, lmax=ilc_lmax)
         cfn = hp.read_map(cfn_files[0])
- 
-        assert ilc_mw.shape == cfn.shape, "ILC MW map shape does not match CFN map shape"
-        assert ilc_hp.shape == cfn.shape, "ILC HP map shape does not match CFN map shape"
-        assert ilc_mw.shape == ilc_hp.shape, "ILC MW map shape does not match ILC HP map shape"
+        print(cfn.shape, ilc_hp.shape)
+        assert ilc_hp.shape == cfn.shape, f"ILC MW map shape ({ilc_mw.shape}) does not match CFN map shape ({cfn.shape})"
 
-
-# Example usage:
-# test_instance = Tests("/path/to/data")
-# Run with: pytest tests.py
+directory = "/Scratch/matthew/data"
+tests = Tests(directory)
+tests.test_ilc_shape()
 
 

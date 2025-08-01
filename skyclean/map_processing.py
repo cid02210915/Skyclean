@@ -1,11 +1,21 @@
 from map_tools import *
 import os
 import healpy as hp
+from file_templates import FileTemplates
 
 
 class ProcessMaps():
     """Process downloaded maps."""
-    def __init__(self, components: list, wavelet_components: list, frequencies: list, realisations: int, desired_lmax:int, directory: str = "data/", method = "jax_cuda"): 
+    def __init__(self, 
+                 components: list, 
+                 wavelet_components: list, 
+                 frequencies: list, 
+                 realisations: int,
+                 start_realisation: int,
+                 desired_lmax:int, 
+                 directory: str = "data/", 
+                 method = "jax_cuda", 
+                 overwrite: bool = False): 
         """
         Parameters: 
             components (list): List of foreground components to process. Includes: 'sync' (synchrotron)
@@ -13,41 +23,27 @@ class ProcessMaps():
             directory (str): Directory where data is stored / saved to.
             frequencies (list): Frequencies of maps to be processed.
             realisations (int): Number of realisations to process.
+            start_realisation (int): Starting realisation number for processing.
             desired_lmax (int): Desired maximum multipole for the processed maps.
             lam (int): lambda factor (scaling) for the wavelet transform.
             method (str): s2fft method
+            overwrite (bool): Whether to overwrite existing files.
         """
         self.components = components
         self.wavelet_components = wavelet_components
         self.frequencies = frequencies
         self.realisations = realisations
+        self.start_realisation = start_realisation
+        self.method = method
         self.desired_lmax = desired_lmax
         self.directory = directory
+        self.overwrite = overwrite
+
+        files = FileTemplates(directory)
+        self.file_templates = files.file_templates
         
-        downloaded_map_directories = os.path.join(self.directory, "CMB_realisations")
-        self.downloaded_data_filepaths = {
-            "cmb": os.path.join(downloaded_map_directories, "cmb_r{realisation:04d}.fits"),
-            "sync": os.path.join(downloaded_map_directories, "sync_f{frequency}.fits"),
-            "dust": os.path.join(downloaded_map_directories, "dust_f{frequency}.fits"),
-            "noise": os.path.join(downloaded_map_directories, "noise_f{frequency}_r{realisation:05d}.fits")
-        }
 
-        self.output_directories = {
-            "cfn": os.path.join(self.directory, "CFN_realisations"),
-            "processed_maps": os.path.join(self.directory, "processed_maps"),
-            "wavelet_coeffs": os.path.join(self.directory, "wavelet_transforms/wavelet_coeffs"),
-            "scaling_coeffs": os.path.join(self.directory, "wavelet_transforms/scaling_coeffs"),
-        }
-
-        self.output_paths = {
-            "cfn": os.path.join(self.output_directories["cfn"], "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
-            "cmb": os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
-            "sync": os.path.join(self.output_directories["processed_maps"], "processed_sync_f{frequency}_lmax{lmax}.npy"),
-            "dust": os.path.join(self.output_directories["processed_maps"], "processed_dust_f{frequency}_lmax{lmax}.npy"),
-            "noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
-            "wavelet_coeffs": os.path.join(self.output_directories["wavelet_coeffs"], "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}.npy"),
-            "scaling_coeffs": os.path.join(self.output_directories["scaling_coeffs"], "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}.npy")
-        }
+        # file_template, file_templates
 
     def create_cfn(self, frequency: str, realisation: int, save = True): 
         """
@@ -65,23 +61,25 @@ class ProcessMaps():
         """
         desired_lmax = self.desired_lmax
         standard_fwhm_rad = np.radians(5/60)
-        nside = desired_lmax // 2 # desired n
+        nside = HPTools.get_nside_from_lmax(desired_lmax)
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
         for comp in self.components:
-            output_path = self.output_paths[comp].format(frequency=frequency, realisation=realisation, lmax = desired_lmax)
-            if os.path.exists(output_path):
+            # make 'comp' label 'processed_comp' for dictionary parsing
+            processed_comp = "processed_" + comp
+            output_path = self.file_templates[processed_comp].format(frequency=frequency, realisation=realisation, lmax = desired_lmax)
+            if os.path.exists(output_path) and self.overwrite == False:
                 # Certain foreground components are frequency-independent, so we can skip processing
                 hp_map_reduced = hp.read_map(output_path)
             else:
-                filepath = self.downloaded_data_filepaths[comp].format(frequency=frequency, realisation=realisation)
+                filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation)
                 hp_map = hp.read_map(filepath)
                 hp_map = HPTools.unit_convert(hp_map, frequency)
-                if comp == "noise" and self.noise:
-                    hp_map_reduced = HPTools.reduce_hp_map_resolution(hp_map, lmax=desired_lmax, nside=nside)
+                if comp == "noise":
+                    hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map, lmax=desired_lmax, nside=nside)
                 else:
                     hp_map_reduced = HPTools.convolve_and_reduce(hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad)
                 if save:
-                    save_map(hp_map_reduced, self.output_paths[comp].format(frequency=frequency, realisation=realisation, lmax=desired_lmax))
+                    save_map(output_path, hp_map_reduced, self.overwrite)
             cfn+= hp_map_reduced
         return cfn
 
@@ -93,17 +91,15 @@ class ProcessMaps():
             None
         """
         desired_lmax = self.desired_lmax
-        output_dir = self.output_directories["cfn"]
-        create_dir(output_dir)
-        create_dir(self.output_directories["processed_maps"])
         for realisation in range(self.realisations):
+            realisation += self.start_realisation  # Adjust for starting realisation
             for frequency in self.frequencies:
-                cfn_output_path = self.output_paths["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
-                if os.path.exists(cfn_output_path):
+                cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                if os.path.exists(cfn_output_path) and self.overwrite == False:
                     print(f"CFN map at {frequency} GHz for realisation {realisation + 1} already exists. Skipping processing.")
                     continue
                 cfn_map = self.create_cfn(frequency, realisation, save=True)
-                hp.write_map(cfn_output_path, cfn_map)
+                hp.write_map(cfn_output_path, cfn_map, overwrite=True)
                 print(f"CFN map at {frequency} GHz for realisation {realisation + 1} saved to {cfn_output_path}")
 
 
@@ -126,14 +122,10 @@ class ProcessMaps():
         lmax = self.desired_lmax
         L = lmax + 1
         # load in processed map
-        filepath = self.output_paths[comp].format(frequency=frequency, realisation=realisation, lmax=lmax) # input path
-        wavelet_coeffs_output_dir = self.output_directories["wavelet_coeffs"]
-        scaling_coeffs_output_dir = self.output_directories["scaling_coeffs"]
-        create_dir(wavelet_coeffs_output_dir)
-        create_dir(scaling_coeffs_output_dir)
-        wavelet_coeffs_path = self.output_paths["wavelet_coeffs"]
-        scaling_coeffs_path = self.output_paths["scaling_coeffs"]
-        if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, realisation=realisation, lmax=lmax)):
+        filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation, lmax=lmax, lam = lam) # input path
+        wavelet_coeffs_path = self.file_templates["wavelet_coeffs"]
+        scaling_coeffs_path = self.file_templates["scaling_coeffs"]
+        if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, realisation=realisation, lmax=lmax, lam = lam)) and self.overwrite == False:
             # test if scale 0 exists; this means the transform has already been created
             print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation + 1} already exist. Skipping generation.")
             return None
@@ -142,7 +134,7 @@ class ProcessMaps():
         mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method = method)
         MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)
         wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=N_directions, lam=lam)
-        MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, realisation, lmax, wavelet_coeffs_path, scaling_coeffs_path)
+        MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, realisation, lmax, lam, wavelet_coeffs_path, scaling_coeffs_path)
         return wavelet_coeffs, scaling_coeffs
     
 
@@ -162,11 +154,12 @@ class ProcessMaps():
         lmax = self.desired_lmax
         for comp in self.wavelet_components:
             for realisation in range(self.realisations):
+                realisation += self.start_realisation
                 for frequency in self.frequencies:
                     self.create_wavelet_transform(comp, frequency, realisation, N_directions=N_directions, lam=lam, method=method, visualise=visualise)
                     print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation + 1} saved.")
 
-# processor = ProcessMaps(components=["cmb", "sync"], wavelet_components=["cfn"], frequencies = ["030", "044"], realisations=0, desired_lmax=256, directory="/Scratch/matthew/data/")
+# processor = ProcessMaps(components=["cmb", "sync"], wavelet_components=["cfn"], frequencies = ["030", "044"], realisations=0, desired_lmax=256, directory="/Scratch/matthew/data/", overwrite=False)
 # processor.produce_and_save_cfns()
 # processor.produce_and_save_wavelet_transforms(N_directions=1, lam=4.0, method="jax_cuda", visualise=False)
 

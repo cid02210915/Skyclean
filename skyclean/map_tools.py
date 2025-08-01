@@ -102,6 +102,23 @@ class HPTools():
         hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
         return hp_map_reduced
+
+    @staticmethod
+    def get_nside_from_lmax(lmax: int):
+        """
+        Get the nside value corresponding to the given lmax.
+
+        Parameters:
+            lmax (int): Maximum multipole moment for spherical harmonics.
+        
+        Returns:
+            int: The nside value corresponding to the given lmax.
+        """
+        # Calculate nside as the largest power of 2 that satisfies lmax >= 2*nside
+
+        min_nside = lmax / 2
+        nside = 2 ** np.ceil(np.log2(min_nside)) # find the smallest power of 2 greater than or equal to min_nside
+        return int(nside)
     
 
 class MWTools():
@@ -130,7 +147,7 @@ class MWTools():
             L       = L,
             lam     = lam,
             filters = j_filter,
-            reality = False,
+            reality = True,
         )
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
@@ -158,7 +175,7 @@ class MWTools():
             L       = L,
             lam     = lam,
             filters = j_filter,
-            reality = False,
+            reality = True,
         )
         scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
@@ -188,13 +205,13 @@ class MWTools():
             f_scal  = f_scal,
             lam     = lam,
             filters = j_filter,
-            reality = False,
+            reality = True,
             N = N_directions
         )
         return mw_map
 
     @staticmethod
-    def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, comp: str, frequency: str, realisation: int, lmax: int, wav_template: str, scal_template: str):
+    def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, comp: str, frequency: str, realisation: int, lmax: int, lam: float, wav_template: str, scal_template: str):
         """ Saves the wavelet and scaling coefficients to files.    
 
         Parameters:
@@ -204,6 +221,7 @@ class MWTools():
             frequency (str): Frequency of the map.
             realisation (int): realisation number for the map.
             lmax (int): Maximum multipole for the wavelet transform.
+            lam (float): lambda factor (scaling) for the wavelet transform.
             wav_template (str): Template for the wavelet coefficient file path.
             scal_template (str): Template for the scaling coefficient file path.
 
@@ -212,12 +230,12 @@ class MWTools():
         """
         # Save wavelet coefficients
         np_scaling = np.array(scaling_coeffs)  # Convert JAX array to numpy array
-        np.save(scal_template.format(comp = comp, frequency=frequency, realisation=realisation, lmax = lmax), np_scaling)
+        np.save(scal_template.format(comp = comp, frequency=frequency, realisation=realisation, lmax = lmax, lam = lam), np_scaling)
 
         # Save each wavelet coefficient map at each scale. (scale 0 = scaling coefficients.)
         for scale, wav in enumerate(wavelet_coeffs):
             np_wav = np.array(wav)  # Convert JAX array to numpy array
-            np.save(wav_template.format(comp = comp, frequency=frequency, scale=scale, realisation=realisation, lmax = lmax), np_wav)
+            np.save(wav_template.format(comp = comp, frequency=frequency, scale=scale, realisation=realisation, lmax = lmax, lam = lam), np_wav)
         
 
     @staticmethod
@@ -284,7 +302,7 @@ class MWTools():
         plt.show()
     
     @staticmethod
-    def plot_axisym_wavelets(L: int, lam: float = 2.0):
+    def visualise_axisym_wavelets(L: int, lam: float = 2.0):
         """
         Plots the wavelet filters for the given parameters.
         Only works for axisymmetric wavelets (N_directions = 1).
@@ -301,7 +319,7 @@ class MWTools():
             plt.plot(l_list, np.real(j_filter[i][:,middle_m]), label = f"scale {i}")
             plt.xlabel("l", fontsize=16)
             plt.ylabel("Real part of wavelet filter", fontsize=16)
-            plt.title(f"$m=0$, $\lambda = {lam}$ axisymmetric")
+            plt.title(f"lambda = {lam}, axisym")
             plt.xscale('log')
             plt.legend()
             plt.grid(ls=':')
@@ -386,7 +404,7 @@ class SamplingConverters():
         L = lmax + 1
         hp_alm = hp.map2alm(hp_map, lmax=lmax)
         mw_alm = SamplingConverters.hp_alm_2_mw_alm(hp_alm, lmax)
-        mw_map = s2fft.inverse(mw_alm, L=L, method=method, reality = False)
+        mw_map = s2fft.inverse(mw_alm, L=L, method=method, reality = True)
         return mw_map
     
     @staticmethod
@@ -402,13 +420,21 @@ class SamplingConverters():
             hp_map (numpy.ndarray): The converted Healpix map.
         """
         L = lmax + 1 
-        mw_alm = s2fft.forward(mw_map, L=L, method=method, reality = False)
+        mw_alm = s2fft.forward(mw_map, L=L, method=method, reality = True)
         hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm)
-        hp_map = hp.alm2map(hp_alm, nside=lmax//2)
+        hp_map = hp.alm2map(hp_alm, nside=HPTools.get_nside_from_lmax(lmax))
         return hp_map
-
-
-
-        
-
     
+    def mw_map_2_mwss_map(mw_map, L: int, ): 
+        """
+        Soft wrapper to convert a MW map to a MWSS map.
+
+        Parameters:
+            mw_map (numpy.ndarray): The input MW map in spherical harmonics representation.
+            L (int): The maximum multipole moment for the spherical harmonics.
+        
+        Returns:
+            mwss_map (numpy.ndarray): The converted MWSS map.
+        """
+        return s2fft.utils.resampling_jax.mw_to_mwss(mw_map, L=L)
+
