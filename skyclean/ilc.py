@@ -347,7 +347,7 @@ class ProduceSILC():
             for realisation in range(self.realisations):
                 realisation += self.start_realisation  # Adjust for starting realisation
                 print(f"Processing realisation {realisation} for component {comp}...")
-                path_test = self.file_templates['ilc_synthesised'].format(realisation=realisation, lmax=lmax, lam=lam)
+                path_test = self.file_templates['ilc_synth'].format(realisation=realisation, lmax=lmax, lam=lam)
                 if os.path.exists(path_test) and self.overwrite == False:
                     print(f"File {path_test} already exists. Skipping to the next realisation.")
                     continue
@@ -421,12 +421,12 @@ class ProduceSILC():
 
                 # Synthesise the ILC map from the trimmed wavelet maps
                 if self.synthesise:
-                    ilc_synthesised_map_path = self.file_templates['ilc_synthesised'].format(realisation=realisation, lmax=lmax, lam=lam)
-                    if os.path.exists(ilc_synthesised_map_path) and self.overwrite == False:
+                    ilc_synth_map_path = self.file_templates['ilc_synth'].format(realisation=realisation, lmax=lmax, lam=lam)
+                    if os.path.exists(ilc_synth_map_path) and self.overwrite == False:
                         print(f"ILC synthesised map for realisation {realisation} already exists. Skipping synthesis.")
                     else:
                         mw_pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions, lam)
-                        np.save(ilc_synthesised_map_path, mw_pix)
+                        np.save(ilc_synth_map_path, mw_pix)
                         print(f"Saved synthesised ILC map for realisation {realisation}.")
                     
         return None

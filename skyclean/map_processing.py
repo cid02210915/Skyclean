@@ -71,7 +71,12 @@ class ProcessMaps():
                 # Certain foreground components are frequency-independent, so we can skip processing
                 hp_map_reduced = hp.read_map(output_path)
             else:
-                filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation)
+                if comp == "noise": 
+                    # there are only 300 noise realisations, select a random one
+                    noise_realisation = np.random.randint(0, 300)
+                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=noise_realisation)
+                else:
+                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation)
                 hp_map = hp.read_map(filepath)
                 hp_map = HPTools.unit_convert(hp_map, frequency)
                 if comp == "noise":

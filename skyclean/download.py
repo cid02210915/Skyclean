@@ -55,7 +55,6 @@ class DownloadData():
 
         # Format the URL with the current frequency and realisation
         url = template.format(frequency=frequency, realisation=realisation)
-        print(url)
         # Send a GET request to the URL
         response = requests.get(url)
         # Check if the request was successful
@@ -112,11 +111,15 @@ class DownloadData():
         # now download CMB and noise, which are realisation dependent.
         for realisation in range(self.realisations):
             realisation += self.start_realisation  # Adjust for starting realisation
+            print(realisation)
             print(f"Downloading CMB & noise for realisation {realisation}...")
             self.generate_and_save_cmb_realisation(realisation)
             if 'noise' in self.components:
-                for frequency in self.frequencies:
-                    self.download_foreground_component("noise", frequency, realisation)
+                if realisation > 299: 
+                    continue # there are only ffp10 300 noise realisations
+                else:
+                    for frequency in self.frequencies:
+                        self.download_foreground_component("noise", frequency, realisation)
 
 # components = ["sync", "dust"]
 # frequencies = ["030", "070", "143", "217", "353"]

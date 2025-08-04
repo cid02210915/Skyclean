@@ -632,8 +632,8 @@ class Visualise():
 
 frequencies = ["030"]
 realisation = 0
-lmax = 500
-lam_list = [2.0]
+lmax = 511
+lam_list = [4.0]
 directory = "/Scratch/matthew/data/"
 map_comps = ["ilc_synth", "cmb"]
 
@@ -647,5 +647,5 @@ visualiser = Visualise(
 
 #visualiser.visualise_maps(map_comps)
 #visualiser.visualise_power_spectra(map_comps, cross_correlation_indices=[[0, 1]])  
-visualiser.visualise_component_ratio_power_spectra("ilc_synth", "cmb", include_cross_correlation=True, ratio=False)
+visualiser.visualise_component_ratio_power_spectra("cmb","ilc_synth", include_cross_correlation=True, ratio=False)
 

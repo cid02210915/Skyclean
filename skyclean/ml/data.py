@@ -2,14 +2,19 @@ import os
 import sys
 import numpy as np
 import healpy as hp 
+import matplotlib.pyplot as plt
 
 # import from skyclean/
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import * 
 from map_tools import * 
+from file_templates import FileTemplates
 import tensorflow as tf
-from sklearn.model_selection import train_test_split
+
+import jax
+import jax.numpy as jnp
+jax.config.update("jax_enable_x64", False)  # Use 32-bit
 
 class CMBFreeILC(): 
     def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
@@ -35,27 +40,12 @@ class CMBFreeILC():
         self.split = split
         self.directory = directory
 
-        self.saved_directories = {
-            "cfn": os.path.join(self.directory, "CFN_realisations"),
-            "processed_maps": os.path.join(self.directory, "processed_maps"),
-            "ilc_synthesised": os.path.join(self.directory, "SILC/ilc_synthesised_maps"),
-        }
+        self.a = 1E-5
 
-        ml_directory = os.path.join(self.directory, "ML/")
-        if not os.path.exists(ml_directory):
-            create_dir(ml_directory)
-        self.saved_directories["ml"] = ml_directory
-
-
-        self.file_templates = {
-            "cfn": os.path.join(self.saved_directories["cfn"], "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
-            "cmb": os.path.join(self.saved_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
-            "ilc_synthesised": os.path.join(self.saved_directories["ilc_synthesised"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}.npy"), #add _lam 
-            "foreground_estimate": os.path.join(self.saved_directories["ml"], "foreground_estimate_r{realisation:04d}_lmax{lmax}.npy"),
-            "ilc_residual": os.path.join(self.saved_directories["ml"], "ilc_residual_r{realisation:04d}_lmax{lmax}.npy"),
-        }
+        files = FileTemplates(directory)
+        self.file_templates = files.file_templates
         # retrieve shapes
-        ilc_map_temp = np.load(self.file_templates["ilc_synthesised"].format(realisation=0, lmax=self.lmax))
+        ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(realisation=0, lmax=self.lmax, lam = self.lam))
         self.H = ilc_map_temp.shape[0]+1
         self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
     
@@ -78,19 +68,19 @@ class CMBFreeILC():
         else:
             print(f"Creating residual maps for realisation {realisation}...")
             # load ilc (already in MW sampling)
-            ilc_map_mw = np.load(self.file_templates["ilc_synthesised"].format(realisation=realisation, lmax=lmax))
+            ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(realisation=realisation, lmax=lmax, lam=lam))
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
-            cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float64)
+            cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
             cmb_map_mw = SamplingConverters.hp_map_2_mw_map(cmb_map_hp, lmax) # highly expensive? involves s2fft.forwards.
             cmb_map_mwss = SamplingConverters.mw_map_2_mwss_map(cmb_map_mw, L=L)
             # load cfn maps across frequencies and convert to MW sampling
-            cfn_maps_hp = [hp.read_map(self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=lmax), dtype=np.float64) for frequency in frequencies]
+            cfn_maps_hp = [hp.read_map(self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=lmax), dtype=np.float32) for frequency in frequencies]
             cfn_maps_mw = [SamplingConverters.hp_map_2_mw_map(cfn_map_hp, lmax) for cfn_map_hp in cfn_maps_hp]
             cfn_maps_mwss = [SamplingConverters.mw_map_2_mwss_map(cfn_map_mw, L=L) for cfn_map_mw in cfn_maps_mw]
             # create foreground estimate and ilc residual
-            foreground_estimate = np.zeros((H, W, len(frequencies)), dtype=np.float64)
-            ilc_residual = np.zeros((H, W, 1), dtype=np.float64)
+            foreground_estimate = np.zeros((H, W, len(frequencies)), dtype=np.float32)
+            ilc_residual = np.zeros((H, W, 1), dtype=np.float32)
             for i, _ in enumerate(frequencies):
                 foreground_estimate[:, :, i] = cfn_maps_mwss[i] - ilc_map_mwss
                 ilc_residual[:, :, 0] = ilc_map_mwss - cmb_map_mwss
@@ -99,61 +89,73 @@ class CMBFreeILC():
             np.save(self.file_templates["ilc_residual"].format(realisation=realisation, lmax=lmax), ilc_residual)
         return foreground_estimate, ilc_residual
 
-    def process_and_concatenate_maps(self): 
-        """Concatenate maps across realisations, appending another axis to the arrays, resulting in a shape of (realisations, H, W, N_freq) 
-        for foreground_estimate and (realisations, H, W, 1) for ilc_residual."""
-        realisations = self.realisations
-        H, W = self.H, self.W
-        N_freq = len(self.frequencies)
-        X = np.zeros((realisations, H, W, N_freq), dtype=np.float64)
-        Y = np.zeros((realisations, H, W, 1), dtype=np.float64)
-        for realisation in range(realisations):
-            foreground_estimate, ilc_residual = self.create_residual_mwss_maps(realisation)
-            X[realisation, :, :, :] = foreground_estimate
-            Y[realisation, :, :, :] = ilc_residual
-        return X, Y
-
-    def split_data(self, X: np.ndarray, Y: np.ndarray):
-        """Split data into train and test. 
+    def transform(self, x: tf.Tensor):
+        """ Apply a signed-log transform followed by z-score normalization.
 
         Parameters:
-            X (np.ndarray): Input data (foreground estimates).
-            Y (np.ndarray): Target data (ILC residuals).
-            split (list): List of proportions for train, validation, and test splits.
-
+            x (tf.Tensor): Input tensor.
         Returns:
-            X_train, Y_train, X_val, Y_val, X_test, Y_test:
+            tf.Tensor: Transformed and normalized tensor.
         """
-        assert sum(self.split) == 1, "Split proportions must sum to 1."
-
-        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=self.split[1], shuffle=self.shuffle)
-
-        return X_train, Y_train, X_test, Y_test
-
-    def prepare_tf_dataset(self, X: np.ndarray, Y: np.ndarray): 
-        """Prepare a TensorFlow dataset for training and testing. This includes applying transforms, shuffling, and batching the data.
-
+        # Apply signed-log transform
+        signed_log_x = jnp.sign(x) * jnp.log1p(jnp.abs(x) / self.a)
+        
+        # Apply z-score normalization
+        mean = jnp.mean(signed_log_x)
+        std = jnp.std(signed_log_x)
+        
+        return (signed_log_x - mean) / std
+    
+    def _data_generator(self, indices):
+        """Define a data generator for lazy loading of data.
+        
         Parameters:
-            X (np.ndarray): Input data (foreground estimates).
-            Y (np.ndarray): Target data (ILC residuals).
+            indices (list): List of realisation indices to process.
+        """
+        for realisation in indices:
+            F, R = self.create_residual_mwss_maps(realisation)
+            # Apply signed-log transform + z-score normalization + cast
+            F = self.transform(F).astype(np.float32)
+            R = self.transform(R).astype(np.float32)
+            yield F, R
+
+    def _make_dataset(self, indices):
+        """Build a tf.data.Dataset from a data generator.
+        This creates a lazy-loading dataset that processes only the specified indices when requested.
+        
+        Parameters:
+            indices (list): List of realisation indices to process.
         
         Returns:
-            tf.data.Dataset: A TensorFlow dataset ready for training.
+            tf.data.Dataset: A tf dataset containing the processed data.
         """
-        dataset = tf.data.Dataset.from_tensor_slices((X, Y))
+        signature = (
+            tf.TensorSpec((self.H, self.W, len(self.frequencies)), tf.float32),
+            tf.TensorSpec((self.H, self.W, 1), tf.float32),
+        ) # tell the generator the type of data it will yield
+        ds = tf.data.Dataset.from_generator(
+            lambda: self._data_generator(indices),
+            output_signature=signature
+        )
         if self.shuffle:
-            dataset = dataset.shuffle(buffer_size=len(X), reshuffle_each_iteration=True)
-        dataset = dataset.batch(self.batch_size, drop_remainder=True)
-        dataset = dataset.prefetch(tf.data.AUTOTUNE)  # Optimize for performance
-        return dataset
+            ds = ds.shuffle(buffer_size=len(indices))
+        return ds.batch(self.batch_size, drop_remainder=False) \
+                 .prefetch(tf.data.AUTOTUNE)
 
     def prepare_data(self):
-        print("Preparing datasets...")
-        X, Y = self.process_and_concatenate_maps()
-        X_train, Y_train, X_test, Y_test = self.split_data(X, Y)
-        train_ds = self.prepare_tf_dataset(X_train, Y_train)
-        test_ds = self.prepare_tf_dataset(X_test, Y_test)
-        return train_ds, test_ds
+        """Split indices and return (train_ds, test_ds) generators.
+        
+        Returns:
+            tuple: A tuple containing the training and testing datasets.
+        """
+        idx = np.arange(self.realisations)
+        cut = int(self.split[0] * self.realisations)
+        train_idx, test_idx = idx[:cut], idx[cut:]
+        train_ds = self._make_dataset(train_idx)
+        test_ds  = self._make_dataset(test_idx)
+        print("Data generators prepared. Train size:", len(train_idx), "Test size:", len(test_idx))
+        return train_ds, test_ds, len(train_idx), len(test_idx)
+
 
 
 ## TESTING
@@ -163,18 +165,30 @@ class CMBFreeILC():
 # import jax.numpy as jnp
 # lmax = 255
 # L = lmax+1
-# obj = CMBFreeILC(frequencies=["030", "044"], realisations=10, lmax=lmax, N_directions=1, batch_size=3, shuffle=True, split=[0.8, 0.2], directory="/Scratch/matthew/data/")
+# lam = 2.0
+# obj = CMBFreeILC(frequencies=["030", "044"], realisations=10, lmax=lmax, lam=lam, N_directions=1, batch_size=3, shuffle=True, split=[0.8, 0.2], directory="/Scratch/matthew/data/")
 # train_ds, test_ds = obj.prepare_data()
 # model = S2_UNET(L,ch_in = 2, )
 # train_iter = iter(tfds.as_numpy(train_ds))
 # batch_x, batch_y = next(train_iter)
 # image = jnp.asarray(batch_x)
+# output = jnp.asarray(batch_y)
 # print(image.shape)
-# output = model(image) #shape (3,257,513,2)
+# pred = model(image) #shape (3,257,513,2)
 # print(output.shape)
 # input_ex = image[0, :, :, 0]# First channel of the first image in the batch
-# output_ex = output[0, :, :, 0]  # First channel of the first
+# output_ex = output[0, :, :, 0]  # First channel of the first image in the batch
+# pred_ex = pred[0, :, :, 0]  # First channel of the first
 
-# fig,ax=plt.subplots(1,2)
-# ax[0].imshow(input_ex,)
-# ax[1].imshow(output_ex,)
+# fig,ax=plt.subplots(1,3, figsize=(15, 5))
+# im0 = ax[0].imshow(input_ex)
+# plt.colorbar(im0, ax=ax[0], shrink=0.2)
+# ax[0].set_title("Input Foreground Estimate")
+# im1 = ax[1].imshow(output_ex)
+# plt.colorbar(im1, ax=ax[1], shrink=0.2)
+# ax[1].set_title("ILC Residual")
+# im2 = ax[2].imshow(pred_ex)
+# plt.colorbar(im2, ax=ax[2], shrink=0.2)
+# ax[2].set_title("Predicted ILC Residual")
+# plt.tight_layout()
+# plt.savefig('network.png', bbox_inches='tight', dpi=150)

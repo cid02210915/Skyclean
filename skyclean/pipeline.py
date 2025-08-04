@@ -42,7 +42,7 @@ class Pipeline:
         self.directory = directory
 
     def run(self):
-        lam_list = [16.0, 8.0, 4.0, 2.0]
+        lam_list = [self.lam]
         for lam in lam_list:
             self.lam = lam
             start_time = time.perf_counter()
@@ -218,10 +218,10 @@ def main():
     pipeline.run()
 
 # python3 pipeline.py \
-#   --gpu 1 \
-#   --components cmb sync dust \
+#   --gpu 0 \
+#   --components cmb sync dust noise\
 #   --realisations 1 \
-#   --start-realisation 500 \
+#   --start-realisation 0 \
 #   --lmax 511 \
 #   --lam 4.0 \
 #   --frequencies 030 100 353 \

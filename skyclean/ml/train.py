@@ -8,11 +8,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # GPU configuration
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 
 import jax
 
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", False)  # Use 32-bit
+
 
 import numpy as np
 import jax.numpy as jnp
@@ -27,6 +28,34 @@ from data import CMBFreeILC
 from utils import *
 
 import matplotlib.pyplot as plt
+
+def get_gpu_memory_usage():
+    """Get current GPU memory usage as percentage and MB using JAX."""
+    devices = jax.devices()
+    gpu_devices = [d for d in devices]
+    
+    # Use the first GPU device
+    gpu = gpu_devices[0]
+    
+    # Get memory info through JAX backend
+    memory_info = gpu.memory_stats()
+    bytes_in_use = memory_info.get('bytes_in_use', 0)
+    bytes_limit = memory_info.get('bytes_limit', 1)
+    
+    mb_used = bytes_in_use / (1024 ** 2)
+    mb_total = bytes_limit / (1024 ** 2) 
+    percentage = (bytes_in_use / bytes_limit) * 100 if bytes_limit > 0 else 0
+    
+    return percentage, mb_used, mb_total
+
+def print_gpu_usage(stage_name):
+    """Print GPU memory usage for a given stage."""
+    percentage, mb_used, mb_total = get_gpu_memory_usage()
+    if percentage is not None:
+        print(f"[GPU Memory] {stage_name}: {percentage:.1f}% ({mb_used:.0f}/{mb_total:.0f} MB)")
+    else:
+        print(f"[GPU Memory] {stage_name}: Unable to query GPU memory")
+
 
 class Train: 
     def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
@@ -82,8 +111,10 @@ class Train:
             jnp.ndarray: Computed loss value.
         """
         pred_residuals = model(images)
-        return (jnp.einsum("btpc,t->", jnp.abs(residuals - pred_residuals), norm_quad_weights, optimize=True,)
-                / residuals.shape[0])
+        errors = jnp.abs(residuals - pred_residuals)
+        # integrate error over theta using quadrature weights.  
+        return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True,)
+                / (residuals.shape[0]))  # Average over batch
 
 
     def acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray, threshold: float = 1.1,):
@@ -105,7 +136,7 @@ class Train:
             errors < jnp.ones_like(errors) * threshold,
             jnp.ones_like(errors),
             jnp.zeros_like(errors),
-        )  # Not differentiating through this as it is just a metric
+        )
         return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True)/ residuals.shape[0])
 
 
@@ -160,6 +191,7 @@ class Train:
     def execute_training_procedure(self):
         """Execute the training procedure for the CMB-Free ILC model.
         """
+        
         learning_rate = self.learning_rate
         momentum = self.momentum
         epochs = self.epochs
@@ -168,11 +200,14 @@ class Train:
         
         L = self.lmax + 1 
         print("Constructing the CMB-Free ILC dataset")
-        train_ds, test_ds = self.dataset.prepare_data()
+        train_ds, test_ds, n_train, n_test= self.dataset.prepare_data()
+        training_batches_per_epoch = (n_train + batch_size - 1) // batch_size
+        testing_batches_per_epoch = (n_test + batch_size - 1) // batch_size
         train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
-        training_steps_per_epoch, testing_steps_per_epoch = len(train_ds), len(test_ds)
+        print_gpu_usage("After dataset creation")
         print("Constructing the model")
         model = S2_UNET(L, N_freq, rngs = self.rngs)
+        print_gpu_usage("After model creation")
 
         print("Configuring the optimizer")
         optimizer = nnx.Optimizer(model, optax.adam(learning_rate, momentum))
@@ -202,11 +237,14 @@ class Train:
         print("Starting training")
         for epoch in range(1, epochs + 1):
             # Commence training for the current epoch
-            for _ in range(training_steps_per_epoch):
+            for _ in range(training_batches_per_epoch):
                 batch_x, batch_y = next(train_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
                 state = Train.train_step(graphdef, state, images, residuals, norm_quad_weights)
+                # Print GPU usage for first batch of first epoch
+                if epoch == 1 and _ == 0:
+                    print_gpu_usage("After first training step")
             nnx.update((model, optimizer, metrics), state)  # Upd. model/opt/metrics
             train_iter = iter(tfds.as_numpy(train_ds)) # reset iterator after each epoch
 
@@ -216,7 +254,7 @@ class Train:
             metrics.reset()
 
             # Evaluate at the end of the current epoch
-            for _ in range(testing_steps_per_epoch):
+            for _ in range(testing_batches_per_epoch):
                 batch_x, batch_y = next(test_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
@@ -237,32 +275,113 @@ class Train:
                 )
             )
             np.save(self.save_dir + "training_log.npy", metrics_history)
+            
+            # Plot training metrics
+            self.plot_training_metrics(metrics_history, epoch)
+            
             # Plot sample input and predictions
-            fig,ax=plt.subplots(1,3)
+            n_examples = 3  # Show up to 3 examples
+            fig, ax = plt.subplots(n_examples, 4, figsize=(20, 5 * n_examples))
+            if n_examples == 1:
+                ax = ax.reshape(1, -1)  # Ensure 2D array for consistency
+            
             foreground, residual = test_batch
-            input_ex = jnp.asarray(foreground[0, :, :, 0])
-            output_ex = jnp.asarray(residual[0, :, :, 0])
-            pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]
-            ax[0].imshow(input_ex)
-            ax[0].set_title("Input")
-            ax[1].imshow(output_ex)
-            ax[1].set_title("Output")
-            ax[2].imshow(pred_ex)
-            ax[2].set_title(f"Prediction (acc = {metrics_history['eval_accuracy'][-1]:.3f})")
+            
+            for row in range(n_examples):
+                input_ex = jnp.asarray(foreground[row, :, :, 0])
+                output_ex = jnp.asarray(residual[row, :, :, 0])
+                pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]
+                residual_ex = pred_ex - output_ex  # Prediction - Target residual
+                
+                # Find global min/max for consistent colorbar (excluding residual)
+                vmin = min(jnp.min(input_ex), jnp.min(output_ex), jnp.min(pred_ex))
+                vmax = max(jnp.max(input_ex), jnp.max(output_ex), jnp.max(pred_ex))
+                
+                # Residual colorbar limits (symmetric around zero)
+                res_max = max(abs(jnp.min(residual_ex)), abs(jnp.max(residual_ex)))
+                res_vmin, res_vmax = -res_max, res_max
+                
+                # Input
+                im0 = ax[row, 0].imshow(input_ex, vmin=vmin, vmax=vmax)
+                plt.colorbar(im0, ax=ax[row, 0], shrink=0.6)
+                ax[row, 0].set_title(f"Input (Ex {row+1})")
+                
+                # Output
+                im1 = ax[row, 1].imshow(output_ex, vmin=vmin, vmax=vmax)
+                plt.colorbar(im1, ax=ax[row, 1], shrink=0.6)
+                ax[row, 1].set_title(f"Output (Ex {row+1})")
+                
+                # Prediction
+                im2 = ax[row, 2].imshow(pred_ex, vmin=vmin, vmax=vmax)
+                plt.colorbar(im2, ax=ax[row, 2], shrink=0.6)
+                ax[row, 2].set_title(f"Prediction (Ex {row+1})")
+                
+                # Residual (Prediction - Output)
+                im3 = ax[row, 3].imshow(residual_ex, vmin=res_vmin, vmax=res_vmax, cmap='RdBu_r')
+                plt.colorbar(im3, ax=ax[row, 3], shrink=0.6)
+                ax[row, 3].set_title(f"Residual (Ex {row+1})")
+            
+            # Add overall accuracy to the figure
+            fig.suptitle(f"Epoch {epoch} - Validation Accuracy: {metrics_history['eval_accuracy'][-1]:.3f}", fontsize=16)
+            
+            plt.tight_layout()
+            plt.savefig(f'{self.save_dir}/prediction_epoch_{epoch:03d}.png', bbox_inches='tight', dpi=150)
             plt.show()
+
+    def plot_training_metrics(self, metrics_history, current_epoch):
+        """Plot and save training metrics."""
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
+        
+        epochs = range(1, current_epoch + 1)
+        
+        # Loss plots
+        ax1.plot(epochs, metrics_history["train_loss"], 'b-', label='Training Loss', linewidth=2)
+        ax1.set_title('Training Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+        
+        ax2.plot(epochs, metrics_history["eval_loss"], 'r-', label='Validation Loss', linewidth=2)
+        ax2.set_title('Validation Loss')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Loss')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend()
+        
+        # Accuracy plots
+        ax3.plot(epochs, metrics_history["train_accuracy"], 'b-', label='Training Accuracy', linewidth=2)
+        ax3.set_title('Training Accuracy')
+        ax3.set_xlabel('Epoch')
+        ax3.set_ylabel('Accuracy')
+        ax3.grid(True, alpha=0.3)
+        ax3.legend()
+        
+        ax4.plot(epochs, metrics_history["eval_accuracy"], 'r-', label='Validation Accuracy', linewidth=2)
+        ax4.set_title('Validation Accuracy')
+        ax4.set_xlabel('Epoch')
+        ax4.set_ylabel('Accuracy')
+        ax4.grid(True, alpha=0.3)
+        ax4.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'training_metrics.png', bbox_inches='tight', dpi=150)
+        plt.close()  # Close to save memory
+
+    
 
 
 ## Test usage 
-frequencies = ["030", "044"]
-realisations = 16
-lmax = 255
+frequencies = ["030", "100", "353"]
+realisations = 1000
+lmax = 511
 N_directions = 1
 lam = 4.0
-batch_size = 2
+batch_size = 8
 shuffle = True
 split = [0.8, 0.2]
-epochs = 10
-learning_rate = 1e-3
+epochs = 100
+learning_rate = 1e-4
 momentum = 0.9
 rngs = nnx.Rngs(0)
 directory = "/Scratch/matthew/data/"
