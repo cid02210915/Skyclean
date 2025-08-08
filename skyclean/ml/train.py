@@ -22,6 +22,8 @@ from flax import nnx
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
+import s2fft
+import functools
 
 from model import S2_UNET
 from data import CMBFreeILC
@@ -111,10 +113,36 @@ class Train:
             jnp.ndarray: Computed loss value.
         """
         pred_residuals = model(images)
-        errors = jnp.abs(residuals - pred_residuals)
-        # integrate error over theta using quadrature weights.  
+        errors = jnp.abs(residuals-pred_residuals) #L2 loss to penalise bigger errors
+        # mask = jnp.ones_like(errors)  # Create a mask of ones
+        # sin = jnp.sin(jnp.linspace(0, jnp.pi, errors.shape[1]))**5
+        # mask = mask * sin[None, :, None, None] 
+        # errors = jnp.abs(errors*mask).astype(pred_residuals.dtype)  # Apply the mask to the errors
+        #integrate error over theta using quadrature weights.  
         return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True,)
                 / (residuals.shape[0]))  # Average over batch
+        
+    @staticmethod
+    def loss_fn_harmonic(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray):
+        L = 512
+        pred_residuals = model(images)
+        # broadcast out N_channels = 1 dimension
+        pred_maps = pred_residuals[..., 0]
+        target_maps = residuals[..., 0]
+
+        # edit s2ftt.forward to allow for batch processing
+        forward = functools.partial(s2fft.forward,
+                                        L=L,
+                                        method="jax_cuda")
+        forward_batch = jax.vmap(forward, in_axes=0, out_axes=0)
+
+        pred_spec = jnp.abs(forward_batch(pred_maps))     # shape (batch, l, m)
+        target_spec = jnp.abs(forward_batch(target_maps)) # same shape
+
+        losses = optax.l2_loss(target_spec, pred_spec)
+
+        return jnp.mean(losses)
+
 
 
     def acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray, threshold: float = 1.1,):
@@ -157,7 +185,7 @@ class Train:
         """
         model, optimizer, metrics = nnx.merge(graphdef, state)
         model.train()
-        loss, grads = nnx.value_and_grad(Train.loss_fn)(model, images, residuals, norm_quad_weights)
+        loss, grads = nnx.value_and_grad(Train.loss_fn_harmonic)(model, images, residuals, norm_quad_weights)
         optimizer.update(grads)
         accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
         metrics.update(loss=loss, accuracy=accuracy)
@@ -181,7 +209,7 @@ class Train:
         """
         model, optimizer, metrics = nnx.merge(graphdef, state)
         model.eval()
-        loss = Train.loss_fn(model, images, residuals, norm_quad_weights)
+        loss = Train.loss_fn_harmonic(model, images, residuals, norm_quad_weights)
         accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
         metrics.update(loss=loss, accuracy=accuracy)
         _, state = nnx.split((model, optimizer, metrics))
@@ -276,60 +304,18 @@ class Train:
             )
             np.save(self.save_dir + "training_log.npy", metrics_history)
             
-            # Plot training metrics
+            # Plot training metrics and examples
+            # on last epoch, plot metrics and examples
             self.plot_training_metrics(metrics_history, epoch)
-            
-            # Plot sample input and predictions
-            n_examples = 3  # Show up to 3 examples
-            fig, ax = plt.subplots(n_examples, 4, figsize=(20, 5 * n_examples))
-            if n_examples == 1:
-                ax = ax.reshape(1, -1)  # Ensure 2D array for consistency
-            
-            foreground, residual = test_batch
-            
-            for row in range(n_examples):
-                input_ex = jnp.asarray(foreground[row, :, :, 0])
-                output_ex = jnp.asarray(residual[row, :, :, 0])
-                pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]
-                residual_ex = pred_ex - output_ex  # Prediction - Target residual
-                
-                # Find global min/max for consistent colorbar (excluding residual)
-                vmin = min(jnp.min(input_ex), jnp.min(output_ex), jnp.min(pred_ex))
-                vmax = max(jnp.max(input_ex), jnp.max(output_ex), jnp.max(pred_ex))
-                
-                # Residual colorbar limits (symmetric around zero)
-                res_max = max(abs(jnp.min(residual_ex)), abs(jnp.max(residual_ex)))
-                res_vmin, res_vmax = -res_max, res_max
-                
-                # Input
-                im0 = ax[row, 0].imshow(input_ex, vmin=vmin, vmax=vmax)
-                plt.colorbar(im0, ax=ax[row, 0], shrink=0.6)
-                ax[row, 0].set_title(f"Input (Ex {row+1})")
-                
-                # Output
-                im1 = ax[row, 1].imshow(output_ex, vmin=vmin, vmax=vmax)
-                plt.colorbar(im1, ax=ax[row, 1], shrink=0.6)
-                ax[row, 1].set_title(f"Output (Ex {row+1})")
-                
-                # Prediction
-                im2 = ax[row, 2].imshow(pred_ex, vmin=vmin, vmax=vmax)
-                plt.colorbar(im2, ax=ax[row, 2], shrink=0.6)
-                ax[row, 2].set_title(f"Prediction (Ex {row+1})")
-                
-                # Residual (Prediction - Output)
-                im3 = ax[row, 3].imshow(residual_ex, vmin=res_vmin, vmax=res_vmax, cmap='RdBu_r')
-                plt.colorbar(im3, ax=ax[row, 3], shrink=0.6)
-                ax[row, 3].set_title(f"Residual (Ex {row+1})")
-            
-            # Add overall accuracy to the figure
-            fig.suptitle(f"Epoch {epoch} - Validation Accuracy: {metrics_history['eval_accuracy'][-1]:.3f}", fontsize=16)
-            
-            plt.tight_layout()
-            plt.savefig(f'{self.save_dir}/prediction_epoch_{epoch:03d}.png', bbox_inches='tight', dpi=150)
-            plt.show()
+            self.plot_examples(model, test_batch, epoch=epoch, n_examples=5)
 
     def plot_training_metrics(self, metrics_history, current_epoch):
-        """Plot and save training metrics."""
+        """Plot and save training metrics.
+        
+        Parameters:
+            metrics_history (dict): Dictionary containing training and evaluation metrics history.
+            current_epoch (int): The current epoch number.
+        """
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
         
         epochs = range(1, current_epoch + 1)
@@ -367,6 +353,69 @@ class Train:
         plt.tight_layout()
         plt.savefig(f'training_metrics.png', bbox_inches='tight', dpi=150)
         plt.close()  # Close to save memory
+    
+    def plot_examples(self, model, test_batch, epoch: int, n_examples: int = 1):
+        """Plot input, output, model prediction and residuals for sample examples.
+        Parameters:
+            model (nnx.Module): The trained model.
+            test_batch (tuple): A batch of test data (input images and target residuals).
+            epoch (int): The current training epoch.
+            n_examples (int): Number of examples to plot from the test batch.
+        """ 
+        # Plot sample input and predictions
+        fig, ax = plt.subplots(n_examples, 5, figsize=(25, 5 * n_examples))
+        if n_examples == 1:
+            ax = ax.reshape(1, -1)  # Ensure 2D array for consistency
+        
+        foreground, residual = test_batch
+        
+        for row in range(n_examples):
+            input_ex = jnp.asarray(foreground[row, :, :, 0])
+            output_ex = jnp.asarray(residual[row, :, :, 0])
+            pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]
+            residual_ex = pred_ex - output_ex  # Prediction - Target residual
+            
+            # Find global min/max for consistent colorbar (excluding residual)
+            vmin = min(jnp.min(input_ex), jnp.min(output_ex), jnp.min(pred_ex))
+            vmax = max(jnp.max(input_ex), jnp.max(output_ex), jnp.max(pred_ex))
+            
+            # Residual colorbar limits (symmetric around zero)
+            res_max = max(abs(jnp.min(residual_ex)), abs(jnp.max(residual_ex)))
+            res_vmin, res_vmax = -res_max, res_max
+            
+            # Input
+            im0 = ax[row, 0].imshow(input_ex, vmin=vmin, vmax=vmax)
+            plt.colorbar(im0, ax=ax[row, 0], shrink=0.6)
+            ax[row, 0].set_title(f"Input (Ex {row+1})")
+            
+            # Output
+            im1 = ax[row, 1].imshow(output_ex, vmin=vmin, vmax=vmax)
+            plt.colorbar(im1, ax=ax[row, 1], shrink=0.6)
+            ax[row, 1].set_title(f"Output (Ex {row+1})")
+            
+            # Prediction
+            im2 = ax[row, 2].imshow(pred_ex, vmin=vmin, vmax=vmax)
+            plt.colorbar(im2, ax=ax[row, 2], shrink=0.6)
+            ax[row, 2].set_title(f"Prediction (Ex {row+1})")
+            
+            # Residual (Prediction - Output)
+            im3 = ax[row, 3].imshow(residual_ex, vmin=res_vmin, vmax=res_vmax, cmap='RdBu_r')
+            plt.colorbar(im3, ax=ax[row, 3], shrink=0.6)
+            ax[row, 3].set_title(f"Residual (Ex {row+1})")
+            
+            # Combined Histogram of Expected Output and Prediction
+            ax[row, 4].hist(output_ex.flatten(), bins=30, alpha=0.6, color='red', density=True, label='Expected Output')
+            ax[row, 4].hist(pred_ex.flatten(), bins=30, alpha=0.6, color='blue', density=True, label='Prediction')
+            ax[row, 4].set_title(f"Distribution Comparison (Ex {row+1})")
+            ax[row, 4].set_xlabel("Pixel Value")
+            ax[row, 4].set_ylabel("Density")
+            ax[row, 4].grid(True, alpha=0.3)
+            ax[row, 4].legend()
+        
+        plt.tight_layout()
+        fig.suptitle(f"Epoch {epoch}", fontsize=16)
+        plt.savefig(f'prediction.png', bbox_inches='tight', dpi=150)
+        plt.show()
 
     
 
@@ -376,12 +425,12 @@ frequencies = ["030", "100", "353"]
 realisations = 1000
 lmax = 511
 N_directions = 1
-lam = 4.0
+lam = 2.0
 batch_size = 8
 shuffle = True
 split = [0.8, 0.2]
 epochs = 100
-learning_rate = 1e-4
+learning_rate = 1E-1
 momentum = 0.9
 rngs = nnx.Rngs(0)
 directory = "/Scratch/matthew/data/"

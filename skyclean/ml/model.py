@@ -14,7 +14,7 @@ from s2ai.blocks.core_blocks import (
 
 class S2_UNET(nnx.Module):
     """UNET architecture defined on the sphere, built on s2ai."""
-    def __init__(self, L: int = 512, ch_in = 9, filter_type="square", rngs: nnx.Rngs = nnx.Rngs(0),):
+    def __init__(self, L: int = 512, ch_in = 9, filter_type="axisymmetric", rngs: nnx.Rngs = nnx.Rngs(0),):
         """
         Parameters:
             L (int): The maximum multipole for the wavelet transform.
@@ -22,16 +22,18 @@ class S2_UNET(nnx.Module):
             filter_type (str): Type of filter to use in the convolutional blocks.
             rngs (nnx.Rngs): Random number generators for initialization.
         """
-        chs = [1, 8, 16, 32, 64, 128, 256]
+        #chs = [1, 16, 16, 32, 64, 256]
+        chs = [1, 16, 16, 32, 64]
         gr = 8
         Ls = [int(L / pow(2, i)) for i in range(len(chs) - 1)]
+        print(Ls)
         self.len_L = len(Ls)
 
-        activation = nnx.celu
+        activation = nnx.celu  # or could use nnx.gelu, nnx.relu, or nnx.leaky_relu
 
         # Code local backup
         self.input_conv = DiscoConvBlock(
-            (Ls[0], Ls[0]), (ch_in, ch_in), 1, filter_type=filter_type, rngs=rngs
+            (Ls[0], Ls[0]), (ch_in, ch_in), 1, filter_type=filter_type, activation=activation, rngs=rngs
         )
         self.input_res = BotResBlock(
             Ls[0], (ch_in, ch_in, chs[1]), filter_type=filter_type, rngs=rngs
@@ -86,6 +88,10 @@ class S2_UNET(nnx.Module):
                 )
             )
             cur_ch = chs[i]
+        
+        self.output_conv = DiscoConvBlock(
+            (Ls[0], Ls[0]), (chs[0], 1), 1, filter_type=filter_type, activation=None, rngs=rngs
+        )
 
     def __call__(self, x):
 
@@ -106,16 +112,8 @@ class S2_UNET(nnx.Module):
             x = self.up_convs[i](x)
             x = jnp.concatenate([x, connections[self.len_L - 2 - i]], axis=-1)
             x = self.up_ress[i](x)
-        return x
+        
+        # Final output layer without activation for full range
+        x = self.output_conv(x)
+        return jnp.clip(x, -6.5, 6.5)
     
-
-
-import jax.numpy as jnp
-import matplotlib.pyplot as plt
-H = 100
-W = 100
-mask = jnp.ones((1, H, W, 1), dtype=jnp.float32)
-sin = jnp.sin(jnp.linspace(0, jnp.pi, H))**5
-# Create new array instead of in-place assignment
-mask = mask * sin[None, :, None, None]  # Broadcasting multiplication
-plt.imshow(mask[0,:,:,0])
