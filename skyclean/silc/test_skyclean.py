@@ -1,11 +1,17 @@
 import pytest
 import healpy as hp
 import numpy as np
-from map_tools import *
-from utils import *
 import s2fft
 import re
 import glob
+
+from .utils import *
+from .map_tools import *
+from .map_processing import *
+from .ilc import *
+from .file_templates import *
+from .pipeline import *
+from .visualise import *
 
 class Tests(): 
     def __init__(self, directory): 

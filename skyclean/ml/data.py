@@ -4,12 +4,7 @@ import numpy as np
 import healpy as hp 
 import matplotlib.pyplot as plt
 
-# import from skyclean/
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from utils import * 
-from map_tools import * 
-from file_templates import FileTemplates
+from skyclean.silc import utils, HPTools, MWTools, SamplingConverters, FileTemplates
 import tensorflow as tf
 
 import jax

@@ -1,4 +1,3 @@
-from utils import *
 import os 
 import healpy as hp
 import numpy as np
@@ -9,6 +8,8 @@ jax.config.update("jax_enable_x64", True)
 import s2fft
 import s2wav
 import s2wav.filters as filters
+
+from .utils import *
 
 class HPTools():
     """Tools to process healpy/MW maps"""

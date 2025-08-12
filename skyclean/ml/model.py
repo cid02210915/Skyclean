@@ -23,7 +23,7 @@ class S2_UNET(nnx.Module):
             rngs (nnx.Rngs): Random number generators for initialization.
         """
         #chs = [1, 16, 16, 32, 64, 256]
-        chs = [1, 16, 16, 32, 64]
+        chs = [1, 64, 64, 256]
         gr = 8
         Ls = [int(L / pow(2, i)) for i in range(len(chs) - 1)]
         print(Ls)
@@ -112,8 +112,7 @@ class S2_UNET(nnx.Module):
             x = self.up_convs[i](x)
             x = jnp.concatenate([x, connections[self.len_L - 2 - i]], axis=-1)
             x = self.up_ress[i](x)
-        
-        # Final output layer without activation for full range
+
         x = self.output_conv(x)
         return jnp.clip(x, -6.5, 6.5)
     

@@ -2,10 +2,9 @@ import argparse
 import os
 import time
 
-from download import DownloadData
-from map_processing import ProcessMaps
-from ilc import ProduceSILC
-
+from .download import DownloadData
+from .map_processing import ProcessMaps
+from .ilc import ProduceSILC
 
 class Pipeline:
     """Run the entire SILC pipeline from downloading and processing data to wavelet transforms to producing the final ILC map."""

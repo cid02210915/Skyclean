@@ -1,7 +1,7 @@
-from map_tools import *
 import os
 import healpy as hp
-from file_templates import FileTemplates
+from .file_templates import FileTemplates
+from .map_tools import *
 
 
 class ProcessMaps():
@@ -101,11 +101,11 @@ class ProcessMaps():
             for frequency in self.frequencies:
                 cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                 if os.path.exists(cfn_output_path) and self.overwrite == False:
-                    print(f"CFN map at {frequency} GHz for realisation {realisation + 1} already exists. Skipping processing.")
+                    print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                     continue
                 cfn_map = self.create_cfn(frequency, realisation, save=True)
                 hp.write_map(cfn_output_path, cfn_map, overwrite=True)
-                print(f"CFN map at {frequency} GHz for realisation {realisation + 1} saved to {cfn_output_path}")
+                print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
 
 
     def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
@@ -132,7 +132,7 @@ class ProcessMaps():
         scaling_coeffs_path = self.file_templates["scaling_coeffs"]
         if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, realisation=realisation, lmax=lmax, lam = lam)) and self.overwrite == False:
             # test if scale 0 exists; this means the transform has already been created
-            print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation + 1} already exist. Skipping generation.")
+            print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation} already exist. Skipping generation.")
             return None
         hp_map = hp.read_map(filepath)
         L = lmax + 1
@@ -162,7 +162,7 @@ class ProcessMaps():
                 realisation += self.start_realisation
                 for frequency in self.frequencies:
                     self.create_wavelet_transform(comp, frequency, realisation, N_directions=N_directions, lam=lam, method=method, visualise=visualise)
-                    print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation + 1} saved.")
+                    print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation} saved.")
 
 # processor = ProcessMaps(components=["cmb", "sync"], wavelet_components=["cfn"], frequencies = ["030", "044"], realisations=0, desired_lmax=256, directory="/Scratch/matthew/data/", overwrite=False)
 # processor.produce_and_save_cfns()

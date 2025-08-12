@@ -1,12 +1,10 @@
-from utils import * 
-from map_tools import *
 import healpy as hp
+import numpy as np
 import matplotlib.pyplot as plt
-from file_templates import FileTemplates
 
-
-### WIP: need to implement file templates. Plotting functions work otherwise.
-
+from .map_tools import *
+from .utils import *
+from .file_templates import *
 
 class Visualise(): 
     def __init__(self, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/"):
@@ -432,9 +430,6 @@ class Visualise():
             figsize=(5*ncols, 4*nrows),
             squeeze=False
         )
-        fig.suptitle(
-            f"Power Spectrum {'Ratio' if ratio else 'Residual'}: {'$D_{\\ell}$ Ratio' if ratio else '$\\Delta D_{\\ell}$'}",
-            fontsize=20, fontweight='bold')
         axes_flat = axes.flatten()
 
         for idx, freq in enumerate(frequencies):
@@ -630,22 +625,22 @@ class Visualise():
         plt.savefig(filename)
         plt.show()
 
-frequencies = ["030"]
-realisation = 0
-lmax = 511
-lam_list = [4.0]
-directory = "/Scratch/matthew/data/"
-map_comps = ["ilc_synth", "cmb"]
+# frequencies = ["030"]
+# realisation = 0
+# lmax = 511
+# lam_list = [4.0]
+# directory = "/Scratch/matthew/data/"
+# map_comps = ["ilc_synth", "cmb"]
 
-visualiser = Visualise(
-    frequencies=frequencies,
-    realisation=realisation,
-    lmax=lmax,
-    lam_list=lam_list,
-    directory=directory
-)
+# visualiser = Visualise(
+#     frequencies=frequencies,
+#     realisation=realisation,
+#     lmax=lmax,
+#     lam_list=lam_list,
+#     directory=directory
+# )
 
-#visualiser.visualise_maps(map_comps)
-#visualiser.visualise_power_spectra(map_comps, cross_correlation_indices=[[0, 1]])  
-visualiser.visualise_component_ratio_power_spectra("cmb","ilc_synth", include_cross_correlation=True, ratio=False)
+# #visualiser.visualise_maps(map_comps)
+# #visualiser.visualise_power_spectra(map_comps, cross_correlation_indices=[[0, 1]])  
+# visualiser.visualise_component_ratio_power_spectra("cmb","ilc_synth", include_cross_correlation=True, ratio=False)
 

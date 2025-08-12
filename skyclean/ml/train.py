@@ -2,32 +2,28 @@
 # Original code by: Matthew A. Price, Kevin Mulder, Jason D. McEwen
 # License: MIT
 
+import argparse
 import os
 import sys
-# import from skyclean/
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # GPU configuration
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 
 import jax
-
 jax.config.update("jax_enable_x64", False)  # Use 32-bit
-
 
 import numpy as np
 import jax.numpy as jnp
 import optax
 from flax import nnx
-import tensorflow as tf
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 import s2fft
 import functools
 
-from model import S2_UNET
-from data import CMBFreeILC
-from utils import *
+from .model import S2_UNET
+from .data import CMBFreeILC
+from skyclean.silc.utils import create_dir
 
 import matplotlib.pyplot as plt
 
@@ -238,7 +234,7 @@ class Train:
         print_gpu_usage("After model creation")
 
         print("Configuring the optimizer")
-        optimizer = nnx.Optimizer(model, optax.adam(learning_rate, momentum))
+        optimizer = nnx.Optimizer(model, optax.adam(learning_rate))
 
         print("Configuring the metrics")
         # nnx metric setup
@@ -417,26 +413,152 @@ class Train:
         plt.savefig(f'prediction.png', bbox_inches='tight', dpi=150)
         plt.show()
 
+
+def main():
+    """Main function to run training with command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Train the CMB-Free ILC neural network with configurable parameters and GPU selection."
+    )
+    parser.add_argument(
+        '--frequencies',
+        nargs='+',
+        default=["030", "100", "353"],
+        help='List of frequencies to process'
+    )
+    parser.add_argument(
+        '--realisations',
+        type=int,
+        default=1000,
+        help='Number of realisations to process'
+    )
+    parser.add_argument(
+        '--lmax',
+        type=int,
+        default=511,
+        help='Maximum multipole for the wavelet transform'
+    )
+    parser.add_argument(
+        '--N-directions',
+        type=int,
+        default=1,
+        help='Number of directions for the wavelet transform'
+    )
+    parser.add_argument(
+        '--lam',
+        type=float,
+        default=2.0,
+        help='Lambda factor (scaling) for the wavelet transform'
+    )
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=8,
+        help='Size of the batches for training'
+    )
+    parser.add_argument(
+        '--no-shuffle',
+        action='store_true',
+        help='Disable shuffling of the dataset'
+    )
+    parser.add_argument(
+        '--split',
+        nargs=2,
+        type=float,
+        default=[0.8, 0.2],
+        help='Train/validation split ratios (e.g., 0.8 0.2)'
+    )
+    parser.add_argument(
+        '--epochs',
+        type=int,
+        default=100,
+        help='Number of epochs to train for'
+    )
+    parser.add_argument(
+        '--learning-rate',
+        type=float,
+        default=1e-3,
+        help='Learning rate for the optimizer'
+    )
+    parser.add_argument(
+        '--momentum',
+        type=float,
+        default=0.95,
+        help='Momentum for the optimizer'
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=0,
+        help='Random seed for reproducibility'
+    )
+    parser.add_argument(
+        '--directory',
+        type=str,
+        default='/Scratch/matthew/data/',
+        help='Base directory for data'
+    )
+    parser.add_argument(
+        '--gpu',
+        type=int,
+        default=0,
+        help='Index of the GPU to use (e.g., 0 or 1)'
+    )
+    parser.add_argument(
+        '--mem-fraction',
+        type=float,
+        default=0.7,
+        help='GPU memory fraction to use (default: 0.7)'
+    )
     
+    args = parser.parse_args()
+
+    # Set GPU configuration
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.mem_fraction)
+    print(f"Using GPU {args.gpu} with {args.mem_fraction*100:.0f}% memory fraction for training.")
+
+    # Convert arguments to match Train class parameters
+    shuffle = not args.no_shuffle
+    rngs = nnx.Rngs(args.seed)
+    
+    # Create trainer instance
+    trainer = Train(
+        frequencies=args.frequencies,
+        realisations=args.realisations,
+        lmax=args.lmax,
+        N_directions=args.N_directions,
+        lam=args.lam,
+        batch_size=args.batch_size,
+        shuffle=shuffle,
+        split=args.split,
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        momentum=args.momentum,
+        rngs=rngs,
+        directory=args.directory,
+    )
+    
+    trainer.execute_training_procedure()
 
 
-## Test usage 
-frequencies = ["030", "100", "353"]
-realisations = 1000
-lmax = 511
-N_directions = 1
-lam = 2.0
-batch_size = 8
-shuffle = True
-split = [0.8, 0.2]
-epochs = 100
-learning_rate = 1E-1
-momentum = 0.9
-rngs = nnx.Rngs(0)
-directory = "/Scratch/matthew/data/"
+if __name__ == '__main__':
+    main()
 
-trainer = Train(frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, epochs, learning_rate, momentum, rngs, directory)
-trainer.execute_training_procedure()
+
+# Example usage:
+# python3 -m skyclean.ml.train \
+#   --gpu 0 \
+#   --frequencies 030 100 353 \
+#   --realisations 1000 \
+#   --lmax 511 \
+#   --lam 2.0 \
+#   --batch-size 8 \
+#   --epochs 100 \
+#   --learning-rate 1e-3 \
+#   --momentum 0.95 \
+#   --directory /Scratch/matthew/data/ \
+#   --mem-fraction 0.7
+
 
 
 

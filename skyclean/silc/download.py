@@ -2,8 +2,8 @@ import os
 import requests
 import numpy as np
 import healpy as hp
-from utils import *
-from file_templates import FileTemplates
+from .utils import *
+from .file_templates import FileTemplates
 
 class DownloadData(): 
     """Download foreground data from Planck Legacy Archive (PLA) and generate CMB realisations."""

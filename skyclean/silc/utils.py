@@ -20,7 +20,6 @@ def create_dir(directory: str):
     else:
         pass
 
-
 def np_save_and_load(data, filename: str):
     """
     Save data to a file and then load it back.

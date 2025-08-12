@@ -1,5 +1,3 @@
-from utils import *
-from map_tools import *
 import os
 import jax
 import jax.numpy as jnp
@@ -8,7 +6,10 @@ import s2fft
 import s2wav
 import math 
 import healpy as hp
-from file_templates import FileTemplates
+
+from .map_tools import *
+from .utils import *
+from .file_templates import FileTemplates
 
 class SILCTools():
     @staticmethod
@@ -219,8 +220,7 @@ class SILCTools():
     @staticmethod
     def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str):
         """
-        Trim a doubled‐resolution MW Pixel map back to its original resolution,
-        using either NumPy or PyTorch spherical transforms.
+        Trim a doubled‐resolution MW Pixel map back to its original resolution.
 
         Parameters:
             MW_Doubled_Map (ndarray): MW pixel map at doubled resolution.
