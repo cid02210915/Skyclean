@@ -13,6 +13,33 @@ SILC is designed to minimise variance. However, many foregrounds have higher-ord
 
 `skyclean` aims to apply an ML stage to improve the SILC-processed maps [MORE INFORMATION NEEDED ON SPECIFIC METHOD CHOSEN], with the novelty of performing this on the entire sphere. This requires the use of geometric deep learning, a field which extends the idea of translational equivariance in traditional Euclidean convolutional networks to general group manifolds (see [Cohen et al. (2015)](https://proceedings.mlr.press/v48/cohenc16.html)); in this case, aiming to capture rotational equivariance on the $S^2$ and $\text{SO}(3)$ manifolds. The `s2ai` package used in `skyclean.ml` employs so-called discrete-continuous convolutions on the sphere, which capture equivaraince whilst avoiding expensive harmonic space transforms (see [Ocampo et al. (2022)](https://arxiv.org/abs/2209.13603)). In `skyclean.ml`, an $S^2$ UNET architecture is employed to map to the ILC residual, with the goal being to make the ILC power spectrum closer to the true CMB power spectrum. 
 
+## Usage ♦️
+
+## Directories 📞
+
+``` bash
+skyclean/  
+├── silc/          # CMB map pre-processing, wavelet transforms and SILC.
+│      ├─ utils.py        # - Utility tools for saving
+│      ├─ file_templates.py          # - dictionaries containing data directories
+│      ├─ download.py        # - Download CMB, foregrounds, noise (currently from Planck archive)
+│      ├─ map_tools.py          # - healpy map tools, MW map tools, HP to MW converters
+│      ├─ map_processing.py          # - convolve and downsample downloaded maps, convert to MW, wavelet transform 
+│      ├─ ilc.py          # - GPU-accelerated ILC on MW wavelet maps
+│      ├─ pipeline.py          # - Wrapper for running entire SILC process. CLI included.
+│
+├── ml/          # ML post-processing stage (WIP)
+│      ├─ data.py                  # - Produce CMB-free and ML-ready transformed input and output datasets for training (using tf)
+│      ├─ model.py               # - S2 UNET architectures
+│      ├─ train.py              # - Run the training loops. CLI included.
+tests/        # pytests (WIP)
+├── test_ilc.py # tests for ILC pipeline
+```
+
+## Installation ⚙️
+
+## Tests 🚥
+
 
 
 
