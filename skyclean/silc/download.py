@@ -65,6 +65,7 @@ class DownloadData():
             print(f"Downloaded {component} data for frequency {frequency}.")
         else:
             raise ValueError(f"Failed to download {component} data for frequency {frequency}. Status code: {response.status_code}")
+        
     def download_cmb_spectrum(self):
         # UNFINISHED, right now, just use data/cmb_spectrum.txt
         pass
