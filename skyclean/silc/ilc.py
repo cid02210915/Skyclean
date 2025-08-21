@@ -143,6 +143,63 @@ class SILCTools():
         return doubled_MW_wav_c_j
 
     @staticmethod
+    def build_F(frequencies: list) -> np.ndarray:
+        """
+        Return spectral response matrix F of shape (N_freq, N_comp),
+        with columns ordered [cmb, tsz, sync].
+        Fill with your actual bandpass responses; placeholders shown.
+        """
+        nu = np.array([float(f) for f in frequencies])  # GHz
+
+        # --- PLACEHOLDERS: replace with real bandpass responses ---
+        # CMB thermodynamic unit response is ~1 in K_CMB (after unit_convert),
+        # tSZ has known frequency dependence g(nu), sync ~ power-law nu^beta.
+        cmb = np.ones_like(nu)
+
+        # non-relativistic tSZ frequency law in K_CMB units (placeholder)
+        x = (nu*1e9) * (6.62607015e-34) / (1.380649e-23 * 2.7255)  # h*nu/(k*Tcmb)
+        g  = x*(np.exp(x)+1)/(np.exp(x)-1) - 4.0                   # ΔT/T_CMB
+        tsz = g
+
+        # synchrotron (placeholder) ∝ nu^beta_sync; beta_sync ~ -3
+        beta_sync = -3.0
+        sync = (nu / nu[0])**beta_sync
+        # ----------------------------------------------------------
+
+        F = np.vstack([cmb, tsz, sync]).T   # (N_freq, 3)
+        return F
+    
+    @staticmethod
+    # --- helpers (put ABOVE compute_weights_generalised) ---
+    def find_f_from_component_name(F, component_name_or_names, allow_sign_flip=False, atol=1e-8):
+        import numpy as np
+        if isinstance(component_name_or_names, (str, bytes)):
+            names = [component_name_or_names]
+        else:
+            names = list(component_name_or_names)
+    
+        N_comp = F.shape[1]
+        f = np.zeros(N_comp, dtype=float)
+    
+        for name in names:
+            target_vec = reference_vectors[name.lower()]
+            if target_vec is None:
+                raise ValueError(f"Reference vector for '{name}' not set in reference_vectors.")
+            t = target_vec / np.linalg.norm(target_vec)
+    
+            matched = False
+            for j in range(N_comp):
+                col = F[:, j] / np.linalg.norm(F[:, j])
+                if np.allclose(col, t, atol=atol) or (allow_sign_flip and np.allclose(col, -t, atol=atol)):
+                    f[j] = -1.0 if (allow_sign_flip and np.allclose(col, -t, atol=atol)) else 1.0
+                    matched = True
+                    break
+            if not matched:
+                raise ValueError(f"Component '{name}' not found in F.")
+        return f
+
+
+    @staticmethod
     def compute_weight_vector(R: np.ndarray, scale: int, realisation: int):
         """
         Processes the given 4D matrix R by computing and saving the weight vectors for each matrix in the first two dimensions.
@@ -191,6 +248,119 @@ class SILCTools():
             print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
         return weight_vectors
     
+    @staticmethod
+    def compute_weights_generalised(R, scale, realization, weight_vector_matrix_template,
+                                component, component_name,
+                                constraint=False, F=None, f=None):
+        """
+        Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
+
+        Args:
+            R (np.ndarray): Input covariance matrix. Shape (N_freq, N_freq) or (n1, n2, N_freq, N_freq).
+            scale (int): Scale index for saving purposes.
+            realization (str): Realization identifier string.
+            weight_vector_matrix_template (str): Template for saving the computed weights.
+            constraint (bool): Whether to use constrained ILC.
+            F (np.ndarray): Spectral response matrix of shape (N_freq, N_comp), required if constraint=True.
+            f (np.ndarray): Constraint vector of shape (N_comp,), required if constraint=True.
+
+        Returns:
+            inverses (np.ndarray): Inverse covariance matrices.
+            weight_vectors (np.ndarray): Weight vectors.
+            singular_matrices_location (list): List of (i, j) indices where matrix inversion failed.
+        """
+        if R.ndim == 4:
+            R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3)
+            dim1, dim2 = R_Pix.shape[:2]
+            subdim1, subdim2 = R_Pix.shape[2:]
+        elif R.ndim == 2:
+            R_Pix = R
+            dim1, dim2 = 1, 1
+            subdim1, subdim2 = R_Pix.shape
+        else:
+            raise ValueError(f"Unexpected array dimension: {R.ndim}")
+
+        # --- constrained branch ---
+        if constraint:
+            N_freq, N_comp = F.shape
+
+            # Automatically set f from component_name if given
+            if f is None and component_name is not None:
+                f = find_f_from_component_name(F, component_name)   # <<< fix: no unpack
+            assert f is not None, "Constraint vector f must be provided when constraint=True"
+            assert f.shape == (N_comp,), f"Constraint vector f must have shape ({N_comp},)"
+        else:
+            # Unconstrained ILC uses the all-ones vector; no F/component_name needed
+            N_freq = subdim2
+            identity_vector = np.ones(N_freq, dtype=float)          # <<< fix: ones, not a picked index
+
+                    # ----------------------------------------------------------
+
+            inverses = np.zeros((dim1, dim2, subdim1, subdim2)) if R.ndim == 4 else np.zeros((subdim1, subdim2))
+            weight_vectors = np.zeros((dim1, dim2, subdim1)) if R.ndim == 4 else np.zeros(subdim1)
+            singular_matrices_location = []
+
+        for i in range(dim1):
+            for j in range(dim2):
+                try:
+                    R_inv = np.linalg.inv(R_Pix[i, j] if R.ndim == 4 else R_Pix)
+
+                    if constraint:
+                        # Step 1: Fᵗ R⁻¹
+                        FT_Rinv = np.dot(F.T, R_inv)                  # (N_comp, N_freq)
+                        # Step 2: Fᵗ R⁻¹ F
+                        constraint_matrix = np.dot(FT_Rinv, F)        # (N_comp, N_comp)
+                        # Step 3: (Fᵗ R⁻¹ F)⁻¹
+                        constraint_matrix_inv = np.linalg.inv(constraint_matrix)
+
+                        # Step 4: reshape f for matrix multiplication
+                        f_vec = f.reshape((F.shape[1], 1))  # [1,0,0] -----> [[1],
+                                                            #                 [0],
+                                                            #                 [0]]
+                        temp = np.dot(constraint_matrix_inv, f_vec)
+                        # Step 5: F (Fᵗ R⁻¹ F)⁻¹ f
+                        F_temp = np.dot(F, temp)
+                        # Step 6: Final weight vector
+                        w = np.dot(R_inv, F_temp).T
+                    else:
+                        numerator = np.dot(R_inv, identity_vector)
+                        denominator = np.dot(numerator, identity_vector)
+                        w = numerator / denominator
+
+                    if R.ndim == 4:
+                        inverses[i, j] = R_inv
+                        weight_vectors[i, j] = w
+                    else:
+                        inverses = R_inv
+                        weight_vectors = w
+
+                except np.linalg.LinAlgError:
+                    singular_matrices_location.append((i, j))
+                    singular_matrix_path = weight_vector_matrix_template.format(
+                        component=component,
+                        component_name=component_name,
+                        scale=scale,
+                        realization=realization
+                    ).replace(".npy", f"_singular_{i}_{j}.npy")
+                    np.save(singular_matrix_path, R_Pix[i, j] if R.ndim == 4 else R_Pix)
+                    if R.ndim == 4:
+                        weight_vectors[i, j] = np.zeros(N_freq)
+                    else:
+                        weight_vectors = np.zeros(N_freq)
+
+        # Save final weight vector matrix
+        np.save(
+            weight_vector_matrix_template.format(
+                component=component,
+                component_name=component_name,
+                scale=scale,
+                realization=realization
+            ),
+            weight_vectors
+        )
+
+        return inverses, weight_vectors, singular_matrices_location, component_name
+
     @staticmethod
     def create_doubled_ILC_map(frequencies, scale, weight_vector, doubled_MW_wav_c_j):
         """

@@ -4,6 +4,8 @@ import numpy as np
 import healpy as hp
 from .utils import *
 from .file_templates import FileTemplates
+import os
+from io import StringIO
 
 class DownloadData(): 
     """Download foreground data from Planck Legacy Archive (PLA) and generate CMB realisations."""
@@ -67,8 +69,32 @@ class DownloadData():
             raise ValueError(f"Failed to download {component} data for frequency {frequency}. Status code: {response.status_code}")
         
     def download_cmb_spectrum(self):
-        # UNFINISHED, right now, just use data/cmb_spectrum.txt
-        pass
+        """
+        Download the Planck 2018 best-fit CMB TT spectrum
+        and save it as cmb_spectrum.txt in the data directory.
+        """
+
+        url = "http://pla.esac.esa.int/pla/aio/product-action?COSMOLOGY.FILE_ID=COM_PowerSpect_CMB-TT-full_R3.01.txt"
+        path = os.path.join(self.directory, "cmb_spectrum.txt")
+
+        if os.path.exists(path):
+            print("cmb_spectrum.txt already exists. Skipping download.")
+            return
+
+        print("Downloading Planck TT spectrum...")
+        resp = requests.get(url, timeout=60)
+        resp.raise_for_status()
+
+        # Load directly into numpy
+        data = np.loadtxt(StringIO(resp.text))
+        ells = data[:, 0].astype(int)
+        Dl   = data[:, 1]  # μK^2
+
+        # Keep same 4-column format as before
+        arr = np.column_stack([ells, Dl, np.zeros_like(ells), np.zeros_like(ells)])
+        np.savetxt(path, arr, fmt="%.8e")
+        print(f"Wrote Planck cmb_spectrum.txt at {path}")   
+
 
     def generate_and_save_cmb_realisation(self, realisation: int):
         """ Generates a CMB realisation based on the theoretical spectrum and downloads it.
@@ -80,7 +106,7 @@ class DownloadData():
 
         Returns:
             None
-        """
+        """ 
         filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 for now
         if os.path.exists(filename):
             print(f"CMB realisation {realisation} already exists. Skipping generation.")
@@ -108,7 +134,10 @@ class DownloadData():
             else:
                 for frequency in self.frequencies:
                     self.download_foreground_component(component, frequency)
-                
+
+        # ensure spectrum exists before generating CMB maps
+        self.download_cmb_spectrum()
+
         # now download CMB and noise, which are realisation dependent.
         for realisation in range(self.realisations):
             realisation += self.start_realisation  # Adjust for starting realisation
@@ -121,6 +150,7 @@ class DownloadData():
                 else:
                     for frequency in self.frequencies:
                         self.download_foreground_component("noise", frequency, realisation)
+
 
 # components = ["sync", "dust"]
 # frequencies = ["030", "070", "143", "217", "353"]
