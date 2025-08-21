@@ -55,7 +55,7 @@ class Pipeline:
             )
             downloader.download_all()
 
-            print("---PROCESSING CFNs---")
+            print("---PROCESSING CFNs and total map cfn---")
             processor = ProcessMaps(
                 self.components,
                 self.wavelet_components,
@@ -67,16 +67,16 @@ class Pipeline:
                 method=self.method,
                 overwrite=self.overwrite,
             )
-            processor.produce_and_save_cfns()
+            processor.produce_and_save_all_maps()
 
-            for wavelet_comp in self.wavelet_components:
-                print(f"---PRODUCING WAVELET TRANSFORMS FOR {wavelet_comp}---")
-                processor.produce_and_save_wavelet_transforms(
-                    self.N_directions,
-                    self.lam,
-                    method=self.method,
-                    visualise=self.visualise,
-                )
+            print("---PRODUCING WAVELET TRANSFORMS---")
+            processor.produce_and_save_wavelet_transforms(
+            self.N_directions,
+            self.lam,
+            method=self.method,
+            visualise=self.visualise,
+            )
+
 
             for ilc_comp in self.ilc_components:
                 print(f"---PRODUCING ILC MAPS FOR {ilc_comp}---")
@@ -109,7 +109,7 @@ def main():
     parser.add_argument(
         '--components',
         nargs='+',
-        default=["cmb", "sync", "dust", "noise"],
+        default=["cmb", "sync", "dust", "noise", 'tsz'],
         help='List of components in the CFN'
     )
     parser.add_argument(
@@ -127,7 +127,7 @@ def main():
     parser.add_argument(
         '--frequencies',
         nargs='+',
-        default=["030", "100", "353"],
+        default=["030", "044", "070", "100", "143", "217", "353", "545", "857"],
         help='List of frequencies to process'
     )
     parser.add_argument(
