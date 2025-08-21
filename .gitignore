@@ -5,3 +5,5 @@ s2fft/
 s2wav/
 *.npy
 skyclean/data
+__pycache__/
+*.pyc

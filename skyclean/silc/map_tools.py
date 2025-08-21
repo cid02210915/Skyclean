@@ -141,15 +141,16 @@ class MWTools():
         """
         # default JAX path
         j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-        
+    
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
             mw_map,
             N       = N_directions,
             L       = L,
             lam     = lam,
             filters = j_filter,
-            reality = True,
+            reality = False,
         )
+        print(wavelet_coeffs[0].shape)
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
@@ -176,7 +177,7 @@ class MWTools():
             L       = L,
             lam     = lam,
             filters = j_filter,
-            reality = True,
+            reality = False,
         )
         scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
@@ -197,16 +198,18 @@ class MWTools():
         Returns:
             jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
         """
-        j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
+        j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
         f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
         wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
+        print(wavelet_coeffs[0].shape)
+        print(f_scal.shape)
         mw_map = s2wav.synthesis(
             wavelet_coeffs,
             L       = L,
             f_scal  = f_scal,
             lam     = lam,
             filters = j_filter,
-            reality = True,
+            reality = False,
             N = N_directions
         )
         return mw_map
@@ -299,7 +302,7 @@ class MWTools():
                 unit=unit,
                 # min=min, max=max,  # Uncomment and adjust these as necessary for better visualization contrast
             )                                           
-        plt.savefig(f'{title}')
+        plt.savefig(f'{title}.png')
         plt.show()
     
     @staticmethod
@@ -426,7 +429,7 @@ class SamplingConverters():
         hp_map = hp.alm2map(hp_alm, nside=HPTools.get_nside_from_lmax(lmax))
         return hp_map
     
-    def mw_map_2_mwss_map(mw_map, L: int, ): 
+    def mw_map_2_mwss_map(mw_map, L: int): 
         """
         Soft wrapper to convert a MW map to a MWSS map.
 
@@ -439,3 +442,17 @@ class SamplingConverters():
         """
         return s2fft.utils.resampling_jax.mw_to_mwss(mw_map, L=L)
 
+    def mwss_map_2_mw_map(mwss_map, L: int):
+        """
+        Convert a MWSS map to a MW map. No s2fft function exists for this,
+        but the process is simply performing a harmonic transform.
+
+        Parameters:
+            mwss_map (numpy.ndarray): The input MWSS map in spherical harmonics representation.
+            L (int): The maximum multipole moment for the spherical harmonics.
+
+        Returns:
+            mw_map (numpy.ndarray): The converted MW map.
+        """
+        mw_alm = s2fft.forward(mwss_map, L=L, sampling = "mwss", reality = True)
+        return s2fft.inverse(mw_alm, L=L, sampling = "mw", reality = True)

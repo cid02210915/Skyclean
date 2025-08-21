@@ -20,10 +20,12 @@ import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 import s2fft
 import functools
+import orbax.checkpoint as ocp
 
 from .model import S2_UNET
 from .data import CMBFreeILC
 from skyclean.silc.utils import create_dir
+from skyclean.silc.file_templates import FileTemplates
 
 import matplotlib.pyplot as plt
 
@@ -59,7 +61,7 @@ class Train:
     def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, rngs: nnx.Rngs = nnx.Rngs(0), 
-                 directory: str = "data/", ):
+                 directory: str = "data/", resume_training: bool = False):
         """
         Parameters:
             frequencies (list): List of frequencies for the maps.
@@ -75,6 +77,7 @@ class Train:
             momentum (float): Momentum for the optimizer.
             rngs (nnx.Rngs): Random number generators for the model.
             directory (str): Directory where data is stored / saved to.
+            resume_training (bool): Whether to resume training from the last checkpoint.
         """ 
         self.frequencies = frequencies
         self.realisations = realisations
@@ -89,12 +92,59 @@ class Train:
         self.momentum = momentum
         self.rngs = rngs
         self.directory = directory
+        self.resume_training = resume_training
 
         self.dataset = CMBFreeILC(frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory)
+        
+        # Create model directory for checkpoints
+        files = FileTemplates(directory)  # Pass directory to FileTemplates
+        # Ensure model_dir is absolute path
+        self.model_dir = os.path.abspath(files.output_directories["ml_models"])
+
 
         self.save_dir = os.path.join(self.directory, "ML/model")
         if not os.path.exists(self.save_dir):
             create_dir(self.save_dir)
+        
+        # Initialize Orbax checkpoint manager
+        self.checkpointer = ocp.StandardCheckpointer()
+
+    @staticmethod
+    def clear_gpu_cache():
+        """Clear GPU memory cache and force garbage collection."""
+        import gc
+        print("[GPU Memory] Clearing cache...")
+        jax.clear_caches()
+        gc.collect()
+        # Synchronize to ensure all operations complete
+        jax.block_until_ready(jnp.array([1.0]))
+        print("[GPU Memory] Cache cleared")
+    
+    def save_model(self, model, epoch):
+        """Save the model state using Orbax.
+
+        Parameters:
+            model (nnx.Module): The model to save.
+            epoch (int): Current epoch number.
+        """
+        try:
+            _, state = nnx.split(model)
+            checkpointer = ocp.StandardCheckpointer()
+
+            checkpoint_path = os.path.abspath(os.path.join(self.model_dir, f"checkpoint_{epoch}"))
+            checkpointer.save(checkpoint_path, state)
+            # keep only latest checkpoint
+            if epoch > 1:
+                prev_checkpoint_path = os.path.abspath(os.path.join(self.model_dir, f"checkpoint_{epoch-1}"))
+                if os.path.exists(prev_checkpoint_path):
+                    import shutil
+                    shutil.rmtree(prev_checkpoint_path)
+
+            print(f"Model checkpoint saved at epoch {epoch} to {checkpoint_path}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to save model at epoch {epoch}: {str(e)}")
+    
     
     def loss_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray,):
         """Weighted MAE on the sphere loss function.
@@ -215,7 +265,7 @@ class Train:
     def execute_training_procedure(self):
         """Execute the training procedure for the CMB-Free ILC model.
         """
-        
+        Train.clear_gpu_cache()
         learning_rate = self.learning_rate
         momentum = self.momentum
         epochs = self.epochs
@@ -225,6 +275,7 @@ class Train:
         L = self.lmax + 1 
         print("Constructing the CMB-Free ILC dataset")
         train_ds, test_ds, n_train, n_test= self.dataset.prepare_data()
+        print_gpu_usage("After dataset creation")
         training_batches_per_epoch = (n_train + batch_size - 1) // batch_size
         testing_batches_per_epoch = (n_test + batch_size - 1) // batch_size
         train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
@@ -235,6 +286,15 @@ class Train:
 
         print("Configuring the optimizer")
         optimizer = nnx.Optimizer(model, optax.adam(learning_rate))
+        print_gpu_usage("After optimizer creation")
+        # Handle resume training
+        start_epoch = 1
+        if self.resume_training:
+            start_epoch = self.load_model_for_training(model, optimizer) + 1
+            if start_epoch > 1:
+                print(f"Resuming training from epoch {start_epoch}")
+            else:
+                print("No checkpoint found, starting training from scratch")
 
         print("Configuring the metrics")
         # nnx metric setup
@@ -257,9 +317,9 @@ class Train:
 
         # Split prior to training loop
         graphdef, state = nnx.split((model, optimizer, metrics))
-
+        print_gpu_usage("Before training.")
         print("Starting training")
-        for epoch in range(1, epochs + 1):
+        for epoch in range(start_epoch, epochs + 1):
             # Commence training for the current epoch
             for _ in range(training_batches_per_epoch):
                 batch_x, batch_y = next(train_iter)
@@ -298,6 +358,10 @@ class Train:
                     metrics_history["eval_accuracy"][-1],
                 )
             )
+            
+            # Save model checkpoint after each epoch (overwrites previous)
+            self.save_model(model, epoch)
+            
             np.save(self.save_dir + "training_log.npy", metrics_history)
             
             # Plot training metrics and examples
@@ -415,6 +479,8 @@ class Train:
 
 
 def main():
+    jax.config.update("jax_enable_x64", False)
+    print(f"JAX 64-bit mode: {jax.config.jax_enable_x64}")
     """Main function to run training with command line arguments."""
     parser = argparse.ArgumentParser(
         description="Train the CMB-Free ILC neural network with configurable parameters and GPU selection."
@@ -509,6 +575,11 @@ def main():
         default=0.7,
         help='GPU memory fraction to use (default: 0.7)'
     )
+    parser.add_argument(
+        '--resume-training',
+        action='store_true',
+        help='Resume training from the last checkpoint'
+    )
     
     args = parser.parse_args()
 
@@ -536,6 +607,7 @@ def main():
         momentum=args.momentum,
         rngs=rngs,
         directory=args.directory,
+        resume_training=args.resume_training,
     )
     
     trainer.execute_training_procedure()

@@ -4,12 +4,15 @@
 
 
 import jax.numpy as jnp
+import jax
+jax.config.update("jax_enable_x64", False)
 from flax import nnx
 from s2ai.blocks.core_blocks import (
     DiscoConvBlock,
     DiscoConvUpBlock,
     BotResBlock,
 )
+
 
 
 class S2_UNET(nnx.Module):
@@ -22,8 +25,8 @@ class S2_UNET(nnx.Module):
             filter_type (str): Type of filter to use in the convolutional blocks.
             rngs (nnx.Rngs): Random number generators for initialization.
         """
-        #chs = [1, 16, 16, 32, 64, 256]
-        chs = [1, 64, 64, 256]
+        chs = [1, 16, 32, 64, 256]
+        #chs = [1, 64, 64, 256]
         gr = 8
         Ls = [int(L / pow(2, i)) for i in range(len(chs) - 1)]
         print(Ls)

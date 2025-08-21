@@ -22,6 +22,7 @@ class FileTemplates():
             # ML 
             "ml_maps": os.path.join(directory, "ML/maps"),
             "ml_models": os.path.join(directory, "ML/models"),
+            "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps")
         }
 
         for key, value in self.output_directories.items():
@@ -57,11 +58,15 @@ class FileTemplates():
             'ilc_doubled_maps': os.path.join(self.output_directories["ilc_doubled_wavelet_maps"], "ilc_doubled_Map_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
             'ilc_trimmed_maps': os.path.join(self.output_directories["ilc_trimmed_maps"], "ilc_trimmed_wav_Map_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
             'ilc_synth': os.path.join(self.output_directories["ilc_synthesised_maps"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'ilc_spectrum': os.path.join(self.output_directories["ilc_synthesised_maps"], "ilc_power_spectrum_R{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+            'ilc_improved': os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+            # spectrum templates
+            'ilc_synth_spectrum': os.path.join(self.output_directories["ilc_synthesised_maps"], "ilc_synth_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+            'ilc_improved_spectrum': os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
             # ML
             "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
             "ilc_residual": os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
             "ilc_mwss": os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+            "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}.npy")
         }
 
     

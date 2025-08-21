@@ -9,7 +9,7 @@ import tensorflow as tf
 
 import jax
 import jax.numpy as jnp
-jax.config.update("jax_enable_x64", False)  # Use 32-bit
+jax.config.update("jax_enable_x64", False) 
 
 class CMBFreeILC(): 
     def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
@@ -44,7 +44,6 @@ class CMBFreeILC():
         ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(realisation=0, lmax=self.lmax, lam = self.lam))
         self.H = ilc_map_temp.shape[0]+1
         self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
-
         self.produce_residuals()  # Create residual maps for all realisations
         self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
 
@@ -112,28 +111,40 @@ class CMBFreeILC():
         else:  # Multiple channels input
             signed_log_mean = self.signed_log_F_mean
             signed_log_std = self.signed_log_F_std
-        
-
+    
         return (signed_log_x - signed_log_mean) / signed_log_std
     
-    def inverse_transform(self, z: tf.Tensor):
-        """Invert the data transform. 
+    def inverse_signed_log_transform(self, y: tf.Tensor):
+        """Inverse of the signed-log transform.
+        
         Parameters:
-            z (tf.Tensor): Transformed tensor.  
+            y (tf.Tensor): Signed-log transformed tensor.
         Returns:
-            tf.Tensor: Inverse transformed tensor.
+            tf.Tensor: Original tensor.
         """
-        if z.shape[-1] == 1:  
-            mean = self.R_mean
-            std = self.R_std
-        else:  # Multiple channels input
-            mean = self.F_mean
-            std = self.F_std
-        signed_log_mean = jnp.sign(mean) * jnp.log1p(jnp.abs(mean) / self.a)
-        signed_log_std = jnp.sign(std) * jnp.log1p(jnp.abs(std) / self.a)
-
-        y = z * signed_log_std + signed_log_mean
         return jnp.sign(y) * self.a * jnp.expm1(jnp.abs(y))
+
+    def inverse_transform(self, z: tf.Tensor):
+        """Invert the data transform (reverse z-score normalization then reverse signed-log transform).
+        
+        Parameters:
+            z (tf.Tensor): Normalized transformed tensor.  
+        Returns:
+            tf.Tensor: Original tensor.
+        """
+        # Determine whether input is F or R by checking number of channels
+        if z.shape[-1] == 1:  
+            signed_log_mean = self.signed_log_R_mean
+            signed_log_std = self.signed_log_R_std
+        else:  # Multiple channels input
+            signed_log_mean = self.signed_log_F_mean
+            signed_log_std = self.signed_log_F_std
+
+        # Reverse z-score normalization
+        y = z * signed_log_std + signed_log_mean
+        
+        # Reverse signed-log transform
+        return self.inverse_signed_log_transform(y)
     
     def _data_generator(self, indices):
         """Define a data generator for lazy loading of data.
@@ -219,88 +230,5 @@ class CMBFreeILC():
         signed_log_R_std = R_std_sum / self.realisations
 
         return signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std
-    
-    def apply_model(self, model, realisation: int): 
-        """Apply the model to a specific realisation's ILC map, returning the improved prediction (CMB prediction).
-        Performed after model training. 
-
-        
-        Parameters:
-            model: The model to apply.
-            realisation (int): The realisation number to process.
-        
-        Returns:
-            np.ndarray: The model's prediction for the given realisation.
-        """
-        F, _, ilc_mwss = self.create_residual_mwss_maps(realisation)
-        F = self.transform(F).astype(np.float32)
-        # F currently has shape (H,W,N_freq), we need to add a batch dimension to apply the model
-        F = jnp.expand_dims(F, axis=0)  # Add batch dimension
-        R_pred_norm = model(F)
-        R_pred = self.inverse_transform(R_pred_norm)  # Invert the normalisation
-        # R_pred has shape (1,H,W,1), squeeze to (H,W)
-        R_pred = jnp.squeeze(R_pred, axis=(0,3)) 
-        cmb_pred = ilc_mwss - R_pred # compute the CMB prediction
-        # convert this to MW sampling
-        return SamplingConverters.mwss_map_2_mw_map(cmb_pred, L=self.lmax + 1)
 
 
-
-
-
-            
-
-
-## TESTING
-# from model import S2_UNET
-# import tensorflow_datasets as tfds
-# import matplotlib.pyplot as plt
-# import jax.numpy as jnp
-# lmax = 511
-# L = lmax+1
-# lam = 4.0
-# obj = CMBFreeILC(frequencies=["030", "100", "353"], realisations=10, lmax=lmax, lam=lam, N_directions=1, batch_size=3, shuffle=True, split=[0.8, 0.2], directory="/Scratch/matthew/data/")
-# train_ds, test_ds, _, _ = obj.prepare_data()
-# model = S2_UNET(L,ch_in = 3, )
-# train_iter = iter(tfds.as_numpy(train_ds))
-# batch_x, batch_y = next(train_iter)
-# image = jnp.asarray(batch_x)
-# output = jnp.asarray(batch_y)
-# pred = model(image) #shape (3,257,513,2)
-# input_ex = image[0, :, :, 0]# First channel of the first image in the batch
-# output_ex = output[0, :, :, 0]  # First channel of the first image in the batch
-# pred_ex = pred[0, :, :, 0]  # First channel of the first
-
-# fig,ax=plt.subplots(1,3, figsize=(15, 5))
-# im0 = ax[0].imshow(input_ex)
-# plt.colorbar(im0, ax=ax[0], shrink=0.2)
-# ax[0].set_title("Input Foreground Estimate")
-# im1 = ax[1].imshow(output_ex)
-# plt.colorbar(im1, ax=ax[1], shrink=0.2)
-# ax[1].set_title("ILC Residual")
-# im2 = ax[2].imshow(pred_ex)
-# plt.colorbar(im2, ax=ax[2], shrink=0.2)
-# ax[2].set_title("Predicted ILC Residual")
-# plt.tight_layout()
-# plt.savefig('network.png', bbox_inches='tight', dpi=150)
-
-# # Add histogram plots for data distribution analysis
-# fig_hist, ax_hist = plt.subplots(1, 2, figsize=(12, 4))
-
-# # Histogram of input data
-# ax_hist[0].hist(input_ex.flatten(), bins=50, alpha=0.7, color='blue', density=True)
-# ax_hist[0].set_title("Input Foreground Estimate Distribution")
-# ax_hist[0].set_xlabel("Pixel Value")
-# ax_hist[0].set_ylabel("Density")
-# ax_hist[0].grid(True, alpha=0.3)
-
-# # Histogram of output data
-# ax_hist[1].hist(output_ex.flatten(), bins=50, alpha=0.7, color='red', density=True)
-# ax_hist[1].set_title("ILC Residual Distribution")
-# ax_hist[1].set_xlabel("Pixel Value")
-# ax_hist[1].set_ylabel("Density")
-# ax_hist[1].grid(True, alpha=0.3)
-
-# plt.tight_layout()
-# plt.savefig('data_distributions.png', bbox_inches='tight', dpi=150)
-# plt.show()
