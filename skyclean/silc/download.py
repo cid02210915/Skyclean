@@ -145,7 +145,7 @@ class DownloadData():
             print(f"Downloading CMB & noise for realisation {realisation}...")
             self.generate_and_save_cmb_realisation(realisation)
             if 'noise' in self.components:
-                if realisation > 299: 
+                if realisation > 235: 
                     continue # there are only ffp10 300 noise realisations
                 else:
                     for frequency in self.frequencies:

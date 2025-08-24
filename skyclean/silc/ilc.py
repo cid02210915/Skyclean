@@ -6,12 +6,19 @@ import s2fft
 import s2wav
 import math 
 import healpy as hp
-
+from s2wav import filters
+import concurrent.futures
 from .map_tools import *
 from .utils import *
 from .file_templates import FileTemplates
+import concurrent.futures
+import time
+
+from .utils import normalize_targets   
+from .utils import save_array 
 
 class SILCTools():
+    '''Tools for Scale-discretised, directional wavelet ILC (SILC).'''
     @staticmethod
     def Single_Map_doubleworker(mw_map: np.ndarray, method: str):
         """
@@ -41,51 +48,7 @@ class SILCTools():
         x2 = np.real(s2fft.inverse(padded, L=H, method = method, spmd = False, reality = True))
 
         return x2
-
-    @staticmethod
-    def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int, realisation: int, method: str):
-        """
-        Calculates the covariance matrices for given frequencies and saves them to disk,
-        accommodating any size of the input data arrays.
-        
-        Parameters:
-            frequencies (list): List of frequency indices.
-            doubled_MW_wav_c_j (dict): Dictionary containing data arrays for covariance calculations.
-            scale (int): The scale.
-            realisation (int): The realisation.
-
-        Returns:
-            full_array: np.ndarray: A 4D array containing the covariance matrices for the given frequencies.
-        """
-        # Check dimensions of the first item to set the size of the covariance matrices
-        if frequencies:
-            sample_data = doubled_MW_wav_c_j[(frequencies[0], scale)]
-            n_rows, n_cols = sample_data.shape
-        else:
-            raise ValueError("Frequency list is empty.")
-        
-        total_frequency = len(frequencies)
-        # Initialize a 4D array to store the covariance matrices
-        full_array = np.zeros((total_frequency, total_frequency, n_rows, n_cols))
-
-        # Calculate the covariance matrix and save each one
-        # Calculate the upper triangle only since the matrix is symmetric
-        for i in range(total_frequency):
-            for fq in range(i, total_frequency):
-                full_array[i, fq] = SILCTools.smoothed_covariance(doubled_MW_wav_c_j[(frequencies[i], scale)],
-                                                        doubled_MW_wav_c_j[(frequencies[fq], scale)],
-                                                        method)
-                # Save the computed covariance matrix
-                # np.save(f"ILC/covariance_matrix/cov_MW_Pix2_F{frequencies[i]}_F{frequencies[fq]}_S{scale}", full_array[i, fq])
-        # Testing if single process output is the same as multiprocessing output
-        # np.save(f"ILC/covariance_matrix/half_original_{scale}_R{realisation}", full_array)
-        # Fill the symmetric part of the matrix
-        for l1 in range(1, total_frequency):
-            for l2 in range(l1):
-                full_array[l1, l2] = full_array[l2, l1]
-        # print(full_array.shape)
-        return full_array
-
+    
     @staticmethod
     def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method: str):
         """
@@ -96,7 +59,7 @@ class SILCTools():
             R_covariance_map: real‐valued covariance map as np.ndarray
         """
         smoothing_L = MW_Map1.shape[0]
-            # 1) pixel covariance
+        # 1) pixel covariance
         map1 = np.real(MW_Map1)
         map2 = np.real(MW_Map2)
         Rpix = np.multiply(map1, map2) + 0.j
@@ -114,84 +77,182 @@ class SILCTools():
         # 4) convolve
         convolved = np.zeros_like(Ralm, dtype=np.complex128)
         convolved = Ralm * gauss_beam[:,None]
+
         # 5) inverse
         Rmap = np.real(s2fft.inverse(convolved, L=smoothing_L, method = method, spmd = False, reality = True))
 
         return Rmap
+    
+    @staticmethod
+    def compute_covariance(task):
+        """
+        Computes the covariance between two frequency maps at a given scale.
+
+        Args:
+        task (tuple): A tuple containing (i, fq, frequencies, scale, doubled_MW_wav_c_j).
+
+        Returns:
+        tuple: A tuple containing indices i, fq and the computed covariance matrix.
+        """
+        i, fq, freqs, scale_i, data_dict, method = task  
+
+        key_i  = (freqs[i],  scale_i)
+        key_fq = (freqs[fq], scale_i)
+    
+        cov = SILCTools.smoothed_covariance(
+            data_dict[key_i], data_dict[key_fq], method  
+        )
+        return i, fq, cov
+    
 
     @staticmethod
-    def double_wavelet_maps(original_wavelet_c_j: dict, frequencies: list, scales: list, realisation: int, method: str):
+    def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int, 
+                                    realisation: int, method: str, path_template: str):
+        """
+        Calculates the covariance matrices for given frequencies and saves them to disk,
+        accommodating any size of the input data arrays.
+        
+        Parameters:
+            frequencies (list): List of frequency indices.
+            doubled_MW_wav_c_j (dict): Dictionary containing data arrays for covariance calculations.
+            scale (int): The scale.
+            realisation (int): The realisation.
+
+        Returns:
+            full_array: np.ndarray: A 4D array containing the covariance matrices for the given frequencies.
+        """
+        # Check dimensions of the first item to set the size of the covariance matrices
+        if not frequencies:
+            raise ValueError("Frequency list is empty.")
+
+        # --- minimal normalization to fit current pipeline ---
+        norm_freqs = [str(f).zfill(3) for f in frequencies]
+        scale_i = int(scale)
+
+        # Check dimensions from a sample
+        sample_data = doubled_MW_wav_c_j[(norm_freqs[0], scale_i)]  # CHANGED
+        n_rows, n_cols = sample_data.shape
+
+        total_frequency = len(norm_freqs)
+        full_array = np.zeros((total_frequency, total_frequency, n_rows, n_cols))
+
+        # Upper-triangle tasks; compute_covariance should accept (i, fq, freqs, scale, data_dict)
+        tasks = [(i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, "jax_cuda")
+                 for i in range(total_frequency) for fq in range(i, total_frequency)]
+
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            results = executor.map(SILCTools.compute_covariance, tasks)
+            for result in results:
+                i, fq, covariance_matrix = result
+                full_array[i, fq] = covariance_matrix
+
+        # Fill symmetric part
+        for l1 in range(1, total_frequency):
+            for l2 in range(l1):
+                full_array[l1, l2] = full_array[l2, l1]
+
+        # Save using normalized frequency tags
+        f_str = "_".join(norm_freqs)
+        save_path = path_template.format(frequencies=f_str, scale=scale_i, realisation=realisation)
+        np.save(save_path, full_array)
+
+        return full_array
+
+
+    @staticmethod
+    def double_wavelet_maps(original_wavelet_c_j: dict, frequencies: list, scales: list, 
+                            realisation: int, method: 'jax', *,
+                            # --- optional, for saving; safe no-ops if not provided ---
+                            path_template: str | None = None,
+                            component: str | None = None,
+                            lmax: int | None = None,
+                            lam: float | None = None):
         """
         Doubles the resolution of wavelet maps and returns them as a dictionary.
-
+    
         Parameters:
             original_wavelet_c_j (dict): Dictionary containing the original wavelet maps.
             frequencies (list): List of frequency strings.
             scales (list): List of scale indices.
             realisation (int): The realisation number for file naming.
             method (str): s2fft method to use for forward/inverse.
-
+    
+        Optional (for saving):
+            path_template (str): e.g. ".../doubled_{component}_f{frequency}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            component (str): value for {component}/{comp} in filenames (e.g. "cmb", "cfn").
+            lmax (int): value for {lmax} in filenames.
+            lam (float): value for {lam} in filenames.
+    
         Returns:
             dict: A dictionary with keys as (frequency, scale) and values as doubled wavelet maps.
         """
+    
+        # minimal compatibility shim:
+        # if 'method' looks like a path/template, treat it as the save template
+        KNOWN = {"jax_cuda", "jax"}
+        if path_template is None and isinstance(method, str) and method not in KNOWN:
+            if (os.sep in method) or ("{" in method) or str(method).endswith(".npy"):
+                path_template = method
+                method = "jax"
+            else:
+                raise ValueError(f"Method {method} not recognised.")    
+        # ---- GPU compute (single process, single JAX context) ----
         doubled_MW_wav_c_j = {}
         for i in frequencies:
             for j in scales:
-                # Perform the doubling of the wavelet map for the given frequency and scale
-                wavelet_mw_map_doubled = SILCTools.Single_Map_doubleworker(original_wavelet_c_j[(i, j)], method)
-                doubled_MW_wav_c_j[(i, j)] = wavelet_mw_map_doubled
-        return doubled_MW_wav_c_j
+                arr = SILCTools.Single_Map_doubleworker(original_wavelet_c_j[(i, j)], method)
+                doubled_MW_wav_c_j[(i, j)] = arr  # likely a jnp.DeviceArray    
+        # ---- Optional: threaded I/O (no pickling, overlaps disk) ----
+        if path_template is not None:
+            realisation_int = int(realisation)
+            def freq_label(f): return f if isinstance(f, str) else f"{int(f):03d}"
+            comp_val = component if component is not None else "cmb"
+            lmax_val = 512 if lmax is None else lmax
+            lam_val  = 2.0 if lam  is None else lam
+            F_str = "_".join(freq_label(ff) for ff in frequencies)    
+            tasks = []
+        for f in frequencies:
+            for j in scales:
+                out_path = path_template.format(
+                    component=comp_val, comp=comp_val, extract_comp=comp_val,
+                    frequency=freq_label(f),
+                    scale=int(j),
+                    realisation=realisation_int,
+                    lmax=lmax_val,
+                    lam=lam_val,
+                    frequencies=F_str,
+                )
+                arr = np.asarray(doubled_MW_wav_c_j[(f, j)])  # ensure NumPy
+                tasks.append((out_path, arr))
 
-    @staticmethod
-    def build_F(frequencies: list) -> np.ndarray:
-        """
-        Return spectral response matrix F of shape (N_freq, N_comp),
-        with columns ordered [cmb, tsz, sync].
-        Fill with your actual bandpass responses; placeholders shown.
-        """
-        nu = np.array([float(f) for f in frequencies])  # GHz
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            list(executor.map(save_array, tasks))
+    
 
-        # --- PLACEHOLDERS: replace with real bandpass responses ---
-        # CMB thermodynamic unit response is ~1 in K_CMB (after unit_convert),
-        # tSZ has known frequency dependence g(nu), sync ~ power-law nu^beta.
-        cmb = np.ones_like(nu)
-
-        # non-relativistic tSZ frequency law in K_CMB units (placeholder)
-        x = (nu*1e9) * (6.62607015e-34) / (1.380649e-23 * 2.7255)  # h*nu/(k*Tcmb)
-        g  = x*(np.exp(x)+1)/(np.exp(x)-1) - 4.0                   # ΔT/T_CMB
-        tsz = g
-
-        # synchrotron (placeholder) ∝ nu^beta_sync; beta_sync ~ -3
-        beta_sync = -3.0
-        sync = (nu / nu[0])**beta_sync
-        # ----------------------------------------------------------
-
-        F = np.vstack([cmb, tsz, sync]).T   # (N_freq, 3)
-        return F
     
     @staticmethod
-    # --- helpers (put ABOVE compute_weights_generalised) ---
-    def find_f_from_component_name(F, component_name_or_names, allow_sign_flip=False, atol=1e-8):
-        import numpy as np
-        if isinstance(component_name_or_names, (str, bytes)):
-            names = [component_name_or_names]
+    def find_f_from_extract_comp(F, extract_comp_or_comps, reference_vectors, allow_sign_flip=False, atol=1e-8):
+
+        if isinstance(extract_comp_or_comps, (str, bytes)):
+            names = [extract_comp_or_comps]
         else:
-            names = list(component_name_or_names)
-    
+            names = list(extract_comp_or_comps)
+
         N_comp = F.shape[1]
         f = np.zeros(N_comp, dtype=float)
-    
+
         for name in names:
-            target_vec = reference_vectors[name.lower()]
-            if target_vec is None:
+            key = name.lower()
+            if key not in reference_vectors:
                 raise ValueError(f"Reference vector for '{name}' not set in reference_vectors.")
+            target_vec = reference_vectors[key]
             t = target_vec / np.linalg.norm(target_vec)
-    
+
             matched = False
             for j in range(N_comp):
                 col = F[:, j] / np.linalg.norm(F[:, j])
                 if np.allclose(col, t, atol=atol) or (allow_sign_flip and np.allclose(col, -t, atol=atol)):
-                    f[j] = -1.0 if (allow_sign_flip and np.allclose(col, -t, atol=atol)) else 1.0
+                    f[j] = 1.0          # ← always +1 (no -1 branch)
                     matched = True
                     break
             if not matched:
@@ -226,7 +287,7 @@ class SILCTools():
         # Create arrays to store inverses and weight vectors
         inverses = np.zeros((dim1, dim2, subdim1, subdim2))
         weight_vectors = np.zeros((dim1, dim2, subdim1)) # weight vector at each pixel (dim1,dim2) and channel
-        # Realiztion 6 has a singular matrix
+        # Realistion 6 has a singular matrix
         # Adjust identity vector size based on sub-matrix dimensions
         identity_vector = np.ones(subdim2, dtype=float)
         singular_matrices_location = []
@@ -248,84 +309,99 @@ class SILCTools():
             print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
         return weight_vectors
     
+    
+
     @staticmethod
-    def compute_weights_generalised(R, scale, realization, weight_vector_matrix_template,
-                                component, component_name,
-                                constraint=False, F=None, f=None):
+    def compute_weights_generalised(
+        R, scale, realisation,
+        weight_vector_matrix_template,
+        comp, extract_comp,
+        constraint=False, F=None, f=None,
+        reference_vectors=None
+    ):
         """
         Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
 
         Args:
-            R (np.ndarray): Input covariance matrix. Shape (N_freq, N_freq) or (n1, n2, N_freq, N_freq).
-            scale (int): Scale index for saving purposes.
-            realization (str): Realization identifier string.
-            weight_vector_matrix_template (str): Template for saving the computed weights.
-            constraint (bool): Whether to use constrained ILC.
-            F (np.ndarray): Spectral response matrix of shape (N_freq, N_comp), required if constraint=True.
-            f (np.ndarray): Constraint vector of shape (N_comp,), required if constraint=True.
+            R (np.ndarray): (Nf,Nf) or (H,W,Nf,Nf)
+            scale (int): Wavelet scale index.
+            realisation (str): realisation id string.
+            weight_vector_matrix_template (str): Save path template.
+            comp (str): Component tag for filenames.
+            extract_comp (str or None): Target component name (for constrained ILC).
+            constraint (bool): Use constrained ILC if True.
+            F (np.ndarray): Spectral response, shape (Nf, Nc) when constraint=True.
+            f (np.ndarray): Constraint vector, shape (Nc,).
+            reference_vectors (dict): Dict of named reference spectra (for auto-f).
 
         Returns:
-            inverses (np.ndarray): Inverse covariance matrices.
-            weight_vectors (np.ndarray): Weight vectors.
-            singular_matrices_location (list): List of (i, j) indices where matrix inversion failed.
+            inverses, weight_vectors, singular_matrices_location, extract_comp
         """
+        # --- shape handling ---
         if R.ndim == 4:
-            R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3)
+            R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3)  # -> (H,W,Nf,Nf)
             dim1, dim2 = R_Pix.shape[:2]
-            subdim1, subdim2 = R_Pix.shape[2:]
+            subdim1, subdim2 = R_Pix.shape[2:]               # Nf, Nf
         elif R.ndim == 2:
             R_Pix = R
             dim1, dim2 = 1, 1
-            subdim1, subdim2 = R_Pix.shape
+            subdim1, subdim2 = R_Pix.shape                   # Nf, Nf
         else:
             raise ValueError(f"Unexpected array dimension: {R.ndim}")
 
-        # --- constrained branch ---
+        N_freq = subdim2  # convenience; equals number of channels
+
+        # --- allocate outputs (before branch) ---
+        inverses = np.zeros((dim1, dim2, subdim1, subdim2)) if R.ndim == 4 else np.zeros((subdim1, subdim2))
+        weight_vectors = np.zeros((dim1, dim2, subdim1)) if R.ndim == 4 else np.zeros(subdim1)
+        singular_matrices_location = []
+
+        # --- branch config ---
         if constraint:
-            N_freq, N_comp = F.shape
+            if F is None:
+                raise ValueError("F must be provided when constraint=True")
+            Nf_F, N_comp = F.shape
+            if Nf_F != N_freq:
+                raise ValueError(f"F has {Nf_F} rows but R has {N_freq} channels")
 
-            # Automatically set f from component_name if given
-            if f is None and component_name is not None:
-                f = find_f_from_component_name(F, component_name)   # <<< fix: no unpack
-            assert f is not None, "Constraint vector f must be provided when constraint=True"
-            assert f.shape == (N_comp,), f"Constraint vector f must have shape ({N_comp},)"
+            # Automatically set f from extract_comp if given
+            if f is None and extract_comp is not None:
+                f = SILCTools.find_f_from_extract_comp(F, extract_comp, reference_vectors)
+            if f is None:
+                raise ValueError("Constraint vector f must be provided (or inferable) when constraint=True")
+            if f.shape != (N_comp,):
+                raise ValueError(f"Constraint vector f must have shape ({N_comp},)")
         else:
-            # Unconstrained ILC uses the all-ones vector; no F/component_name needed
-            N_freq = subdim2
-            identity_vector = np.ones(N_freq, dtype=float)          # <<< fix: ones, not a picked index
+            # Unconstrained ILC uses the all-ones vector; no F/extract_comp needed
+            identity_vector = np.ones(N_freq, dtype=float)   # <<< fix: ones, not a picked index
 
-                    # ----------------------------------------------------------
+            # ----------------------------------------------------------
 
-            inverses = np.zeros((dim1, dim2, subdim1, subdim2)) if R.ndim == 4 else np.zeros((subdim1, subdim2))
-            weight_vectors = np.zeros((dim1, dim2, subdim1)) if R.ndim == 4 else np.zeros(subdim1)
-            singular_matrices_location = []
-
+        # --- per-pixel (or single) solve ---
         for i in range(dim1):
             for j in range(dim2):
                 try:
-                    R_inv = np.linalg.inv(R_Pix[i, j] if R.ndim == 4 else R_Pix)
+                    R_ij = R_Pix[i, j] if R.ndim == 4 else R_Pix
+                    R_inv = np.linalg.inv(R_ij)
 
                     if constraint:
                         # Step 1: Fᵗ R⁻¹
-                        FT_Rinv = np.dot(F.T, R_inv)                  # (N_comp, N_freq)
+                        FT_Rinv = np.dot(F.T, R_inv)                 # (Nc, Nf)
                         # Step 2: Fᵗ R⁻¹ F
-                        constraint_matrix = np.dot(FT_Rinv, F)        # (N_comp, N_comp)
+                        constraint_matrix = np.dot(FT_Rinv, F)       # (Nc, Nc)
                         # Step 3: (Fᵗ R⁻¹ F)⁻¹
                         constraint_matrix_inv = np.linalg.inv(constraint_matrix)
-
-                        # Step 4: reshape f for matrix multiplication
-                        f_vec = f.reshape((F.shape[1], 1))  # [1,0,0] -----> [[1],
-                                                            #                 [0],
-                                                            #                 [0]]
-                        temp = np.dot(constraint_matrix_inv, f_vec)
-                        # Step 5: F (Fᵗ R⁻¹ F)⁻¹ f
-                        F_temp = np.dot(F, temp)
-                        # Step 6: Final weight vector
-                        w = np.dot(R_inv, F_temp).T
+                        # Step 4: build temp = (Fᵗ R⁻¹ F)⁻¹ f
+                        temp = np.dot(constraint_matrix_inv, f)      # (Nc,)
+                        # Step 5: F temp
+                        F_temp = np.dot(F, temp)                     # (Nf,)
+                        # Step 6: w = R⁻¹ F (Fᵗ R⁻¹ F)⁻¹ f
+                        w = np.dot(R_inv, F_temp)                    # (Nf,)
+                        w = np.asarray(w).ravel()
                     else:
-                        numerator = np.dot(R_inv, identity_vector)
-                        denominator = np.dot(numerator, identity_vector)
-                        w = numerator / denominator
+                        num = np.dot(R_inv, identity_vector)         # (Nf,)
+                        den = float(np.dot(num, identity_vector))    # scalar
+                        w = (num / den).ravel()                      # (Nf,)
 
                     if R.ndim == 4:
                         inverses[i, j] = R_inv
@@ -337,10 +413,10 @@ class SILCTools():
                 except np.linalg.LinAlgError:
                     singular_matrices_location.append((i, j))
                     singular_matrix_path = weight_vector_matrix_template.format(
-                        component=component,
-                        component_name=component_name,
+                        comp=comp,
+                        extract_comp=extract_comp,
                         scale=scale,
-                        realization=realization
+                        realisation=realisation
                     ).replace(".npy", f"_singular_{i}_{j}.npy")
                     np.save(singular_matrix_path, R_Pix[i, j] if R.ndim == 4 else R_Pix)
                     if R.ndim == 4:
@@ -348,18 +424,19 @@ class SILCTools():
                     else:
                         weight_vectors = np.zeros(N_freq)
 
-        # Save final weight vector matrix
+        # save final weight vector matrix
         np.save(
             weight_vector_matrix_template.format(
-                component=component,
-                component_name=component_name,
+                comp=comp,
+                extract_comp=extract_comp,
                 scale=scale,
-                realization=realization
+                realisation=realisation
             ),
             weight_vectors
         )
 
-        return inverses, weight_vectors, singular_matrices_location, component_name
+        return inverses, weight_vectors, singular_matrices_location, extract_comp
+
 
     @staticmethod
     def create_doubled_ILC_map(frequencies, scale, weight_vector, doubled_MW_wav_c_j):
@@ -419,8 +496,10 @@ class SILCTools():
 
         return mw_map_original
     
+
     @staticmethod
-    def load_frequency_data(file_template: str, frequencies: list, scales: list, comp: str, realisation: int, lmax: int, lam: float):
+    def load_frequency_data(file_template: str, frequencies: list, scales: list, comp: str, 
+                        realisation: int, lmax: int = 512, lam: float = 2.0):
         """
         Load NumPy arrays from dynamically generated file paths for each frequency and scale.
         
@@ -436,16 +515,126 @@ class SILCTools():
         Returns:
             dict: A dictionary where keys are tuples of (frequency, scale) and values are loaded NumPy arrays.
         """
+        realisation = int(realisation)
+
         frequency_data = {}
         for frequency in frequencies:
             for scale in scales:
-                filename = file_template.format(comp=comp, frequency=frequency, scale=scale, realisation=realisation, lmax=lmax, lam=lam)
-                # Generate the file path using the template and the current frequency and scale
+                filename = file_template.format(
+                    comp=comp,
+                    component=comp,          # ← minimal fix: provide {component}
+                    frequency=frequency,
+                    scale=scale,
+                    realisation=realisation,
+                    lmax=lmax,
+                    lam=lam,
+                )
                 try:
                     frequency_data[(frequency, scale)] = np.load(filename)
                 except Exception as e:
                     print(f"Error loading {filename} for frequency {frequency} and scale {scale}: {e}.")
         return frequency_data
+    
+    @staticmethod
+    def visualize_MW_Pix_map(MW_Pix_Map, title, coord=["G"], unit=r"K", is_MW_alm=False):
+        from map_tools import SamplingConverters
+        """
+        Visualize an MW pixel map by converting to HEALPix and drawing a mollview.
+
+        Args:
+            MW_Pix_Map (np.ndarray): MW pixel map (spatial) or MW alm if is_MW_alm=True.
+            title (str): Plot title.
+            coord (list): Coordinate transform for mollview, e.g., ["G"].
+            unit (str): Unit string for the colorbar.
+            is_MW_alm (bool): If True, MW_Pix_Map is already MW alm.
+        """
+        # NOTE: relies on s2fft, healpy as hp, matplotlib.pyplot as plt,
+        # and mw_alm_2_hp_alm being importable (you already import utils*).
+        if not is_MW_alm:
+            # Detect L from map shape
+            if MW_Pix_Map.ndim == 3:
+                L_max = MW_Pix_Map.shape[1]
+            else:
+                L_max = MW_Pix_Map.shape[0]
+            original_map_alm = s2fft.forward(MW_Pix_Map, L=L_max)
+            print("MW alm shape:", original_map_alm.shape)
+        else:
+            original_map_alm = MW_Pix_Map
+            L_max = original_map_alm.shape[0]
+
+        original_map_hp_alm = SamplingConverters.mw_alm_2_hp_alm(original_map_alm, L_max - 1)
+        nside = (L_max - 1) // 2
+        original_hp_map = hp.alm2map(original_map_hp_alm, nside=nside)
+
+        hp.mollview(
+            original_hp_map,
+            coord=coord,
+            title=title,
+            unit=unit,
+            # min=..., max=...  # enable if you want fixed color range
+        )
+        plt.show()
+
+
+    @staticmethod
+    def synthesize_ILC_maps_generalised(trimmed_maps, realisation, file_templates, lmax, N_directions, 
+                                        lam=2.0, comp=None, extract_comp=None,
+                                        visualise = False, constraint=None):
+        """
+    Synthesizes full-sky ILC or cILC map from trimmed wavelet coefficient maps.
+
+    Args:
+        trimmed_maps (list): Trimmed wavelet maps across scales.
+        realisation (str): realisation string (e.g., '0000').
+        output_templates (dict): Output file templates.
+        L_max (int): Maximum spherical harmonic degree.
+        N_directions (int): Number of wavelet directions.
+        component_name (str or None): Component name for constrained ILC (e.g., 'cmb').
+
+    Returns:
+        np.ndarray: Final synthesized ILC map.
+    """ 
+    
+        # 1) normalise realisation formatting
+        if isinstance(realisation, int):
+            realisation_str = f"{realisation:04d}"
+        else:
+            realisation_str = str(realisation).zfill(4)
+        
+        # 2) use the passed parameters 
+        file_tmpl = file_templates
+        # lam is already a parameter to this function; ensure caller passes it
+        
+        # 3) load f_scal (template expects {realisation,lmax,lam})
+        f_scal = np.load(
+            file_tmpl["f_scal"].format(
+                comp=comp, realisation=realisation_str, lmax=lmax, lam=lam
+            )
+        )
+        
+        # 4) build filters and synthesise
+        L = lmax + 1
+        filter_bank = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+        MW_Pix = s2wav.synthesis(
+            trimmed_maps, L=L, f_scal=f_scal, filters=filter_bank, N=N_directions
+        )
+        
+        # 5) (optional) visualise
+        if visualise:
+            try:
+                prefix = "cILC" if extract_comp else "ILC"
+                name = extract_comp.upper() if extract_comp else ""
+                title = f"{prefix} {name} | r={realisation_str}, lmax={lmax}, N={N_directions}, λ={lam}".strip()
+                SILCTools.visualize_MW_Pix_map(MW_Pix, title)
+            except NameError:
+                pass
+                
+        # 6) save to ilc_synth (template expects {realisation,lmax,lam})
+        out_path = file_tmpl["ilc_synth"].format(
+            realisation=realisation_str, lmax=lmax, lam=lam
+        )
+        np.save(out_path, MW_Pix)
+        return MW_Pix
 
 
 class ProduceSILC():
@@ -600,6 +789,230 @@ class ProduceSILC():
                         print(f"Saved synthesised ILC map for realisation {realisation}.")
                     
         return None
+
+
+    def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations,
+        output_templates, L_max, N_directions,
+        comp,                                     # input component maps
+        constraint=False, F=None, 
+        extract_comp=None,  # component to extract
+        reference_vectors=None):
+
+        # --- Prepare constraint vector / tags (unchanged) ---
+        if constraint:
+
+            if F is None or extract_comp is None:
+                raise ValueError("Must provide F and extract_comp if constraint=True")
+            target_names, extract_comp = normalize_targets(extract_comp)
+            if len(target_names) == 0:
+                raise ValueError("Provide at least one target component name when constraint=True")
+            f = SILCTools.find_f_from_extract_comp(F, target_names, reference_vectors, allow_sign_flip=False)
+        else:
+            if isinstance(extract_comp, (list, tuple, np.ndarray)):
+                raise ValueError("For unconstrained ILC, pass a single extract_comp (e.g., 'cmb').")
+            _, extract_comp = normalize_targets(extract_comp)
+            f = None  # not used in unconstrained mode
+        for realisation in realisations:
+            realisation_str = str(realisation).zfill(4)
+
+            print(f"Processing realisation {realisation_str} for component {comp}")
+            # 1) Load original wavelet maps
+            original_wavelet_c_j = SILCTools.load_frequency_data(
+
+                file_template=file_template,
+                frequencies=frequencies,
+                scales=scales,
+                comp=comp,
+                realisation=realisation,   # int
+                lmax=L_max,
+                lam=2.0,
+            )
+            # 2) Double resolution and save (single call)
+            t0 = time.perf_counter()
+
+            SILCTools.double_wavelet_maps(
+                original_wavelet_c_j,
+                frequencies,
+                scales,
+                realisation,
+                method="jax_cuda",  # or "jax"
+                path_template=output_templates['doubled_maps'],
+                component=comp,
+                lmax=L_max,
+                lam=2.0,
+            )
+            print(f'Doubled and saved wavelet maps in {time.perf_counter() - t0:.2f} seconds')
+
+            # 3) Load doubled resolution wavelet maps from disk
+            doubled_MW_wav_c_j = SILCTools.load_frequency_data(
+                file_template=output_templates['doubled_maps'],
+                frequencies=frequencies,
+                scales=scales,
+                comp=comp,
+                realisation=realisation,   # int
+                lmax=L_max,
+                lam=2.0,
+            )
+
+            # 4) Compute covariance matrices (MP: one job per scale)
+            t0 = time.perf_counter()
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                futures = [
+                    executor.submit(
+                        SILCTools.calculate_covariance_matrix,
+                        frequencies,
+                        doubled_MW_wav_c_j,
+                        scale,
+                        realisation_str,
+                        comp,
+                        output_templates['covariance_matrices']
+                    )
+                    for scale in scales
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    fut.result()
+            print(f'Calculated covariance matrices in {time.perf_counter() - t0:.2f} seconds')
+
+            # 5) Load covariance matrices (per scale)
+            F_str = '_'.join(frequencies)
+            R_covariance = [
+                np.load(
+                    output_templates['covariance_matrices'].format(
+                        component=comp,
+                        frequencies=F_str,
+                        scale=scale,
+                        realisation=realisation_str
+                    )
+                )
+                for scale in scales
+            ]
+
+            # 6) Compute weight vectors (MP: one job per scale)
+            t0 = time.perf_counter()
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                futures = [
+                    executor.submit(
+                        SILCTools.compute_weights_generalised,
+                        R_covariance[idx],
+                        scale,
+                        realisation_str,
+                        output_templates['weight_vector_matrices'],
+                        comp,
+                        extract_comp,
+                        constraint,
+                        F,
+                        f,
+                        reference_vectors
+                    )
+                    for idx, scale in enumerate(scales)
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    fut.result()
+            print(f'Calculated weight vector matrices in {time.perf_counter() - t0:.2f} seconds')
+
+            # Load weights (in order)
+            weight_vector_load = []
+            W_for_final_check = None
+            name = f"cilc_{extract_comp}" if constraint else "weight_vector"
+            for scale in scales:
+                weight_vector_path = output_templates['weight_vector_matrices'].format(
+                    component=comp,
+                    extract_comp=extract_comp,
+                    type=name,
+                    scale=scale,
+                    realisation=realisation_str
+                )
+                W = np.load(weight_vector_path)
+                if W.ndim == 2 and 1 in W.shape:
+                    W = W.reshape(-1)
+                weight_vector_load.append(W)
+                W_for_final_check = W
+
+            # 7) Create doubled ILC maps (serial; you noted MP here is slower)
+            t0 = time.perf_counter()
+            doubled_maps = []
+            for i, scale in enumerate(scales):
+                map_ = SILCTools.create_doubled_ILC_map(
+                    frequencies,
+                    scale,
+                    weight_vector_load[i],
+                    doubled_MW_wav_c_j,
+                    realisation_str,
+                    component=comp,
+                    constraint=constraint,
+                    extract_comp=extract_comp
+                )
+                doubled_maps.append(map_)
+                np.save(
+                    output_templates['ilc_maps'].format(
+                        component=comp,
+                        extract_comp=extract_comp,
+                        scale=scale,
+                        realisation=realisation_str
+                    ),
+                    map_
+                )
+            print(f'Created ILC maps in {time.perf_counter() - t0:.2f} seconds')
+
+            # 8) Trim to original resolution (MP: one job per scale)
+            t0 = time.perf_counter()
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                futures = [
+                    executor.submit(
+                        SILCTools.trim_to_original,
+                        doubled_maps[i],
+                        scales[i],
+                        realisation_str,
+                        comp,
+                        extract_comp,
+                        output_templates['trimmed_maps']
+                    )
+                    for i in range(len(scales))
+                ]
+                # keep order aligned with `scales`
+                trimmed_maps = [None] * len(scales)
+                for fut in concurrent.futures.as_completed(futures):
+                    res = fut.result()
+                    # expect either (scale, trimmed_array) or just array; handle both
+                    if isinstance(res, tuple) and len(res) == 2:
+                        sc, trimmed = res
+                        idx = scales.index(sc)
+                        trimmed_maps[idx] = trimmed
+                    else:
+                        # if only array returned, append later by position
+                        pass
+                # fill any Nones by loading from disk (if your trim saves to disk)
+                for idx, tm in enumerate(trimmed_maps):
+                    if tm is None:
+                        trimmed_maps[idx] = np.load(
+                            output_templates['trimmed_maps'].format(
+                                component=comp,
+                                extract_comp=extract_comp,
+                                scale=scales[idx],
+                                realisation=realisation_str
+                            )
+                        )
+            print(f'Trimmed maps to original resolution in {time.perf_counter() - t0:.2f} seconds')
+
+            # 9) Synthesize final map (serial)
+            synthesized_map = SILCTools.synthesize_ILC_maps_generalised(
+                trimmed_maps,
+                realisation_str,
+                output_templates,
+                L_max,
+                N_directions,
+                extract_comp=extract_comp,
+                component=comp,
+                constraint=constraint
+            )
+            synthesized_maps.append(synthesized_map)
+
+            # 10) One-time verification per realisation
+            if constraint and (W_for_final_check is not None):
+                _check_against_F(W_for_final_check, F, f)
+
+        return synthesized_maps
+
 
 
 # ilc_producer = ProduceSILC(ilc_components = ["cfn"], frequencies = ["030", "070"], realisations=1, lmax=1024, directory="/Scratch/matthew/data/", synthesise=True, method="jax_cuda")
