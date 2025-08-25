@@ -702,6 +702,7 @@ class ProduceSILC():
         L = self.lmax + 1 
         N_directions = self.N_directions
         lam = self.lam
+        
         for comp in self.ilc_components:
             for realisation in range(self.realisations):
                 realisation += self.start_realisation  # Adjust for starting realisation
@@ -792,226 +793,251 @@ class ProduceSILC():
 
 
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations,
-        output_templates, L_max, N_directions,
-        comp,                                     # input component maps
-        constraint=False, F=None, 
-        extract_comp=None,  # component to extract
-        reference_vectors=None):
+            output_templates, L_max, N_directions,
+            comp,                                     # input component maps
+            constraint=False, F=None, 
+            extract_comp=None,  # component to extract
+            reference_vectors=None):
 
-        # --- Prepare constraint vector / tags (unchanged) ---
-        if constraint:
+            def _check_against_F(W, F, f, tol=1e-6):
+                W = np.asarray(W)
+                if W.ndim == 2 and 1 in W.shape:   # (1,Nf) or (Nf,1) -> (Nf,)
+                    W = W.reshape(-1)
+                resp = np.tensordot(W, F, axes=([-1], [0]))  # (..., N_comp)
+                ok = np.allclose(resp, f, atol=tol, rtol=0.0)
+                print("FINAL CHECK  F^T w == f  ->", ok)
+                if not ok:
+                    print("max |F^T w - f| =", float(np.max(np.abs(resp - f))))
+                return ok
 
-            if F is None or extract_comp is None:
-                raise ValueError("Must provide F and extract_comp if constraint=True")
-            target_names, extract_comp = normalize_targets(extract_comp)
-            if len(target_names) == 0:
-                raise ValueError("Provide at least one target component name when constraint=True")
-            f = SILCTools.find_f_from_extract_comp(F, target_names, reference_vectors, allow_sign_flip=False)
-        else:
-            if isinstance(extract_comp, (list, tuple, np.ndarray)):
-                raise ValueError("For unconstrained ILC, pass a single extract_comp (e.g., 'cmb').")
-            _, extract_comp = normalize_targets(extract_comp)
-            f = None  # not used in unconstrained mode
-        for realisation in realisations:
-            realisation_str = str(realisation).zfill(4)
+            synthesized_map = []
+            timings = {   # store timings per step
+                "double_and_save": [],
+                "covariance": [],
+                "weights": [],
+                "create_ilc_maps": [],
+                "trim": [],
+            }
 
-            print(f"Processing realisation {realisation_str} for component {comp}")
-            # 1) Load original wavelet maps
-            original_wavelet_c_j = SILCTools.load_frequency_data(
+            # --- Prepare constraint vector / tags (unchanged) ---
+            if constraint:
+                if F is None or extract_comp is None:
+                    raise ValueError("Must provide F and extract_comp if constraint=True")
+                target_names, extract_comp = normalize_targets(extract_comp)
+                if len(target_names) == 0:
+                    raise ValueError("Provide at least one target component name when constraint=True")
+                f = SILCTools.find_f_from_extract_comp(F, target_names, reference_vectors, allow_sign_flip=False)
+            else:
+                if isinstance(extract_comp, (list, tuple, np.ndarray)):
+                    raise ValueError("For unconstrained ILC, pass a single extract_comp (e.g., 'cmb').")
+                _, extract_comp = normalize_targets(extract_comp)
+                f = None  # not used in unconstrained mode
 
-                file_template=file_template,
-                frequencies=frequencies,
-                scales=scales,
-                comp=comp,
-                realisation=realisation,   # int
-                lmax=L_max,
-                lam=2.0,
-            )
-            # 2) Double resolution and save (single call)
-            t0 = time.perf_counter()
+            for realisation in realisations:
+                realisation_str = str(realisation).zfill(4)
 
-            SILCTools.double_wavelet_maps(
-                original_wavelet_c_j,
-                frequencies,
-                scales,
-                realisation,
-                method="jax_cuda",  # or "jax"
-                path_template=output_templates['doubled_maps'],
-                component=comp,
-                lmax=L_max,
-                lam=2.0,
-            )
-            print(f'Doubled and saved wavelet maps in {time.perf_counter() - t0:.2f} seconds')
+                print(f"Processing realisation {realisation_str} for component {comp}")
 
-            # 3) Load doubled resolution wavelet maps from disk
-            doubled_MW_wav_c_j = SILCTools.load_frequency_data(
-                file_template=output_templates['doubled_maps'],
-                frequencies=frequencies,
-                scales=scales,
-                comp=comp,
-                realisation=realisation,   # int
-                lmax=L_max,
-                lam=2.0,
-            )
+                # 1) Load original wavelet maps
+                original_wavelet_c_j = SILCTools.load_frequency_data(
+                    file_template=file_template,
+                    frequencies=frequencies,
+                    scales=scales,
+                    comp=comp,
+                    realisation=realisation,   # int
+                    lmax=L_max,
+                    lam=2.0,
+                )
 
-            # 4) Compute covariance matrices (MP: one job per scale)
-            t0 = time.perf_counter()
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                futures = [
-                    executor.submit(
-                        SILCTools.calculate_covariance_matrix,
-                        frequencies,
-                        doubled_MW_wav_c_j,
-                        scale,
-                        realisation_str,
-                        comp,
-                        output_templates['covariance_matrices']
+                # 2) Double resolution and save (single call)
+                t0 = time.perf_counter()
+                SILCTools.double_wavelet_maps(
+                    original_wavelet_c_j,
+                    frequencies,
+                    scales,
+                    realisation,
+                    method="jax_cuda",  # or "jax"
+                    path_template=output_templates['doubled_maps'],
+                    component=comp,
+                    lmax=L_max,
+                    lam=2.0,
+                )
+                dt = time.perf_counter() - t0
+                print(f'Doubled and saved wavelet maps in {dt:.2f} seconds')
+                timings["double_and_save"].append(dt)
+
+                # 3) Load doubled resolution wavelet maps from disk
+                doubled_MW_wav_c_j = SILCTools.load_frequency_data(
+                    file_template=output_templates['doubled_maps'],
+                    frequencies=frequencies,
+                    scales=scales,
+                    comp=comp,
+                    realisation=realisation,   # int
+                    lmax=L_max,
+                    lam=2.0,
+                )
+
+                # 4) Compute covariance matrices (MP: one job per scale)
+                t0 = time.perf_counter()
+                with concurrent.futures.ProcessPoolExecutor() as executor:
+                    futures = [
+                        executor.submit(
+                            SILCTools.calculate_covariance_matrix,
+                            frequencies,
+                            doubled_MW_wav_c_j,
+                            scale,
+                            realisation_str,
+                            comp,
+                            output_templates['covariance_matrices']
+                        )
+                        for scale in scales
+                    ]
+                    for fut in concurrent.futures.as_completed(futures):
+                        fut.result()
+                dt = time.perf_counter() - t0
+                print(f'Calculated covariance matrices in {dt:.2f} seconds')
+                timings["covariance"].append(dt)
+
+                # 5) Load covariance matrices (per scale)
+                F_str = '_'.join(frequencies)
+                R_covariance = [
+                    np.load(
+                        output_templates['covariance_matrices'].format(
+                            component=comp,
+                            frequencies=F_str,
+                            scale=scale,
+                            realisation=realisation_str
+                        )
                     )
                     for scale in scales
                 ]
-                for fut in concurrent.futures.as_completed(futures):
-                    fut.result()
-            print(f'Calculated covariance matrices in {time.perf_counter() - t0:.2f} seconds')
 
-            # 5) Load covariance matrices (per scale)
-            F_str = '_'.join(frequencies)
-            R_covariance = [
-                np.load(
-                    output_templates['covariance_matrices'].format(
-                        component=comp,
-                        frequencies=F_str,
-                        scale=scale,
-                        realisation=realisation_str
-                    )
-                )
-                for scale in scales
-            ]
+                # 6) Compute weight vectors (MP: one job per scale)
+                t0 = time.perf_counter()
+                with concurrent.futures.ProcessPoolExecutor() as executor:
+                    futures = [
+                        executor.submit(
+                            SILCTools.compute_weights_generalised,
+                            R_covariance[idx],
+                            scale,
+                            realisation_str,
+                            output_templates['weight_vector_matrices'],
+                            comp,
+                            extract_comp,
+                            constraint,
+                            F,
+                            f,
+                            reference_vectors
+                        )
+                        for idx, scale in enumerate(scales)
+                    ]
+                    for fut in concurrent.futures.as_completed(futures):
+                        fut.result()
+                dt = time.perf_counter() - t0
+                print(f'Calculated weight vector matrices in {dt:.2f} seconds')
+                timings["weights"].append(dt)
 
-            # 6) Compute weight vectors (MP: one job per scale)
-            t0 = time.perf_counter()
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                futures = [
-                    executor.submit(
-                        SILCTools.compute_weights_generalised,
-                        R_covariance[idx],
-                        scale,
-                        realisation_str,
-                        output_templates['weight_vector_matrices'],
-                        comp,
-                        extract_comp,
-                        constraint,
-                        F,
-                        f,
-                        reference_vectors
-                    )
-                    for idx, scale in enumerate(scales)
-                ]
-                for fut in concurrent.futures.as_completed(futures):
-                    fut.result()
-            print(f'Calculated weight vector matrices in {time.perf_counter() - t0:.2f} seconds')
-
-            # Load weights (in order)
-            weight_vector_load = []
-            W_for_final_check = None
-            name = f"cilc_{extract_comp}" if constraint else "weight_vector"
-            for scale in scales:
-                weight_vector_path = output_templates['weight_vector_matrices'].format(
-                    component=comp,
-                    extract_comp=extract_comp,
-                    type=name,
-                    scale=scale,
-                    realisation=realisation_str
-                )
-                W = np.load(weight_vector_path)
-                if W.ndim == 2 and 1 in W.shape:
-                    W = W.reshape(-1)
-                weight_vector_load.append(W)
-                W_for_final_check = W
-
-            # 7) Create doubled ILC maps (serial; you noted MP here is slower)
-            t0 = time.perf_counter()
-            doubled_maps = []
-            for i, scale in enumerate(scales):
-                map_ = SILCTools.create_doubled_ILC_map(
-                    frequencies,
-                    scale,
-                    weight_vector_load[i],
-                    doubled_MW_wav_c_j,
-                    realisation_str,
-                    component=comp,
-                    constraint=constraint,
-                    extract_comp=extract_comp
-                )
-                doubled_maps.append(map_)
-                np.save(
-                    output_templates['ilc_maps'].format(
+                # Load weights (in order)
+                weight_vector_load = []
+                W_for_final_check = None
+                name = f"cilc_{extract_comp}" if constraint else "weight_vector"
+                for scale in scales:
+                    weight_vector_path = output_templates['weight_vector_matrices'].format(
                         component=comp,
                         extract_comp=extract_comp,
+                        type=name,
                         scale=scale,
                         realisation=realisation_str
-                    ),
-                    map_
-                )
-            print(f'Created ILC maps in {time.perf_counter() - t0:.2f} seconds')
-
-            # 8) Trim to original resolution (MP: one job per scale)
-            t0 = time.perf_counter()
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                futures = [
-                    executor.submit(
-                        SILCTools.trim_to_original,
-                        doubled_maps[i],
-                        scales[i],
-                        realisation_str,
-                        comp,
-                        extract_comp,
-                        output_templates['trimmed_maps']
                     )
-                    for i in range(len(scales))
-                ]
-                # keep order aligned with `scales`
-                trimmed_maps = [None] * len(scales)
-                for fut in concurrent.futures.as_completed(futures):
-                    res = fut.result()
-                    # expect either (scale, trimmed_array) or just array; handle both
-                    if isinstance(res, tuple) and len(res) == 2:
-                        sc, trimmed = res
-                        idx = scales.index(sc)
-                        trimmed_maps[idx] = trimmed
-                    else:
-                        # if only array returned, append later by position
-                        pass
-                # fill any Nones by loading from disk (if your trim saves to disk)
-                for idx, tm in enumerate(trimmed_maps):
-                    if tm is None:
-                        trimmed_maps[idx] = np.load(
-                            output_templates['trimmed_maps'].format(
-                                component=comp,
-                                extract_comp=extract_comp,
-                                scale=scales[idx],
-                                realisation=realisation_str
-                            )
+                    W = np.load(weight_vector_path)
+                    if W.ndim == 2 and 1 in W.shape:
+                        W = W.reshape(-1)
+                    weight_vector_load.append(W)
+                    W_for_final_check = W
+
+                # 7) Create doubled ILC maps (serial; you noted MP here is slower)
+                t0 = time.perf_counter()
+                doubled_maps = []
+                for i, scale in enumerate(scales):
+                    map_ = SILCTools.create_doubled_ILC_map(
+                        frequencies,
+                        scale,
+                        weight_vector_load[i],
+                        doubled_MW_wav_c_j,
+                        realisation_str,
+                        component=comp,
+                        constraint=constraint,
+                        extract_comp=extract_comp
+                    )
+                    doubled_maps.append(map_)
+                    np.save(
+                        output_templates['ilc_maps'].format(
+                            component=comp,
+                            extract_comp=extract_comp,
+                            scale=scale,
+                            realisation=realisation_str
+                        ),
+                        map_
+                    )
+                dt = time.perf_counter() - t0
+                print(f'Created ILC maps in {dt:.2f} seconds')
+                timings["create_ilc_maps"].append(dt)
+
+                # 8) Trim to original resolution (MP: one job per scale)
+                t0 = time.perf_counter()
+                with concurrent.futures.ProcessPoolExecutor() as executor:
+                    futures = [
+                        executor.submit(
+                            SILCTools.trim_to_original,
+                            doubled_maps[i],
+                            scales[i],
+                            realisation_str,
+                            comp,
+                            extract_comp,
+                            output_templates['trimmed_maps']
                         )
-            print(f'Trimmed maps to original resolution in {time.perf_counter() - t0:.2f} seconds')
+                        for i in range(len(scales))
+                    ]
+                    # keep order aligned with `scales`
+                    trimmed_maps = [None] * len(scales)
+                    for fut in concurrent.futures.as_completed(futures):
+                        res = fut.result()
+                        if isinstance(res, tuple) and len(res) == 2:
+                            sc, trimmed = res
+                            idx = scales.index(sc)
+                            trimmed_maps[idx] = trimmed
+                    for idx, tm in enumerate(trimmed_maps):
+                        if tm is None:
+                            trimmed_maps[idx] = np.load(
+                                output_templates['trimmed_maps'].format(
+                                    component=comp,
+                                    extract_comp=extract_comp,
+                                    scale=scales[idx],
+                                    realisation=realisation_str
+                                )
+                            )
+                dt = time.perf_counter() - t0
+                print(f'Trimmed maps to original resolution in {dt:.2f} seconds')
+                timings["trim"].append(dt)
 
-            # 9) Synthesize final map (serial)
-            synthesized_map = SILCTools.synthesize_ILC_maps_generalised(
-                trimmed_maps,
-                realisation_str,
-                output_templates,
-                L_max,
-                N_directions,
-                extract_comp=extract_comp,
-                component=comp,
-                constraint=constraint
-            )
-            synthesized_maps.append(synthesized_map)
+                # 9) Synthesize final map (serial)
+                synthesized_map = SILCTools.synthesize_ILC_maps_generalised(
+                    trimmed_maps,
+                    realisation_str,
+                    output_templates,
+                    L_max,
+                    N_directions,
+                    extract_comp=extract_comp, 
+                    component=comp,
+                    constraint=constraint
+                )
+                synthesized_map.append(synthesized_map)
 
-            # 10) One-time verification per realisation
-            if constraint and (W_for_final_check is not None):
-                _check_against_F(W_for_final_check, F, f)
+                # 10) One-time verification per realisation
+                if constraint and (W_for_final_check is not None):
+                    _check_against_F(W_for_final_check, F, f)
 
-        return synthesized_maps
+                return synthesized_map, timings
 
 
 

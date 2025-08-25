@@ -163,35 +163,30 @@ class Pipeline:
         realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
         freqs = list(self.frequencies)
 
-        # Infer scales from the first freq/realisation for each ilc target
-        for ilc_comp in self.ilc_components:
-            # On-disk label for input wavelets ('cfn' was saved under 'cmb')
-            comp_on_disk = "cmb" if ilc_comp == "cfn" else ilc_comp
-            first_real = realisations[0]
-            first_freq = freqs[0]
-            scales = self._infer_scales_from_disk(file_template, comp_on_disk, first_freq, first_real)
+        # ----- choose input mixture & infer scales once -----
+        comp_in   = self.wavelet_components[0]          # e.g. "cfn" (the maps on disk)
+        first_real, first_freq = realisations[0], freqs[0]
+        scales = self._infer_scales_from_disk(file_template, comp_in, first_freq, first_real)
 
-            print(f"--- PRODUCING ILC FOR target='{ilc_comp}' (source on disk='{comp_on_disk}'), scales={scales} ---")
+        # ----- run ILC for each target you want to extract -----
+        for extract_comp in self.ilc_components:        # e.g. ["cmb"] or ["cmb","tsz"]
+            print(f"--- ILC target='{extract_comp}'  input='{comp_in}'  scales={scales} ---")
 
-            # Map 'cfn' target to 'cmb' extracted label
-            extract_label = "cmb" if ilc_comp == "cfn" else ilc_comp
-
-            # Band tag is built inside the function from `frequencies`, so just pass `freqs`
             _ = ProduceSILC.ILC_wav_coeff_maps_MP(
                 file_template=file_template,
-                frequencies=freqs,        # keep same strings as saved wavelets
+                frequencies=freqs,                      # same strings as saved wavelets
                 scales=scales,
                 realisations=realisations,
                 output_templates=output_templates,
                 L_max=self.lmax,
                 N_directions=self.N_directions,
-                comp=comp_on_disk,        # {component} in templates
-                constraint=False,
+                comp=comp_in,                           # {component} in templates (input mixture)
+                constraint=False,                       # set True + pass F if doing CILC
                 F=None,
-                extract_comp=extract_label,  # {extract_comp} in templates
+                extract_comp=extract_comp,              # {extract_comp} in templates (target)
                 reference_vectors=None,
             )
-
+        
     # -------------------------
     # Orchestrator
     # -------------------------
@@ -232,7 +227,7 @@ def main():
     )
     parser.add_argument('--components', nargs='+', default=["cmb", "sync", "dust", "noise", 'tsz'])
     parser.add_argument('--wavelet-components', nargs='+', default=["cfn"])
-    parser.add_argument('--ilc-components', nargs='+', default=["cfn"])
+    parser.add_argument('--ilc-components', nargs='+', default=["cmb"])
     parser.add_argument('--frequencies', nargs='+',
                         default=["030", "044", "070", "100", "143", "217", "353", "545", "857"])
     parser.add_argument('--realisations', type=int, default=1)
