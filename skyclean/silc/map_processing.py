@@ -72,8 +72,8 @@ class ProcessMaps():
                 hp_map_reduced = hp.read_map(output_path)
             else:
                 if comp == "noise": 
-                    # there are only 300 noise realisations, select a random one
-                    noise_realisation = np.random.randint(0, 235)
+                    # we pick a random noise realisation from the chosen realisation ranges
+                    noise_realisation = np.random.randint(self.start_realisation, self.start_realisation + self.realisations)
                     filepath = self.file_templates[comp].format(frequency=frequency, realisation=noise_realisation)
                 else:
                     filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation)
@@ -126,7 +126,7 @@ class ProcessMaps():
         # Build input path
         if comp == "noise":
             if noise_realisation is None:
-                noise_realisation = np.random.randint(0, 235)
+                noise_realisation = np.random.randint(self.start_realisation, self.start_realisation + self.realisations)
             in_path = self.file_templates["noise"].format(
                 frequency=frequency, realisation=noise_realisation
             )
@@ -182,69 +182,39 @@ class ProcessMaps():
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
 
 
-    def create_wavelet_transform(self, comp: str, frequency: str, realisation: int,
-                         N_directions: int = 1, lam: float = 2.0,
-                         method="jax_cuda", visualise=False):
+    def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
         """
         Create a wavelet transform of the specified component.
+
+        Parameters:
+            comp (str): The component to process (e.g., 'sync', 'noise').
+            frequency (str): The frequency of the map.
+            realisation (int): The realisation number.
+            lmax (int): The maximum multipole for the wavelet transform.
+            N_directions (int): Number of directions for the wavelet transform.
+            lam (float): lambda factor (scaling) for the wavelet transform.
+            visualise (bool): Whether to visualise the wavelet transform.
+
+        Returns:
+            np.ndarray: The wavelet transformed map.
         """
         lmax = self.desired_lmax
         L = lmax + 1
-    
-        # --- input map path (support 'cfn' and processed_* for others) ---
-        in_key = comp if comp in self.file_templates else f"processed_{comp}"
-        filepath = self.file_templates[in_key].format(
-            frequency=frequency, realisation=realisation, lmax=lmax
-        )
-
-        # --- use 'cmb' label for filenames if comp is 'cfn' ---
-        comp_for_fname = "cmb" if comp == "cfn" else comp  # ← add this
-
-        # --- OUTPUT TEMPLATE KEYS MUST MATCH WHAT ILC LOADS ---
-        # Save wavelet coeffs under the key the ILC expects
-        wavelet_coeffs_tmpl = (
-            self.file_templates.get("wavelet_c_j")
-            or self.file_templates.get("wavelet_coeffs")
-        )
-        if wavelet_coeffs_tmpl is None:
-            raise KeyError(
-                "Missing wavelet coeff template: expected 'wavelet_c_j' (or 'wavelet_coeffs'). "
-                f"Available keys: {sorted(self.file_templates.keys())}"
-            )
-        # Keep your scaling save if you need it; name can stay if not used elsewhere
-        scaling_coeffs_tmpl = self.file_templates.get("scaling_coeffs", None)
-    
-        # If scale-0 file exists, assume all scales done unless overwriting
-        if (not self.overwrite) and os.path.exists(
-            wavelet_coeffs_tmpl.format(comp=comp_for_fname,  # ← use alias here
-                                       frequency=frequency,
-                                       scale=0, realisation=realisation,
-                                       lmax=lmax, lam=lam)
-        ):
-            print(f"Wavelet coefficients for {comp} at {frequency} GHz r{realisation} exist. Skipping.")
+        # load in processed map
+        filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation, lmax=lmax, lam = lam) # input path
+        wavelet_coeffs_path = self.file_templates["wavelet_coeffs"]
+        scaling_coeffs_path = self.file_templates["scaling_coeffs"]
+        if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, realisation=realisation, lmax=lmax, lam = lam)) and self.overwrite == False:
+            # test if scale 0 exists; this means the transform has already been created
+            print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation} already exist. Skipping generation.")
             return None
-    
-        # ---- compute coefficients ----
         hp_map = hp.read_map(filepath)
-        mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method=method)
-    
-        if visualise:
-            MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional=False)
-    
-        wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(
-            mw_map, L=L, N_directions=N_directions, lam=lam
-        )
-    
-        # ---- save using the ALIGNED template keys ----
-        MWTools.save_wavelet_scaling_coeffs(
-            wavelet_coeffs, scaling_coeffs,
-            comp_for_fname,               # ← and here
-            frequency, realisation, lmax, lam,
-            wavelet_coeffs_tmpl, scaling_coeffs_tmpl
-        )
+        L = lmax + 1
+        mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method = method)
+        MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)
+        wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=N_directions, lam=lam)
+        MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, realisation, lmax, lam, wavelet_coeffs_path, scaling_coeffs_path)
         return wavelet_coeffs, scaling_coeffs
-
-    
 
     def produce_and_save_wavelet_transforms(self, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
         """
