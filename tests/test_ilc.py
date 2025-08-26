@@ -7,6 +7,7 @@ import os
 import jax
 
 # Enable 64-bit precision BEFORE importing JAX-dependent modules
+# Tests may fail if using 32-bit!
 jax.config.update("jax_enable_x64", True)
 
 import s2fft

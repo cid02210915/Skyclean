@@ -20,7 +20,7 @@ from skyclean.silc import SamplingConverters
 class Inference:
     """Class for CMB prediction inference using trained models."""
     
-    def __init__(self, frequencies, realisations, lmax, N_directions=1, lam=2.0, directory="data/", seed=0):
+    def __init__(self, frequencies, realisations, lmax, N_directions=1, lam=2.0, directory="data/", seed=0, model_path=None):
         """Initialize the CMB inference system.
         
         Parameters:
@@ -31,6 +31,7 @@ class Inference:
             lam (float): Lambda parameter.
             directory (str): Base data directory.
             seed (int): Random seed for model initialization.
+            model_path (str, optional): Specific path to model checkpoint. If None, loads the latest model.
         """
         self.frequencies = frequencies
         self.realisations = realisations
@@ -39,6 +40,7 @@ class Inference:
         self.lam = lam
         self.directory = directory
         self.seed = seed
+        self.model_path = model_path
         
         # Initialize file templates
         self.file_templates = FileTemplates(directory)
@@ -57,33 +59,52 @@ class Inference:
             )
 
     
-    def load_model(self):
-        """Load the latest model weights for inference using fresh start approach.
+    def load_model(self, force_load=False):
+        """Load model weights for inference using fresh start approach.
+        
+        Uses the class variable model_path if set, otherwise loads the latest model.
+        Includes compatibility checking unless force_load is True.
         
         Parameters:
-            model: Unused in fresh start approach (kept for compatibility).
-            model_dir (str): Directory containing model checkpoints.
+            force_load (bool): If True, skip compatibility check and force load.
             
         Returns:
-            bool: True if successful, False otherwise.
+            nnx.Module: The loaded model.
         """
-        checkpointer = ocp.StandardCheckpointer()
-        model_dir = self.file_templates.output_directories["ml_models"]
-        # Find the latest checkpoint
-        checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
-        print(f"Found checkpoint files: {checkpoint_files}")
-        if not checkpoint_files:
-            print("No checkpoints found.")
-            return False
+        # Check compatibility first unless force_load is True
+        if not force_load:
+            compatibility = self.check_model_compatibility()
+            if not compatibility['compatible']:
+                print(f"Model compatibility check failed: {compatibility['message']}")
+                print("Use force_load=True to bypass this check if you're sure the model is correct.")
+                return False
+            else:
+                print(f"Model compatibility check passed: {compatibility['message']}")
         
-        # Get the latest checkpoint by epoch number
-        latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.split('_')[1]))
-        checkpoint_path = os.path.abspath(os.path.join(model_dir, latest_checkpoint))
+        checkpointer = ocp.StandardCheckpointer()
+        
+        if self.model_path is not None:
+            # Use user-specified model path from class variable
+            checkpoint_path = os.path.abspath(self.model_path)
+            print(f"Loading user-specified model from: {checkpoint_path}")
+            if not os.path.exists(checkpoint_path):
+                print(f"Error: Specified model path does not exist: {checkpoint_path}")
+                return False
+        else:
+            # Find the latest checkpoint automatically
+            model_dir = self.file_templates.output_directories["ml_models"]
+            checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
+            print(f"Found checkpoint files: {checkpoint_files}")
+            if not checkpoint_files:
+                print("No checkpoints found.")
+                return False
+            
+            # Get the latest checkpoint by epoch number
+            latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.split('_')[1]))
+            checkpoint_path = os.path.abspath(os.path.join(model_dir, latest_checkpoint))
         
         print(f"Loading checkpoint from: {checkpoint_path}")
 
-        # Fresh start approach following Flax NNX documentation
-        # First create a concrete model to get the state structure
         L = self.lmax + 1
         ch_in = len(self.frequencies)
         
@@ -100,6 +121,94 @@ class Inference:
         model = nnx.merge(graphdef, state_restored)
         return model
     
+    def check_model_compatibility(self):
+        """Check if the model path is compatible with initialized variables.
+        
+        This method attempts to load the model and verify that its architecture
+        matches the current instance parameters (frequencies, lmax, etc.).
+        
+        Returns:
+            dict: Dictionary containing compatibility information with keys:
+                - 'compatible': bool indicating if model is compatible
+                - 'message': str describing the compatibility status
+                - 'model_info': dict with model architecture details (if loadable)
+                - 'expected_info': dict with expected architecture details
+        """
+        expected_L = self.lmax + 1
+        expected_ch_in = len(self.frequencies)
+        
+        result = {
+            'compatible': False,
+            'message': '',
+            'model_info': {},
+            'expected_info': {
+                'L': expected_L,
+                'lmax': self.lmax,
+                'channels': expected_ch_in,
+                'frequencies': self.frequencies,
+                'N_directions': self.N_directions,
+                'lam': self.lam
+            }
+        }
+        
+        # Check if model path exists
+        if self.model_path is not None:
+            if not os.path.exists(self.model_path):
+                result['message'] = f"Model path does not exist: {self.model_path}"
+                return result
+        else:
+            # Check if default model directory has checkpoints
+            model_dir = self.file_templates.output_directories["ml_models"]
+            if not os.path.exists(model_dir):
+                result['message'] = f"Default model directory does not exist: {model_dir}"
+                return result
+            
+            checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
+            if not checkpoint_files:
+                result['message'] = f"No checkpoint files found in: {model_dir}"
+                return result
+        
+        try:
+            # Attempt to create model with current parameters
+            temp_model = S2_UNET(expected_L, expected_ch_in, rngs=nnx.Rngs(self.seed))
+            
+            # Try to load the checkpoint
+            checkpointer = ocp.StandardCheckpointer()
+            
+            if self.model_path is not None:
+                checkpoint_path = os.path.abspath(self.model_path)
+            else:
+                model_dir = self.file_templates.output_directories["ml_models"]
+                checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
+                latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.split('_')[1]))
+                checkpoint_path = os.path.abspath(os.path.join(model_dir, latest_checkpoint))
+            
+            # Test restoration
+            abstract_model = nnx.eval_shape(lambda: temp_model)
+            graphdef, abstract_state = nnx.split(abstract_model)
+            
+            # Attempt to restore - this will fail if architecture doesn't match
+            state_restored = checkpointer.restore(checkpoint_path, abstract_state)
+            
+            # If we get here, the model is compatible
+            result['compatible'] = True
+            result['message'] = f"Model is compatible with current parameters"
+            result['model_info'] = {
+                'checkpoint_path': checkpoint_path,
+                'L': expected_L,
+                'lmax': self.lmax,
+                'channels': expected_ch_in,
+                'frequencies': self.frequencies
+            }
+            
+        except Exception as e:
+            result['message'] = f"Model incompatibility detected: {str(e)}"
+            if "shape" in str(e).lower() or "dimension" in str(e).lower():
+                result['message'] += f"\nExpected: L={expected_L}, channels={expected_ch_in}"
+                result['message'] += f"\nThis usually indicates the model was trained with different lmax or frequencies."
+        
+        return result
+    
     
     def predict_cmb(self, realisation, save_result=True):
         """Predict CMB for a specific realisation.
@@ -114,7 +223,7 @@ class Inference:
         # Ensure model is loaded
         if self.model is None:
             print("Loading model...")
-            self.model = self.load_model()
+            self.model = self.load_model()  
             print("Loaded model.")
         
         
@@ -187,6 +296,7 @@ class Inference:
         """
         info = {
             'model_loaded': self.model is not None,
+            'model_path': self.model_path,
             'frequencies': self.frequencies,
             'lmax': self.lmax,
             'N_directions': self.N_directions,
@@ -194,6 +304,10 @@ class Inference:
             'directory': self.directory,
             'model_dir': self.file_templates.output_directories["ml_models"]
         }
+        
+        # Add compatibility check information
+        compatibility = self.check_model_compatibility()
+        info['model_compatibility'] = compatibility
         
         if self.config is not None:
             info.update({
