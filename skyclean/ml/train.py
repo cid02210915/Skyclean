@@ -60,7 +60,7 @@ def print_gpu_usage(stage_name):
 class Train: 
     def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
-                 learning_rate: float = 1e-3, momentum: float = 0.9, rngs: nnx.Rngs = nnx.Rngs(0), 
+                 learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0), 
                  directory: str = "data/", resume_training: bool = False):
         """
         Parameters:
@@ -75,6 +75,7 @@ class Train:
             epochs (int): Number of epochs to train for.
             learning_rate (float): Learning rate for the optimizer.
             momentum (float): Momentum for the optimizer.
+            chs (list): List of channel dimensions for each layer. Default: [1, 16, 32, 32, 64]
             rngs (nnx.Rngs): Random number generators for the model.
             directory (str): Directory where data is stored / saved to.
             resume_training (bool): Whether to resume training from the last checkpoint.
@@ -90,6 +91,7 @@ class Train:
         self.epochs = epochs
         self.learning_rate = learning_rate
         self.momentum = momentum
+        self.chs = chs if chs is not None else [1, 16, 32, 32, 64]
         self.rngs = rngs
         self.directory = directory
         self.resume_training = resume_training
@@ -281,7 +283,7 @@ class Train:
         train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
         print_gpu_usage("After dataset creation")
         print("Constructing the model")
-        model = S2_UNET(L, N_freq, rngs = self.rngs)
+        model = S2_UNET(L, N_freq, chs=self.chs, rngs = self.rngs)
         print_gpu_usage("After model creation")
 
         print("Configuring the optimizer")
@@ -552,6 +554,13 @@ def main():
         help='Momentum for the optimizer'
     )
     parser.add_argument(
+        '--chs',
+        nargs='+',
+        type=int,
+        default=[1, 16, 32, 32, 64],
+        help='List of channel dimensions for each layer (default: [1, 16, 32, 32, 64])'
+    )
+    parser.add_argument(
         '--seed',
         type=int,
         default=0,
@@ -605,6 +614,7 @@ def main():
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         momentum=args.momentum,
+        chs=args.chs,
         rngs=rngs,
         directory=args.directory,
         resume_training=args.resume_training,
@@ -628,6 +638,7 @@ if __name__ == '__main__':
 #   --epochs 100 \
 #   --learning-rate 1e-3 \
 #   --momentum 0.95 \
+#   --chs 1 16 32 32 64 \
 #   --directory /Scratch/matthew/data/ \
 #   --mem-fraction 0.7
 

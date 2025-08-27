@@ -20,7 +20,7 @@ from skyclean.silc import SamplingConverters
 class Inference:
     """Class for CMB prediction inference using trained models."""
     
-    def __init__(self, frequencies, realisations, lmax, N_directions=1, lam=2.0, directory="data/", seed=0, model_path=None):
+    def __init__(self, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None):
         """Initialize the CMB inference system.
         
         Parameters:
@@ -29,6 +29,7 @@ class Inference:
             lmax (int): Maximum multipole.
             N_directions (int): Number of directions for wavelet transform.
             lam (float): Lambda parameter.
+            chs (list): List of channel dimensions for each layer. Default: [1, 16, 32, 32, 64]
             directory (str): Base data directory.
             seed (int): Random seed for model initialization.
             model_path (str, optional): Specific path to model checkpoint. If None, loads the latest model.
@@ -38,6 +39,7 @@ class Inference:
         self.lmax = lmax
         self.N_directions = N_directions
         self.lam = lam
+        self.chs = chs if chs is not None else [1, 16, 32, 32, 64]
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
@@ -109,7 +111,7 @@ class Inference:
         ch_in = len(self.frequencies)
         
         # Create a concrete model instance to get the state structure
-        temp_model = S2_UNET(L, ch_in, rngs=nnx.Rngs(self.seed))
+        temp_model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
         # Restore the checkpoint back to its `nnx.State` structure - need an abstract reference.
         abstract_model = nnx.eval_shape(lambda: temp_model)
         graphdef, abstract_state = nnx.split(abstract_model)
@@ -168,45 +170,7 @@ class Inference:
                 result['message'] = f"No checkpoint files found in: {model_dir}"
                 return result
         
-        try:
-            # Attempt to create model with current parameters
-            temp_model = S2_UNET(expected_L, expected_ch_in, rngs=nnx.Rngs(self.seed))
-            
-            # Try to load the checkpoint
-            checkpointer = ocp.StandardCheckpointer()
-            
-            if self.model_path is not None:
-                checkpoint_path = os.path.abspath(self.model_path)
-            else:
-                model_dir = self.file_templates.output_directories["ml_models"]
-                checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
-                latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.split('_')[1]))
-                checkpoint_path = os.path.abspath(os.path.join(model_dir, latest_checkpoint))
-            
-            # Test restoration
-            abstract_model = nnx.eval_shape(lambda: temp_model)
-            graphdef, abstract_state = nnx.split(abstract_model)
-            
-            # Attempt to restore - this will fail if architecture doesn't match
-            state_restored = checkpointer.restore(checkpoint_path, abstract_state)
-            
-            # If we get here, the model is compatible
-            result['compatible'] = True
-            result['message'] = f"Model is compatible with current parameters"
-            result['model_info'] = {
-                'checkpoint_path': checkpoint_path,
-                'L': expected_L,
-                'lmax': self.lmax,
-                'channels': expected_ch_in,
-                'frequencies': self.frequencies
-            }
-            
-        except Exception as e:
-            result['message'] = f"Model incompatibility detected: {str(e)}"
-            if "shape" in str(e).lower() or "dimension" in str(e).lower():
-                result['message'] += f"\nExpected: L={expected_L}, channels={expected_ch_in}"
-                result['message'] += f"\nThis usually indicates the model was trained with different lmax or frequencies."
-        
+
         return result
     
     

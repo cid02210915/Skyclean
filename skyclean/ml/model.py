@@ -17,17 +17,19 @@ from s2ai.blocks.core_blocks import (
 
 class S2_UNET(nnx.Module):
     """UNET architecture defined on the sphere, built on s2ai."""
-    def __init__(self, L: int = 512, ch_in = 9, filter_type="axisymmetric", rngs: nnx.Rngs = nnx.Rngs(0),):
+    def __init__(self, L: int = 512, ch_in = 9, chs: list = None, filter_type="axisymmetric", rngs: nnx.Rngs = nnx.Rngs(0),):
         """
         Parameters:
             L (int): The maximum multipole for the wavelet transform.
             ch_in (int): Number of input channels.
+            chs (list): List of channel dimensions for each layer. Default: [1, 16, 32, 32, 64]
             filter_type (str): Type of filter to use in the convolutional blocks.
             rngs (nnx.Rngs): Random number generators for initialization.
         """
-        chs = [1, 16, 32, 64, 256]
+        if chs is None:
+            chs = [1, 16, 32, 32, 64]
         #chs = [1, 64, 64, 256]
-        gr = 8
+        gr = chs[1]//2
         Ls = [int(L / pow(2, i)) for i in range(len(chs) - 1)]
         print(Ls)
         self.len_L = len(Ls)
