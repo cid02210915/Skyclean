@@ -150,8 +150,9 @@ class MWTools():
             reality = True,
         )
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
-        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        #wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
+
     
     @staticmethod
     def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
@@ -228,15 +229,26 @@ class MWTools():
         Returns:
             None
         """
-        # Save wavelet coefficients
-        np_scaling = np.array(scaling_coeffs)  # Convert JAX array to numpy array
-        np.save(scal_template.format(comp = comp, frequency=frequency, realisation=realisation, lmax = lmax, lam = lam), np_scaling)
-
-        # Save each wavelet coefficient map at each scale. (scale 0 = scaling coefficients.)
+        # Save scaling coefficients (kept separate; do NOT treat as "scale 0")
+        np_scaling = np.array(scaling_coeffs)
+        # If N_directions==1 the scaling may be (1, L, 2L-1) — squeeze to (L, 2L-1)
+        if np_scaling.ndim == 3 and np_scaling.shape[0] == 1:
+            np_scaling = np_scaling[0]
+        np.save(
+            scal_template.format(comp=comp, frequency=frequency, realisation=realisation, lmax=lmax, lam=lam),
+            np_scaling,
+        )
+    
+        # Save each **wavelet band** at each scale. (Disk scale 0 == first wavelet band.)
         for scale, wav in enumerate(wavelet_coeffs):
-            np_wav = np.array(wav)  # Convert JAX array to numpy array
-            np.save(wav_template.format(comp = comp, frequency=frequency, scale=scale, realisation=realisation, lmax = lmax, lam = lam), np_wav)
-        
+            np_wav = np.array(wav)
+            # If N_directions==1 and wav is (1, L, 2L-1), squeeze to (L, 2L-1)
+            if np_wav.ndim == 3 and np_wav.shape[0] == 1:
+                np_wav = np_wav[0]
+            np.save(
+                wav_template.format(comp=comp, frequency=frequency, scale=scale, realisation=realisation, lmax=lmax, lam=lam),
+                np_wav,
+            )
 
     @staticmethod
     def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
@@ -300,6 +312,7 @@ class MWTools():
             )                                           
         plt.savefig(f'{title}')
         plt.show()
+
     
     @staticmethod
     def visualise_axisym_wavelets(L: int, lam: float = 2.0):
@@ -347,21 +360,22 @@ class SamplingConverters():
         Returns:
             MW_alm (numpy.ndarray): 2D array of shape (Lmax, 2*Lmax-1) MW spherical harmonics coefficients 
         """
-        L = lmax + 1 # L as defined in MW sampling
-        MW_alm = np.zeros((L, 2 * L - 1), dtype=np.complex128) # MW does not invoke reality theorem
-        for l in range(L):
-            for m in range(l + 1):
-                index = hp.Alm.getidx(lmax, l, m)
-                col = m + L - 1
-                hp_point = hp_alm[index]
-                MW_alm[l, col] = hp_point
-                if m > 0: 
-                    MW_alm[l, L-m-1] = (-1)**m * hp_point.conj() # fill m < 0 by symmetry
+        L_max = lmax + 1 # L_max as defined in MW sampling
+        MW_alm = np.zeros((L_max, 2 * L_max - 1), dtype=np.complex128)
+
+        for l in range(L_max):
+            for m in range(-l, l + 1):
+                index = hp.Alm.getidx(L_max - 1, l, abs(m))
+                if m < 0:
+                    MW_alm[l, L_max + m - 1] = (-1) ** m * np.conj(hp_alm[index])
+                else:
+                    MW_alm[l, L_max + m - 1] = hp_alm[index]
+    
         return MW_alm
         
     
     @staticmethod
-    def mw_alm_2_hp_alm(mw_alm: np.ndarray):
+    def mw_alm_2_hp_alm(MW_alm: np.ndarray, lmax:int):
         """
         Converts spherical harmonics (alm) from MW sampling to healpy representation.
 
@@ -379,16 +393,19 @@ class SamplingConverters():
         Returns:
             hp_alm (numpy.ndarray): 1D array of healpy spherical harmonics coefficients
         """
-        L = mw_alm.shape[0] 
-        lmax = L-1 # lmax as defined in healpy sampling
-        hp_alm = np.zeros(hp.Alm.getsize(lmax), np.complex128)
-        for l in range(L):
-            for m in range(l+1):
-                col = lmax + m
-                idx = hp.Alm.getidx(lmax, l, m)
-                hp_alm[idx] = mw_alm[l, col]
+        hp_alm = np.zeros(hp.Alm.getsize(lmax), dtype=np.complex128)
+        
+        for l in range(lmax + 1):
+            for m in range(-l, l + 1):
+                index = hp.Alm.getidx(lmax, l, abs(m))
+                if m < 0:
+                    hp_alm[index] = (-1)**m * np.conj(MW_alm[l, lmax + m])
+                else:
+                    hp_alm[index] = MW_alm[l, lmax + m]
+                    
         return hp_alm
     
+
     @staticmethod
     def hp_map_2_mw_map(hp_map: np.ndarray, lmax: int, method = "jax_cuda"):
         """
@@ -421,7 +438,7 @@ class SamplingConverters():
         """
         L = lmax + 1 
         mw_alm = s2fft.forward(mw_map, L=L, method=method, reality = True)
-        hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm)
+        hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm, lmax)
         hp_map = hp.alm2map(hp_alm, nside=HPTools.get_nside_from_lmax(lmax))
         return hp_map
     

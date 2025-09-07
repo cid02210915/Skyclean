@@ -26,6 +26,10 @@ class Pipeline:
         save_ilc_intermediates: bool = True,
         overwrite: bool = False,
         directory: str = "data/",
+        constraint: bool = False,
+        F = None,
+        reference_vectors = None,
+        scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
         self.wavelet_components = wavelet_components
@@ -41,6 +45,11 @@ class Pipeline:
         self.save_ilc_intermediates = save_ilc_intermediates
         self.overwrite = overwrite
         self.directory = directory
+        self.constraint = constraint
+        self.F = F
+        self.reference_vectors = reference_vectors
+        self.scales = scales
+        self.lam_str = f"{lam:.1f}"   # keeps "2.0" literal consistent in filenames
 
     # -------------------------
     # Individual steps
@@ -95,7 +104,7 @@ class Pipeline:
     def _infer_scales_from_disk(self, file_template: str, comp_on_disk: str,
                                 frequency: str, realisation: int) -> list[int]:
         """
-        Probe j=0..63 and collect those that exist on disk for the given (comp, freq, realisation).
+        Probe j=0.63 and collect those that exist on disk for the given (comp, freq, realisation).
         Assumes the wavelet template uses {comp} and British {realisation:05d}.
         Stops after the first gap once at least one scale is found.
         """
@@ -142,54 +151,64 @@ class Pipeline:
         """
         print("--- RUNNING ILC (new functional API) ---")
         ft = FileTemplates(self.directory).file_templates
+        realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
 
         # Template for loading original wavelet coeffs (your wavelets use {comp} & {realisation})
         file_template = ft.get("wavelet_coeffs") or ft.get("wavelet_c_j")
         if file_template is None:
             raise KeyError("Missing wavelet template: expected 'wavelet_coeffs' or 'wavelet_c_j'.")
-
+    
         # Output templates expected by ILC_wav_coeff_maps_MP (US {realisation}, {component}, {extract_comp})
         output_templates = {
-            "doubled_maps":         ft["doubled_maps"],
-            "covariance_matrices":  ft["covariance_matrices"],
+            "doubled_maps":           ft["doubled_maps"],
+            "covariance_matrices":    ft["covariance_matrices"],
             "weight_vector_matrices": ft["weight_vector_matrices"],
-            "ilc_maps":             ft["ilc_maps"],
-            "trimmed_maps":         ft["trimmed_maps"],
-            "ilc_synth":            ft["ilc_synth"],
-            "ilc_spectrum":         ft.get("ilc_spectrum"),
+            "ilc_maps":               ft["ilc_maps"],
+            "trimmed_maps":           ft["trimmed_maps"],
+            "ilc_synth":              ft["ilc_synth"],
+            "ilc_spectrum":           ft.get("ilc_spectrum"),
+            "scaling_coeffs":         ft["scaling_coeffs"], 
         }
-
+    
         # Realisations (ints). Frequencies: pass exactly what you used for wavelets (e.g., "030","100",...)
         realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
         freqs = list(self.frequencies)
-
-        # ----- choose input mixture & infer scales once -----
-        comp_in   = self.wavelet_components[0]          # e.g. "cfn" (the maps on disk)
-        first_real, first_freq = realisations[0], freqs[0]
-        scales = self._infer_scales_from_disk(file_template, comp_in, first_freq, first_real)
-
+    
+        # ----- choose input mixture & scales -----
+        comp_in = self.wavelet_components[0]  # e.g. "cfn" (the maps on disk)
+    
+        # Use provided scales if given; otherwise infer from disk once
+        if getattr(self, "scales", None):
+            scales = list(self.scales)
+        else:
+            first_real, first_freq = realisations[0], freqs[0]
+            scales = self._infer_scales_from_disk(file_template, comp_in, first_freq, first_real)
+    
+        # Constraint settings (safe fallbacks if attributes aren't present)
+        do_constraint = getattr(self, "constraint", False)
+        F = getattr(self, "F", None)
+        reference_vectors = getattr(self, "reference_vectors", None)
+    
         # ----- run ILC for each target you want to extract -----
-        for extract_comp in self.ilc_components:        # e.g. ["cmb"] or ["cmb","tsz"]
-            print(f"--- ILC target='{extract_comp}'  input='{comp_in}'  scales={scales} ---")
-
+        for extract_comp in self.ilc_components:  # e.g. ["cmb"] or ["cmb","tsz"]
+            print(f"--- ILC target='{extract_comp}'  input='{comp_in}'  lmax={self.lmax}  scales={scales} ---")
+    
             _ = ProduceSILC.ILC_wav_coeff_maps_MP(
                 file_template=file_template,
-                frequencies=freqs,                      # same strings as saved wavelets
+                frequencies=freqs,          # same strings as saved wavelets
                 scales=scales,
                 realisations=realisations,
                 output_templates=output_templates,
-                L_max=self.lmax,
+                L_max=self.lmax+1,
                 N_directions=self.N_directions,
-                comp=comp_in,                           # {component} in templates (input mixture)
-                constraint=False,                       # set True + pass F if doing CILC
-                F=None,
-                extract_comp=extract_comp,              # {extract_comp} in templates (target)
-                reference_vectors=None,
+                comp=comp_in,               # {component} in templates (input mixture)
+                constraint=do_constraint,   # now mirrors your manual call
+                F=F,
+                extract_comp=extract_comp,  # {extract_comp} in templates (target)
+                reference_vectors=reference_vectors,
             )
-        
-    # -------------------------
-    # Orchestrator
-    # -------------------------
+    
+            
     def run(self, steps=None):
         """
         steps: list of steps to run, any of {'download','process','wavelets','ilc','all'}.

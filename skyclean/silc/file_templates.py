@@ -73,53 +73,50 @@ class FileTemplates():
         # Per-frequency, per-scale doubled wavelet maps (still per input component)
         "doubled_maps": os.path.join(
             self.output_directories["doubled_maps"],
-            "doubled_{component}_f{frequency}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "doubled_{component}_f{frequency}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
 
         # Covariance matrices per scale over the whole band-set (frequencies join tag, e.g. 30_44_70_...)
         "covariance_matrices": os.path.join(
             self.output_directories["covariance_matrix"],
-            "cov_MW_{component}_b{frequencies}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
 
         # Weights per scale; {type} is "weight_vector" (or "cilc_cmb" for constrained case)
         "weight_vector_matrices": os.path.join(
             self.output_directories["weight_vector_data"],
-            "{component}_{type}_{extract_comp}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "{component}_{type}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
 
         # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
         "ilc_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
+
         # Legacy alias (same path)
         "ilc_doubled_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
-
+        
         # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
         "trimmed_maps": os.path.join(
             self.output_directories["ilc_trimmed_maps"],
-            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
-        # Legacy alias (same path)
-        "ilc_trimmed_maps": os.path.join(
-            self.output_directories["ilc_trimmed_maps"],
-            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation}_lmax{lmax}_lam{lam}.npy"
-        ),
+        
 
         # Final synthesized map — records target (extract_comp), source (component), and band-set
         "ilc_synth": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
-            "{extract_comp}_from-{component}_b{frequencies}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
 
         # Optional: power spectrum tagged likewise
         "ilc_spectrum": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
-            "{extract_comp}_from-{component}_spectrum_b{frequencies}_r{realisation}_lmax{lmax}_lam{lam}.npy"
+            "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
 
         # ---------------- ML (left unchanged) ----------------
@@ -127,7 +124,6 @@ class FileTemplates():
         "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         }
-
 
     
     @staticmethod
@@ -146,6 +142,24 @@ class FileTemplates():
             os.makedirs(directory)
         else:
             pass
+
+    def print_one_example_per_type(self):
+        """
+        Print a single example file (if any) from each managed output directory.
+        """
+        base = os.path.abspath(self.directory)
+        for key, root in self.output_directories.items():
+            example = None
+            for r, _, files in os.walk(root):
+                if files:
+                    # pick the first file we see; simple and fast
+                    example = os.path.join(r, files[0])
+                    break
+            if example:
+                rel = os.path.relpath(example, base)
+                print(f"{key}: {rel}")
+            else:
+                print(f"{key}: (no files)")
 
 
 
