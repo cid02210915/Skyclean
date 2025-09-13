@@ -1,11 +1,13 @@
 import argparse
 import os
 import time
+import numpy as np
 
 from .download import DownloadData
 from .map_processing import ProcessMaps
 from .file_templates import FileTemplates
 from .ilc import ProduceSILC  
+from .power_spec import MapAlmConverter, PowerSpectrumTT
 
 
 class Pipeline:
@@ -52,7 +54,7 @@ class Pipeline:
         self.lam_str = f"{lam:.1f}"   # keeps "2.0" literal consistent in filenames
 
     # -------------------------
-    # Individual steps
+    # Steps
     # -------------------------
     def step_download(self):
         print(f"--- STARTING DATA DOWNLOAD ---")
@@ -110,7 +112,7 @@ class Pipeline:
         """
         scales = []
         found_any = False
-        # realisation (british) is zero-padded to 5 in your wavelet template
+
         real_brit = f"{realisation:05d}"
         for j in range(64):
             try:
@@ -153,8 +155,8 @@ class Pipeline:
         ft = FileTemplates(self.directory).file_templates
         realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
 
-        # Template for loading original wavelet coeffs (your wavelets use {comp} & {realisation})
-        file_template = ft.get("wavelet_coeffs") or ft.get("wavelet_c_j")
+        # Template for loading original wavelet coeffs (wavelets use {comp} and {realisation})
+        file_template = ft.get("wavelet_coeffs") or ft.get("wavelet_c_j") 
         if file_template is None:
             raise KeyError("Missing wavelet template: expected 'wavelet_coeffs' or 'wavelet_c_j'.")
     
@@ -207,8 +209,94 @@ class Pipeline:
                 extract_comp=extract_comp,  # {extract_comp} in templates (target)
                 reference_vectors=reference_vectors,
             )
-    
-            
+
+    def step_power_spec(
+        self,
+        unit: str = "K",
+        save_path: str | None = None,
+        *,
+        source: str = "auto",                  # "auto" | "ilc_synth" | "processed" | "downloaded"
+        component: str | None = None,          # map component ("cmb","sync","dust","noise","tsz") or "cfn" for ilc_synth {component}
+        extract_comp: str | None = None,       # ilc_synth target (e.g. "cmb")
+        frequencies: list[str] | None = None,  # ilc_synth band-set
+        frequency: str | int | None = None,    # single band for processed/downloaded
+        realisation: int | None = None,        # defaults to self.start_realisation
+        lmax: int | None = None,               # defaults to self.lmax
+        lam: str | float | int | None = None,  # defaults to self.lam_str
+        field: int = 0
+    ):
+        """
+        Compute TT C_ell (and plot D_ell). Returns (ell, cl).
+        unit: "K" (input C_ell in K^2) or "uK"/"µK" (input already µK^2). Plot is in µK^2.
+        """
+       
+        # defaults from pipeline
+        r     = self.start_realisation if realisation is None else int(realisation)
+        lmax_ = self.lmax if lmax is None else int(lmax)
+        lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
+        freqs = self.frequencies if frequencies is None else list(frequencies)
+
+        # choose source automatically (preserves your old behavior)
+        if source == "auto":
+            source = "ilc_synth" if self.ilc_components else "downloaded"
+
+        # templates + converter
+        ft = FileTemplates(self.directory).file_templates
+        conv = MapAlmConverter(ft)
+
+        # ---- load selected map ----
+        if source == "ilc_synth":
+            comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")  # template {component}
+            tgt     = extract_comp or (self.ilc_components[0] if self.ilc_components else "cmb")       # template {extract_comp}
+            out = conv.to_alm(
+                component=comp_in, source="ilc_synth",
+                extract_comp=tgt, frequencies=freqs,
+                realisation=r, lmax=lmax_, lam=lam_,
+            )
+            src = "ilc_synth"; label = f"ILC-synth ({tgt})"
+
+        elif source == "processed":
+            comp_use = component or "cmb"
+            out = conv.to_alm(
+                component=comp_use, source="processed",
+                frequency=frequency, realisation=r, lmax=lmax_,
+            )
+            src = "processed"; label = f"Processed {comp_use}"
+
+        elif source == "downloaded":
+            comp_use = component or "cmb"
+            out = conv.to_alm(
+                component=comp_use, source="downloaded",
+                frequency=frequency, realisation=r, lmax=lmax_, field=field,
+            )
+            src = "downloaded"; label = f"Downloaded {comp_use}"
+
+        else:
+            raise ValueError("source must be one of: 'auto', 'ilc_synth', 'processed', 'downloaded'.")
+
+        # ---- alm -> C_ell ----
+        if out["format"] == "mw":
+            ell, cl = PowerSpectrumTT.from_mw_alm(np.asarray(out["alm"]))
+        else:
+            ell, cl = PowerSpectrumTT.from_healpy_alm(out["alm"])
+
+        # ---- C_ell -> D_ell (plot in µK^2) ----
+        Dl = PowerSpectrumTT.cl_to_Dl(ell, cl, input_unit=unit)  # "K" or "uK"
+
+        # pick a simple style by source (works with tuple-plotter or dict-plotter)
+        style = {"ilc_synth": "-", "processed": "--", "downloaded": "-."}.get(src, "-")
+
+        try:
+            # if your plotter accepts dicts
+            PowerSpectrumTT.plot_Dl_series({"ell": ell, "Dl": Dl, "label": label, "source": src},
+                                           save_path=save_path, show=True)
+        except Exception:
+            # fallback if your plotter only accepts tuples
+            PowerSpectrumTT.plot_Dl_series([(ell, Dl, label, style)], save_path=save_path, show=True)
+
+        return ell, cl
+
+        
     def run(self, steps=None):
         """
         steps: list of steps to run, any of {'download','process','wavelets','ilc','all'}.
@@ -235,6 +323,9 @@ class Pipeline:
 
         if "ilc" in steps:
             self.step_ilc()
+
+        if "power_spec" in steps:
+            self.step_power_spec()
 
         elapsed = time.perf_counter() - start_time
         print(f"SELECTED STEPS COMPLETED IN {elapsed:.2f} SECONDS (lam={self.lam}).")
@@ -304,6 +395,6 @@ def main():
 #     --wavelet-components cfn --ilc-components cfn \
 #     --frequencies 100 143 217 --realisations 1 --start-realisation 0 \
 #     --lmax 512 --N-directions 1 --lam 2.0 --method jax_cuda
-#
+
 if __name__ == '__main__':
     main()
