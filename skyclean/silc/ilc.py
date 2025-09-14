@@ -60,7 +60,7 @@ class SILCTools():
 
     @staticmethod
     def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method: str):
-        print("smoothed_covariance", flush = True)
+        #print("smoothed_covariance", flush = True)
         """
         Parameters:
             MW_Map1, MW_Map2 (np.ndarray): same‐shape complex np.ndarray wavelet maps
@@ -122,7 +122,7 @@ class SILCTools():
 
     @staticmethod 
     def compute_covariance(task):
-        print("compute_covariance", flush = True)
+        #print("compute_covariance", flush = True)
         """
         Computes the covariance between two frequency maps at a given scale.
 
@@ -145,13 +145,13 @@ class SILCTools():
                                     realisation: int, method: str, path_template: str, *,
                                     component: str = "cfn", lmax: int = 64, lam: float | str = 2.0,):
         
-        print("calculate_covariance_matrix", flush = True)
+        #print("calculate_covariance_matrix", flush = True)
 
         """
         Calculates the covariance matrices for given frequencies and saves them to disk,
         accommodating any size of the input data arrays.
         """
-        print('calculate_covariance_matrix', flush=True)
+        #print('calculate_covariance_matrix', flush=True)
 
         if not frequencies:
             raise ValueError("Frequency list is empty.")
@@ -319,42 +319,12 @@ class SILCTools():
                 )
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 np.save(out_path, np.asarray(doubled))
-                print("saved:", out_path)
-
-
-    @staticmethod
-    def find_f_from_extract_comp(F, extract_comp_or_comps, reference_vectors, allow_sign_flip=False, atol=1e-8):
-
-        if isinstance(extract_comp_or_comps, (str, bytes)):
-            names = [extract_comp_or_comps]
-        else:
-            names = list(extract_comp_or_comps)
-
-        N_comp = F.shape[1]
-        f = np.zeros(N_comp, dtype=float)
-
-        for name in names:
-            key = name.lower()
-            if key not in reference_vectors:
-                raise ValueError(f"Reference vector for '{name}' not set in reference_vectors.")
-            target_vec = reference_vectors[key]
-            t = target_vec / np.linalg.norm(target_vec)
-
-            matched = False
-            for j in range(N_comp):
-                col = F[:, j] / np.linalg.norm(F[:, j])
-                if np.allclose(col, t, atol=atol) or (allow_sign_flip and np.allclose(col, -t, atol=atol)):
-                    f[j] = 1.0          # ← always +1 (no -1 branch)
-                    matched = True
-                    break
-            if not matched:
-                raise ValueError(f"Component '{name}' not found in F.")
-        return f
+                #print("saved:", out_path)
 
 
     @staticmethod
     def compute_weight_vector(R: np.ndarray, scale: int, realisation: int):
-        print("compute_weight_vector", flush = True)
+        #print("compute_weight_vector", flush = True)
         """
         Processes the given 4D matrix R by computing and saving the weight vectors for each matrix in the first two dimensions.
         Also stores results in memory as arrays and saves them to disk. Adjusts the size of the identity vector based on sub-matrix size.
@@ -406,7 +376,7 @@ class SILCTools():
     def compute_weights_generalised(R, scale, realisation, weight_vector_matrix_template, comp, L_max, 
                                     extract_comp, *, constraint=False, F=None, f=None, 
                                     reference_vectors=None, lam="2.0"):
-        print("compute_weights_generalised", flush=True)
+        #print("compute_weights_generalised", flush=True)
         """
         Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
     
@@ -593,7 +563,7 @@ class SILCTools():
     def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str, *, 
                          path_template:str, component: str, extract_comp: str, lmax:int, lam: str = 2.0):
 
-        print("trim_to_original", flush=True)
+        #print("trim_to_original", flush=True)
         """
         Trim a doubled‐resolution MW Pixel map back to its original resolution.
 
@@ -607,17 +577,17 @@ class SILCTools():
         """
         
         # --- minimal debug & guards ---
-        print(f"[DEBUG] scale={scale}, realisation={realisation}, shape={MW_Doubled_Map.shape}", flush=True)
+        #print(f"[DEBUG] scale={scale}, realisation={realisation}, shape={MW_Doubled_Map.shape}", flush=True)
         if MW_Doubled_Map.ndim != 2:
             raise ValueError(f"[DEBUG] Not 2D: got {MW_Doubled_Map.shape}")
 
         L2, W2 = MW_Doubled_Map.shape
         if W2 != 2 * L2 - 1:
             raise ValueError(f"[DEBUG] Not MW grid: shape={L2}x{W2}, expected {L2}x{2*L2-1}")
-        print('L2:',L2)
+        #print('L2:',L2)
      
         L2, W2 = MW_Doubled_Map.shape
-        print(f"[trim pid={os.getpid()}] scale={scale} r={realisation} L2={L2} shape={MW_Doubled_Map.shape}",flush=True)
+        #print(f"[trim pid={os.getpid()}] scale={scale} r={realisation} L2={L2} shape={MW_Doubled_Map.shape}",flush=True)
         # compute trim indices once
         inner_v = (L2 + 1) // 2           # original bandlimit L (rows) after trimming
         inner_h = 2 * inner_v - 1         # original width 2L-1
@@ -648,16 +618,15 @@ class SILCTools():
             )
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             np.save(save_path, mw_map_original)
-            print(f"[SAVE] Trimmed map -> {save_path}")
+            #print(f"[SAVE] Trimmed map -> {save_path}")
 
         return int(scale), mw_map_original
-    
 
 
     @staticmethod
     def load_frequency_data(file_template: str, frequencies: list, scales: list, comp: str, lmax: int, *,
                         realisation: int, lam: float = 2.0):
-        print("load_frequency_data", flush = True)
+        #print("load_frequency_data", flush = True)
         """
         Load NumPy arrays from dynamically generated file paths for each frequency and scale.
         
@@ -680,7 +649,7 @@ class SILCTools():
             for scale in scales:
                 filename = file_template.format(
                     comp=comp,
-                    component=comp,          # ← minimal fix: provide {component}
+                    component=comp,        
                     frequency=frequency,
                     scale=scale,
                     realisation=realisation,
@@ -742,7 +711,7 @@ class SILCTools():
         lam=2.0, component=None, extract_comp=None, 
         visualise=False, constraint=None, frequencies=None,
     ):
-        print("synthesize_ILC_maps_generalised", flush=True)
+        #print("synthesize_ILC_maps_generalised", flush=True)
         """
         Synthesizes full-sky ILC or cILC map from trimmed wavelet coefficient maps.
         ...
@@ -820,7 +789,7 @@ class SILCTools():
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         np.save(out_path, MW_Pix)
         return MW_Pix
-
+    
 
 
 class ProduceSILC():
@@ -995,7 +964,6 @@ class ProduceSILC():
                         mw_pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions, lam)
                         np.save(ilc_synth_map_path, mw_pix)
                         print(f"Saved synthesised ILC map for realisation {realisation}.")
-                    
         return None
 
 
@@ -1039,11 +1007,13 @@ class ProduceSILC():
                 raise ValueError("For unconstrained ILC, pass a single extract_comp (e.g., 'cmb').")
             _, extract_comp = normalize_targets(extract_comp)
             f = None  # not used in unconstrained mode
+            
         synthesized_map = []
         
         for realisation in realisations:
             realisation_str = str(realisation).zfill(4)
             print(f"Processing realisation {realisation_str} for component {comp}")
+
             # 1) Load original wavelet maps
             original_wavelet_c_j = SILCTools.load_frequency_data(
                 file_template=file_template,
@@ -1054,6 +1024,7 @@ class ProduceSILC():
                 lmax=L_max-1,
                 lam=2.0,
             )
+
             # 2) Double resolution and save (single call)
             t0 = time.perf_counter()
             SILCTools.double_and_save_wavelet_maps(
@@ -1070,6 +1041,7 @@ class ProduceSILC():
             dt = time.perf_counter() - t0
             print(f'Doubled and saved wavelet maps in {dt:.2f} seconds')
             timings["double_and_save"].append(dt)
+
             # 3) Load doubled resolution wavelet maps from disk
             doubled_MW_wav_c_j = SILCTools.load_frequency_data(
                 file_template=output_templates['doubled_maps'],
@@ -1118,6 +1090,7 @@ class ProduceSILC():
                 )
                 for scale in scales
             ]
+
             # 6) Compute weight vectors (MP: one job per scale)
             t0 = time.perf_counter()
             with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -1163,6 +1136,7 @@ class ProduceSILC():
                     W = W.reshape(-1)
                 weight_vector_load.append(W)
                 W_for_final_check = W
+
             # 7) Create doubled ILC maps (serial; when noted MP here is slower)
             t0 = time.perf_counter()
             doubled_maps = []
@@ -1192,6 +1166,7 @@ class ProduceSILC():
             dt = time.perf_counter() - t0
             print(f'Created ILC maps in {dt:.2f} seconds')
             timings["create_ilc_maps"].append(dt)
+
             # 8) Trim to original resolution (MP: one job per scale)
             t0 = time.perf_counter()
             with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -1233,8 +1208,8 @@ class ProduceSILC():
             dt = time.perf_counter() - t0
             print(f'Trimmed maps to original resolution in {dt:.2f} seconds')
             timings["trim"].append(dt)
-            # 9) Synthesize final map (serial)
-        
+
+            # 9) Synthesize final map (serial)        
             synth_map = SILCTools.synthesize_ILC_maps_generalised(
              trimmed_maps=trimmed_maps,
              realisation=int(realisation_str),
@@ -1254,5 +1229,6 @@ class ProduceSILC():
             if constraint and (W_for_final_check is not None):
                 _check_against_F(W_for_final_check, F, f)
             return synthesized_map, timings
+        
 # ilc_producer = ProduceSILC(ilc_components = ["cfn"], frequencies = ["030", "070"], realisations=1, lmax=1024, directory="/Scratch/matthew/data/", synthesise=True, method="jax_cuda")
 # ilc_producer.process_wavelet_maps(save_intermediates=True, visualise=False)

@@ -107,7 +107,7 @@ class DownloadData():
         Returns:
             None
         """ 
-        filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 for now
+        filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 
         if os.path.exists(filename):
             print(f"CMB realisation {realisation} already exists. Skipping generation.")
             return None
@@ -118,6 +118,7 @@ class DownloadData():
         cmb_map = hp.synfast(cl, nside=nside) 
         hp.write_map(filename, cmb_map, overwrite=True)
         print(f"Downloaded CMB.")
+
 
     def download_all(self): 
         """
@@ -157,10 +158,3 @@ class DownloadData():
 # realisations = 2
 # downloader = DownloadData(components, frequencies, realisations, directory = "/Scratch/matthew/data/", noise=True)
 # downloader.download_all()
-
-
-
-
-
-
-    
