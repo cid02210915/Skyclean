@@ -180,11 +180,11 @@ class MWTools():
         )
         scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
-        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        #wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
     
     @staticmethod
-    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0,):
+    def inverse_wavelet_transform(wavelet_coeffs: list, scaling_coeffs, L: int, N_directions: int = 1, lam: float = 2.0,):
         """
         Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
 
@@ -198,16 +198,16 @@ class MWTools():
             jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
         """
         j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-        f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
-        wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
+        f_scal = scaling_coeffs[0] if getattr(scaling_coeffs, "ndim", 0) == 3 else scaling_coeffs
+
         mw_map = s2wav.synthesis(
-            wavelet_coeffs,
-            L       = L,
-            f_scal  = f_scal,
-            lam     = lam,
-            filters = j_filter,
-            reality = True,
-            N = N_directions
+         wavelet_coeffs,
+         L       = L,
+         f_scal  = f_scal,
+         lam     = lam,
+         filters = j_filter,
+         reality = True,
+         N = N_directions
         )
         return mw_map
 
@@ -338,6 +338,7 @@ class MWTools():
             plt.grid(ls=':')
         plt.show()
 
+
 class SamplingConverters():
     """Converters between Healpy and MW sampling"""
     
@@ -370,7 +371,7 @@ class SamplingConverters():
                     MW_alm[l, L_max + m - 1] = (-1) ** m * np.conj(hp_alm[index])
                 else:
                     MW_alm[l, L_max + m - 1] = hp_alm[index]
-    
+                    
         return MW_alm
         
     
