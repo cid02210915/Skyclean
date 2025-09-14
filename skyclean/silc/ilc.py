@@ -16,7 +16,8 @@ import time
 
 from .map_tools import SamplingConverters
 from .utils import normalize_targets   
-from .utils import save_array 
+from .utils import save_array
+from skyclean.silc.mixing_matrix_constraint import ILCConstraints 
 
 class SILCTools():
     '''Tools for Scale-discretised, directional wavelet ILC (SILC).'''
@@ -138,7 +139,7 @@ class SILCTools():
         if key_i not in doubled_MW_wav_c_j or key_fq not in doubled_MW_wav_c_j:
             raise KeyError(f"Missing data for keys {key_i} or {key_fq}.")
         return i, fq, SILCTools.smoothed_covariance(doubled_MW_wav_c_j[key_i], doubled_MW_wav_c_j[key_fq], method)
-
+                
 
     @staticmethod
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
@@ -424,7 +425,7 @@ class SILCTools():
     
             # Automatically set f from extract_comp if given
             if f is None and extract_comp is not None:
-                f = SILCTools.find_f_from_extract_comp(F, extract_comp, reference_vectors)
+                f = ILCConstraints.find_f_from_extract_comp(F, extract_comp, reference_vectors)
             if f is None:
                 raise ValueError("Constraint vector f must be provided (or inferable) when constraint=True")
             if f.shape != (N_comp,):
@@ -976,6 +977,7 @@ class ProduceSILC():
 
         lmax = L_max - 1  
         realisations = [int(r) for r in realisations]
+
         def _check_against_F(W, F, f, tol=1e-6):
             W = np.asarray(W)
             if W.ndim == 2 and 1 in W.shape:   # (1,Nf) or (Nf,1) -> (Nf,)
@@ -1001,7 +1003,7 @@ class ProduceSILC():
             target_names, extract_comp = normalize_targets(extract_comp)
             if len(target_names) == 0:
                 raise ValueError("Provide at least one target component name when constraint=True")
-            f = SILCTools.find_f_from_extract_comp(F, target_names, reference_vectors, allow_sign_flip=False)
+            f = ILCConstraints.find_f_from_extract_comp(F, target_names, reference_vectors, allow_sign_flip=False)
         else:
             if isinstance(extract_comp, (list, tuple, np.ndarray)):
                 raise ValueError("For unconstrained ILC, pass a single extract_comp (e.g., 'cmb').")
@@ -1072,9 +1074,11 @@ class ProduceSILC():
                 ]
                 for fut in concurrent.futures.as_completed(futures):
                     fut.result()
+
             dt = time.perf_counter() - t0
             print(f'Calculated covariance matrices in {dt:.2f} seconds')
             timings["covariance"].append(dt)
+
             # 5) Load covariance matrices (per scale)
             F_str = '_'.join(frequencies)
             R_covariance = [
@@ -1114,9 +1118,11 @@ class ProduceSILC():
                 ]
                 for fut in concurrent.futures.as_completed(futures):
                     fut.result()
+
             dt = time.perf_counter() - t0
             print(f'Calculated weight vector matrices in {dt:.2f} seconds')
             timings["weights"].append(dt)
+
             # Load weights (in order)
             weight_vector_load = []
             W_for_final_check = None
