@@ -2,12 +2,15 @@ import argparse
 import os
 import time
 import numpy as np
+import jax
+import subprocess, sys
 
 from .download import DownloadData
 from .map_processing import ProcessMaps
 from .file_templates import FileTemplates
 from .ilc import ProduceSILC  
 from .power_spec import MapAlmConverter, PowerSpectrumTT
+from .mixing_matrix_constraint import SpectralVector
 
 
 class Pipeline:
@@ -51,13 +54,22 @@ class Pipeline:
         self.F = F
         self.reference_vectors = reference_vectors
         self.scales = scales
-        self.lam_str = f"{lam:.1f}"   # keeps "2.0" literal consistent in filenames
+        self.lam_str = f"{lam:.1f}" 
 
     # -------------------------
     # Steps
     # -------------------------
     def step_download(self):
         print(f"--- STARTING DATA DOWNLOAD ---")
+        for d in jax.devices():
+            ms = d.memory_stats()
+            print(f"Device {d.id}:",
+                  f"bytes_in_use={ms['bytes_in_use']}",
+                  f"peak_bytes_in_use={ms['peak_bytes_in_use']}",
+                  f"bytes_limit={ms['bytes_limit']}",
+                  f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
+                  f"num_allocs={ms.get('num_allocs', 'n/a')}")
+            
         downloader = DownloadData(
             self.components,
             self.frequencies,
@@ -69,6 +81,14 @@ class Pipeline:
 
     def step_process(self):
         print("--- PROCESSING CFNs AND TOTAL MAP CFN ---")
+        for d in jax.devices():
+           ms = d.memory_stats()
+           print(f"Device {d.id}:",
+                 f"bytes_in_use={ms['bytes_in_use']}",
+                 f"peak_bytes_in_use={ms['peak_bytes_in_use']}",
+                 f"bytes_limit={ms['bytes_limit']}",
+                 f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
+                 f"num_allocs={ms.get('num_allocs', 'n/a')}")
         processor = ProcessMaps(
             self.components,
             self.wavelet_components,
@@ -84,6 +104,14 @@ class Pipeline:
 
     def step_wavelets(self):
         print("--- PRODUCING WAVELET TRANSFORMS ---")
+        for d in jax.devices():
+            ms = d.memory_stats()
+            print(f"Device {d.id}:",
+                  f"bytes_in_use={ms['bytes_in_use']}",
+                  f"peak_bytes_in_use={ms['peak_bytes_in_use']}",
+                  f"bytes_limit={ms['bytes_limit']}",
+                  f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
+                  f"num_allocs={ms.get('num_allocs', 'n/a')}")
         processor = ProcessMaps(
             self.components,
             self.wavelet_components,
@@ -148,19 +176,23 @@ class Pipeline:
         return scales
 
     def step_ilc(self):
-        """
-        Use the new functional ILC: ILC_wav_coeff_maps_MP(...)
-        """
+        """Run ILC_wav_coeff_maps_MP with optional theory/empirical F."""
         print("--- RUNNING ILC (new functional API) ---")
+        for d in jax.devices():
+            ms = d.memory_stats()
+            print(f"Device {d.id}:",
+                  f"bytes_in_use={ms['bytes_in_use']}",
+                  f"peak_bytes_in_use={ms['peak_bytes_in_use']}",
+                  f"bytes_limit={ms['bytes_limit']}",
+                  f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
+                  f"num_allocs={ms.get('num_allocs', 'n/a')}")
+            
         ft = FileTemplates(self.directory).file_templates
-        realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
-
-        # Template for loading original wavelet coeffs (wavelets use {comp} and {realisation})
-        file_template = ft.get("wavelet_coeffs") or ft.get("wavelet_c_j") 
+    
+        # Templates
+        file_template = ft.get("wavelet_coeffs") or ft.get("wavelet_c_j")
         if file_template is None:
             raise KeyError("Missing wavelet template: expected 'wavelet_coeffs' or 'wavelet_c_j'.")
-    
-        # Output templates expected by ILC_wav_coeff_maps_MP (US {realisation}, {component}, {extract_comp})
         output_templates = {
             "doubled_maps":           ft["doubled_maps"],
             "covariance_matrices":    ft["covariance_matrices"],
@@ -169,44 +201,60 @@ class Pipeline:
             "trimmed_maps":           ft["trimmed_maps"],
             "ilc_synth":              ft["ilc_synth"],
             "ilc_spectrum":           ft.get("ilc_spectrum"),
-            "scaling_coeffs":         ft["scaling_coeffs"], 
+            "scaling_coeffs":         ft["scaling_coeffs"],
         }
     
-        # Realisations (ints). Frequencies: pass exactly what you used for wavelets (e.g., "030","100",...)
+        # Realisations, freqs
         realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
         freqs = list(self.frequencies)
     
-        # ----- choose input mixture & scales -----
-        comp_in = self.wavelet_components[0]  # e.g. "cfn" (the maps on disk)
-    
-        # Use provided scales if given; otherwise infer from disk once
+        # Input mixture and scales
+        comp_in = self.wavelet_components[0]
         if getattr(self, "scales", None):
             scales = list(self.scales)
         else:
             first_real, first_freq = realisations[0], freqs[0]
             scales = self._infer_scales_from_disk(file_template, comp_in, first_freq, first_real)
     
-        # Constraint settings (safe fallbacks if attributes aren't present)
+        # Constraint inputs (build F/ref on demand; default empirical)
         do_constraint = getattr(self, "constraint", False)
         F = getattr(self, "F", None)
         reference_vectors = getattr(self, "reference_vectors", None)
-    
-        # ----- run ILC for each target you want to extract -----
-        for extract_comp in self.ilc_components:  # e.g. ["cmb"] or ["cmb","tsz"]
+
+        if do_constraint and (F is None or reference_vectors is None):
+            source = getattr(self, "F_source", "theory")
+            kwargs = dict(getattr(self, "F_kwargs", {}))
+            freq_arg = kwargs.pop("frequencies", freqs)
+            
+            # keep only relevant keys for the chosen source
+            if source == "theory":
+                kwargs = {k: v for k, v in kwargs.items() if k in ("beta_s", "nu0")}
+            else:  # empirical
+                kwargs = {k: v for k, v in kwargs.items()
+                          if k in ("base_dir", "file_templates", "realization", "mask_path", "normalize")}
+            
+            F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(source, frequencies=freq_arg, **kwargs)
+
+            self.F = F_new
+            self.reference_vectors = ref_vecs
+            F = self.F
+            reference_vectors = self.reference_vectors
+            
+        # Run ILC for requested targets
+        for extract_comp in self.ilc_components:
             print(f"--- ILC target='{extract_comp}'  input='{comp_in}'  lmax={self.lmax}  scales={scales} ---")
-    
             _ = ProduceSILC.ILC_wav_coeff_maps_MP(
                 file_template=file_template,
-                frequencies=freqs,          # same strings as saved wavelets
+                frequencies=freqs,
                 scales=scales,
                 realisations=realisations,
                 output_templates=output_templates,
-                L_max=self.lmax+1,
+                L_max=self.lmax + 1,
                 N_directions=self.N_directions,
-                comp=comp_in,               # {component} in templates (input mixture)
-                constraint=do_constraint,   # now mirrors your manual call
+                comp=comp_in,
+                constraint=do_constraint,
                 F=F,
-                extract_comp=extract_comp,  # {extract_comp} in templates (target)
+                extract_comp=extract_comp,
                 reference_vectors=reference_vectors,
             )
 
@@ -216,7 +264,7 @@ class Pipeline:
         save_path: str | None = None,
         *,
         source: str = "auto",                  # "auto" | "ilc_synth" | "processed" | "downloaded"
-        component: str | None = None,          # map component ("cmb","sync","dust","noise","tsz") or "cfn" for ilc_synth {component}
+        component: str | None = None,          # map component ("cmb","sync", "dust","noise","tsz") or "cfn" for ilc_synth {component}
         extract_comp: str | None = None,       # ilc_synth target (e.g. "cmb")
         frequencies: list[str] | None = None,  # ilc_synth band-set
         frequency: str | int | None = None,    # single band for processed/downloaded
@@ -330,7 +378,28 @@ class Pipeline:
         elapsed = time.perf_counter() - start_time
         print(f"SELECTED STEPS COMPLETED IN {elapsed:.2f} SECONDS (lam={self.lam}).")
 
+def _spawn_gpu_run(gpu_id: int, start_real: int, n_real: int, base_argv: list[str]) -> subprocess.Popen:
+    env = os.environ.copy()
 
+    # isolate the GPU for this child and make x64 deterministic
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["JAX_ENABLE_X64"] = "True"
+
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "False"
+    #os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3" 
+
+    # argv for the child run
+    argv = [
+        sys.executable,
+        sys.argv[0],
+        "--gpu", "0",                         # child's visible GPU is now device 0
+        "--start-realisation", str(start_real),
+        "--realisations", str(n_real),
+    ] + base_argv
+
+    return subprocess.Popen(argv, env=env)
+
+# when not using multi-processing 
 def main():
     parser = argparse.ArgumentParser(
         description="Run the SILC pipeline with configurable parameters and GPU selection."
@@ -349,14 +418,13 @@ def main():
     parser.add_argument('--visualise', action='store_true')
     parser.add_argument('--save-ilc-intermediates', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
-    parser.add_argument('--directory', type=str, default='/Scratch/matthew/data')
+    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--steps', nargs='+',
                         choices=['download', 'process', 'wavelets', 'ilc', 'all'],
                         help="Which steps to run (one or more). Examples: --steps download  or  --steps process wavelets  or  --steps all")
 
     args = parser.parse_args()
-
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
     print(f"Using GPU {args.gpu} for computation.")
 
@@ -378,6 +446,101 @@ def main():
     )
     pipeline.run(steps=args.steps)
 
+'''
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run the SILC pipeline with configurable parameters and GPU selection."
+    )
+    parser.add_argument('--components', nargs='+', default=["cmb", "sync", "dust", "noise", 'tsz'])
+    parser.add_argument('--wavelet-components', nargs='+', default=["cfn"])
+    parser.add_argument('--ilc-components', nargs='+', default=["cmb"])
+    parser.add_argument('--frequencies', nargs='+',
+                        default=["030", "044", "070", "100", "143", "217", "353", "545", "857"])
+    parser.add_argument('--realisations', type=int, default=1)
+    parser.add_argument('--start-realisation', type=int, default=0)
+    parser.add_argument('--lmax', type=int, default=512)
+    parser.add_argument('--N-directions', type=int, default=1)
+    parser.add_argument('--lam', type=float, default=2.0)
+    parser.add_argument('--method', type=str, default='jax_cuda')
+    parser.add_argument('--visualise', action='store_true')
+    parser.add_argument('--save-ilc-intermediates', action='store_true')
+    parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data')
+    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--gpus', nargs='+', type=int, help="Optional: list of GPU ids to use, e.g. --gpus 0 1")
+    parser.add_argument('--steps', nargs='+',
+                        choices=['download', 'process', 'wavelets', 'ilc', 'all'],
+                        help="Which steps to run (one or more). Examples: --steps download  or  --steps process wavelets  or  --steps all")
+
+    args = parser.parse_args()
+
+    # -------- two-GPU launcher --------
+    if args.gpus and len(args.gpus) > 1:
+        total = int(args.realisations)
+        start = int(args.start_realisation)
+        if total < 2:
+            print("Two-GPU run requested but realisations < 2; falling back to single-GPU.")
+        else:
+            # split realisations roughly in half between the first two GPUs provided
+            half = total // 2
+            r0 = half
+            r1 = total - half
+            g0, g1 = args.gpus[0], args.gpus[1]
+
+            # reconstruct base argv for the child runs from current args
+            base_argv = []
+            def _extend(flag, val):
+                if val is None: return
+                if isinstance(val, bool):
+                    if val: base_argv.extend([flag])
+                elif isinstance(val, (list, tuple)):
+                    base_argv.extend([flag] + list(map(str, val)))
+                else:
+                    base_argv.extend([flag, str(val)])
+
+            _extend("--components", args.components)
+            _extend("--wavelet-components", args.wavelet_components)
+            _extend("--ilc-components", args.ilc_components)
+            _extend("--frequencies", args.frequencies)
+            _extend("--lmax", args.lmax)
+            _extend("--N-directions", args.N_directions)
+            _extend("--lam", args.lam)
+            _extend("--method", args.method)
+            if args.visualise: base_argv.append("--visualise")
+            if args.save_ilc_intermediates: base_argv.append("--save-ilc-intermediates")
+            if args.overwrite: base_argv.append("--overwrite")
+            _extend("--directory", args.directory)
+            if args.steps: _extend("--steps", args.steps)
+
+            print(f"[launcher] Spawning GPU {g0} for realisations {start}..{start+r0-1} "
+                  f"and GPU {g1} for {start+r0}..{start+total-1}")
+
+            p0 = _spawn_gpu_run(gpu_id=g0, start_real=start,     n_real=r0, base_argv=base_argv)
+            p1 = _spawn_gpu_run(gpu_id=g1, start_real=start+r0,  n_real=r1, base_argv=base_argv)
+
+            rc0 = p0.wait()
+            rc1 = p1.wait()
+            sys.exit(0 if (rc0 == 0 and rc1 == 0) else 1)
+
+    pipeline = Pipeline(
+        components=args.components,
+        wavelet_components=args.wavelet_components,
+        ilc_components=args.ilc_components,
+        frequencies=args.frequencies,
+        realisations=args.realisations,
+        start_realisation=args.start_realisation,
+        lmax=args.lmax,
+        N_directions=args.N_directions,
+        lam=args.lam,
+        method=args.method,
+        visualise=args.visualise,
+        save_ilc_intermediates=args.save_ilc_intermediates,
+        overwrite=args.overwrite,
+        directory=args.directory,
+        # pass-throughs unchanged
+    )
+    pipeline.run(steps=args.steps)
+'''
 
 # Example usage:
 #   python -m skyclean.silc.pipeline --gpu 0 --steps wavelets \
