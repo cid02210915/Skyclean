@@ -7,23 +7,25 @@ import s2wav
 import math 
 import healpy as hp
 from s2wav import filters
-import concurrent.futures
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from jax import config
+config.update("jax_enable_x64", True)
+
 from .map_tools import *
 from .utils import *
 from .file_templates import FileTemplates
-import concurrent.futures
-import time
-
-from .map_tools import SamplingConverters
 from .utils import normalize_targets   
 from .utils import save_array
 from skyclean.silc.mixing_matrix_constraint import ILCConstraints 
+import concurrent.futures
+import time
 
 class SILCTools():
     '''Tools for Scale-discretised, directional wavelet ILC (SILC).'''
 
     @staticmethod
-    def Single_Map_doubleworker(mw_map: np.ndarray, method: str):
+    def Single_Map_doubleworker(mw_map: np.ndarray, method='jax_cuda'):
         """
         Doubles the resolution of a single MW pixel map using s2fft.
 
@@ -38,29 +40,35 @@ class SILCTools():
         if mw_map.ndim == 3 and mw_map.shape[0] == 1:
             mw_map = mw_map[0]
 
-        # L is the number of rows; width must be 2L-1
-        L = mw_map.shape[0]
-        W = mw_map.shape[1]
+        L, W = mw_map.shape
         assert W == 2*L - 1, f"MW map has wrong shape {mw_map.shape}; expected (L, 2L-1)"
 
-        # forward with the correct L
+        # forward
         alm = s2fft.forward(mw_map, L=L, method=method, spmd=False, reality=True)
 
-        # double: L2 = 2L-1, width = 2*L2-1
+        # target sizes
         L2 = 2*L - 1
         W2 = 2*L2 - 1
-
-        padded = np.zeros((L2, W2), dtype=alm.dtype)
         mid_out = W2 // 2
         mid_in  = W  // 2
         start   = mid_out - mid_in
-        padded[:L, start:start+W] = alm
 
-        x2 = np.real(s2fft.inverse(padded, L=L2, method=method, spmd=False, reality=True))
-        return x2
+        if method == "numpy":
+            # --- NumPy path (stay on CPU/NumPy) ---
+            padded = np.zeros((L2, W2), dtype=alm.dtype)
+            padded[:L, start:start+W] = alm
+            x2 = s2fft.inverse(padded, L=L2, method="numpy", spmd=False, reality=True)
+            return np.real(x2)
+
+        # --- JAX path (keep everything on device) ---
+        padded = jnp.zeros((L2, W2), dtype=alm.dtype)
+        padded = padded.at[:L, start:start+W].set(alm)         # device-side update
+        x2 = s2fft.inverse(padded, L=L2, method=method, spmd=False, reality=True)
+        return np.asarray(jnp.real(x2))
+
 
     @staticmethod
-    def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method: str):
+    def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method='jax_cuda'):
         #print("smoothed_covariance", flush = True)
         """
         Parameters:
@@ -152,12 +160,11 @@ class SILCTools():
         Calculates the covariance matrices for given frequencies and saves them to disk,
         accommodating any size of the input data arrays.
         """
-        #print('calculate_covariance_matrix', flush=True)
 
         if not frequencies:
             raise ValueError("Frequency list is empty.")
 
-        # --- minimal normalization to fit current pipeline ---
+        # --- normalization to fit current pipeline ---
         norm_freqs = [str(f).zfill(3) for f in frequencies]
         scale_i = int(scale)
 
@@ -172,8 +179,6 @@ class SILCTools():
         tasks = [(i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method)
                  for i in range(total_frequency) for fq in range(i, total_frequency)]
 
-        # ---------- MINIMAL FIX HERE ----------
-        # JAX/JAX+CUDA is NOT fork-safe -> avoid ProcessPool in that case.
         if method != "numpy":
             # serial fallback for jax/jax_cuda to avoid BrokenProcessPool
             for t in tasks:
@@ -181,8 +186,6 @@ class SILCTools():
                 full_array[i, fq] = cov
         else:
             # CPU/NumPy path can safely use processes
-            import multiprocessing as mp
-            from concurrent.futures import ProcessPoolExecutor, as_completed
             ctx = mp.get_context("spawn")  # more robust than fork for native libs
             with ProcessPoolExecutor(mp_context=ctx) as executor:
                 futures = [executor.submit(SILCTools.compute_covariance, t) for t in tasks]
@@ -272,10 +275,34 @@ class SILCTools():
                     np.save(out_path, np.asarray(doubled_MW_wav_c_j[(f, j)]))
 
         return doubled_MW_wav_c_j
+   
+
+    @staticmethod
+    def save_doubled_wavelet_map(args):
+        # match the tuple structure you build in tasks:
+        # (arr, freq, scale, realisation, comp, path_template, lmax, lam, method)
+        arr, freq, scale, realisation, comp, path_template, lmax, lam, method = args
+
+        # normalize
+        freq_tag = freq if isinstance(freq, str) else f"{int(freq):03d}"
+        save_path = path_template.format(
+            comp=comp,                          # use {comp}, not {component}
+            frequency=freq_tag,
+            scale=int(scale),
+            realisation=int(realisation),       # {:04d} handled by template
+            lmax=int(lmax),
+            lam=str(lam),
+        )
+
+        doubled_map = SILCTools.Single_Map_doubleworker(arr, method)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        np.save(save_path, np.asarray(doubled_map))
+        return save_path
     '''
 
-    # inside the same module
 
+
+    
     @staticmethod
     def save_doubled_wavelet_map(args):
         # match the tuple structure you build in tasks:
@@ -321,6 +348,7 @@ class SILCTools():
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 np.save(out_path, np.asarray(doubled))
                 #print("saved:", out_path)
+
 
 
     @staticmethod
@@ -522,15 +550,20 @@ class SILCTools():
         """
         weight_vector_load is expected to be the 1D weight vector for THIS scale (shape (F,))
         """
-        # tiny sanity (optional)
-        size = doubled_MW_wav_c_j[(frequencies[0], scale)].shape
-        doubled_map = np.zeros((size[0], size[1]))
+        cube = np.stack([doubled_MW_wav_c_j[(f, scale)] for f in frequencies], axis=-1)
 
-        for i in range(doubled_map.shape[0]):
-            for j in range(doubled_map.shape[1]):
-                doubled_map[i, j] = SILCTools.compute_ILC_for_pixel(i, j, frequencies, scale, weight_vector_load, doubled_MW_wav_c_j)
+        W = np.asarray(weight_vector_load)
 
-        return doubled_map
+        if W.ndim == 1:
+            H, Wd, F = cube.shape
+            return np.dot(cube.reshape(-1, F), W).reshape(H, Wd)
+        
+        if W.ndim == 3:
+            # Elementwise multiply then sum over freq
+            return np.einsum('ijc,ijc->ij', cube, W)
+
+        raise ValueError(f"Unexpected weight_vector shape {W.shape}; expected (F,) or (H,W,F).")
+
         
     '''
     @staticmethod
@@ -576,7 +609,17 @@ class SILCTools():
         Returns:
             mw_map_original (ndarray or None): trimmed pixel map at original resolution. 
         """
-        
+        '''
+        for d in jax.devices():
+            ms = d.memory_stats()
+            print(f"Device {d.id}:",
+                f"bytes_in_use={ms['bytes_in_use']}",
+                f"peak_bytes_in_use={ms['peak_bytes_in_use']}",
+                f"bytes_limit={ms['bytes_limit']}",
+                f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
+                f"num_allocs={ms.get('num_allocs', 'n/a')}")
+        '''
+
         # --- minimal debug & guards ---
         #print(f"[DEBUG] scale={scale}, realisation={realisation}, shape={MW_Doubled_Map.shape}", flush=True)
         if MW_Doubled_Map.ndim != 2:
@@ -1054,6 +1097,7 @@ class ProduceSILC():
                 lmax=L_max-1,
                 lam=2.0,
             )
+            '''
             # 4) Compute covariance matrices (MP: one job per scale)
             t0 = time.perf_counter()
             with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -1064,7 +1108,7 @@ class ProduceSILC():
                         doubled_MW_wav_c_j,
                         scale,
                         realisation=int(realisation),
-                        method="numpy",                             # now it’s controlled outside
+                        method="numpy",                     
                         path_template=output_templates["covariance_matrices"],
                         component=comp,
                         lmax=L_max-1,
@@ -1078,6 +1122,30 @@ class ProduceSILC():
             dt = time.perf_counter() - t0
             print(f'Calculated covariance matrices in {dt:.2f} seconds')
             timings["covariance"].append(dt)
+            '''
+            # 4) Compute covariance matrices (serial, JAX backend)
+            t0 = time.perf_counter()
+
+            # choose JAX backend; switch to "jax" if you want CPU-JAX
+            _cov_method = "jax_cuda"    # or: self.method if you already track it
+
+            for scale in scales:
+                SILCTools.calculate_covariance_matrix(
+                    frequencies=frequencies,
+                    doubled_MW_wav_c_j=doubled_MW_wav_c_j,
+                    scale=int(scale),
+                    realisation=int(realisation),
+                    method=_cov_method,                     # <<< JAX, not "numpy"
+                    path_template=output_templates["covariance_matrices"],
+                    component=comp,
+                    lmax=L_max - 1,
+                    lam=2.0,
+                )
+
+            dt = time.perf_counter() - t0
+            print(f"Calculated covariance matrices in {dt:.2f} seconds")
+            timings["covariance"].append(dt)
+
 
             # 5) Load covariance matrices (per scale)
             F_str = '_'.join(frequencies)
@@ -1094,7 +1162,7 @@ class ProduceSILC():
                 )
                 for scale in scales
             ]
-
+            '''
             # 6) Compute weight vectors (MP: one job per scale)
             t0 = time.perf_counter()
             with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -1122,11 +1190,12 @@ class ProduceSILC():
             dt = time.perf_counter() - t0
             print(f'Calculated weight vector matrices in {dt:.2f} seconds')
             timings["weights"].append(dt)
-
+            
             # Load weights (in order)
             weight_vector_load = []
             W_for_final_check = None
             name = f"cilc_{extract_comp}" if constraint else "weight_vector"
+
             for scale in scales:
                 weight_vector_path = output_templates['weight_vector_matrices'].format(
                     component=comp,
@@ -1140,6 +1209,50 @@ class ProduceSILC():
                 W = np.load(weight_vector_path)
                 if W.ndim == 2 and 1 in W.shape:
                     W = W.reshape(-1)
+                weight_vector_load.append(W)
+                W_for_final_check = W
+               
+        '''
+            # 6) Compute weight vectors (serial; no MP to avoid pickling big arrays)
+            t0 = time.perf_counter()
+            for idx, scale in enumerate(scales):
+                SILCTools.compute_weights_generalised(
+                    R=R_covariance[idx],
+                    scale=scale,
+                    realisation=int(realisation),
+                    weight_vector_matrix_template=output_templates['weight_vector_matrices'],
+                    comp=comp,
+                    L_max=L_max,
+                    extract_comp=extract_comp,
+                    constraint=constraint,
+                    F=F,
+                    f=f,
+                    reference_vectors=reference_vectors,
+                    lam='2.0',
+                )
+
+            dt = time.perf_counter() - t0
+            print(f'Calculated weight vector matrices in {dt:.2f} seconds')
+            timings["weights"].append(dt)
+
+            # Load weights (in order)
+            weight_vector_load = []
+            W_for_final_check = None
+            name = f"cilc_{extract_comp}" if constraint else "weight_vector"
+
+            for scale in scales:
+                weight_vector_path = output_templates['weight_vector_matrices'].format(
+                    component=comp,
+                    extract_comp=extract_comp,
+                    type=name,
+                    scale=scale,
+                    realisation=int(realisation),
+                    lmax=L_max-1,
+                    lam='2.0',
+                )
+                W = np.load(weight_vector_path)  # mmap_mode='r' optional
+                if W.ndim == 2 and 1 in W.shape:
+                    W = W.reshape(-1)            # handle saved (1,F) or (F,1)
                 weight_vector_load.append(W)
                 W_for_final_check = W
 
@@ -1175,6 +1288,7 @@ class ProduceSILC():
 
             # 8) Trim to original resolution (MP: one job per scale)
             t0 = time.perf_counter()
+        
             with concurrent.futures.ProcessPoolExecutor() as executor:
                 futures = [
                     executor.submit(
