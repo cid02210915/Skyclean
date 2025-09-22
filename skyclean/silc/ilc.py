@@ -11,6 +11,7 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from jax import config
 config.update("jax_enable_x64", True)
+from functools import lru_cache
 
 from .map_tools import *
 from .utils import *
@@ -66,7 +67,7 @@ class SILCTools():
         x2 = s2fft.inverse(padded, L=L2, method=method, spmd=False, reality=True)
         return np.asarray(jnp.real(x2))
 
-
+    '''
     @staticmethod
     def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method='jax_cuda'):
         #print("smoothed_covariance", flush = True)
@@ -127,6 +128,60 @@ class SILCTools():
         Rmap = np.real(s2fft.inverse(convolved, L=smoothing_L, method=method, spmd=False, reality=True))
 
         return Rmap
+ 
+    '''
+
+    # ---- cached Gaussian beam per L ----
+    @lru_cache(maxsize=32)
+    def _cached_beam(L: int):
+        nsamp = 1200.0
+        lmax  = L
+        npix  = hp.nside2npix(1 << (int(0.5 * lmax) - 1).bit_length())
+        scale_fwhm = 4.0 * math.sqrt(nsamp / npix)
+        return hp.gauss_beam(scale_fwhm, lmax=lmax - 1)   # (L,)
+
+
+    @staticmethod
+    def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method='jax_cuda'):
+        """
+        Return real-valued covariance map, smoothed by a Gaussian beam in harmonic space.
+        """
+        L = int(MW_Map1.shape[0])
+
+        # --- ensure MW sampling width=2L-1 only if needed ---
+        exp = 2 * L - 1
+        def _ensure_mw(a: np.ndarray) -> np.ndarray:
+            nphi = a.shape[1]
+            if nphi == exp:      return a
+            if nphi >  exp:      return a[:, :exp]
+            reps = (exp + nphi - 1) // nphi
+            return np.tile(a, reps)[:, :exp]
+
+        map1 = _ensure_mw(np.real(MW_Map1))
+        map2 = _ensure_mw(np.real(MW_Map2))
+
+        # trivial guard
+        if L < 2 or map1.shape[1] != exp:
+            return np.real(map1 * map2)
+
+        # pixelwise product (keep real; reality=True below)
+        Rpix = map1 * map2
+
+        # forward -> beam -> inverse
+        Ralm = s2fft.forward(Rpix, L=L, method=method, spmd=False, reality=True)
+        beam = SILCTools._cached_beam(Ralm.shape[0])  # CPU array
+
+        if method == "numpy":
+            # match dtype to avoid implicit casts
+            convolved = Ralm * beam[:, None].astype(Ralm.dtype, copy=False)
+            out = s2fft.inverse(convolved, L=L, method="numpy", spmd=False, reality=True)
+            return np.real(out)
+
+        # JAX path: keep multiply on device and dtype-aligned
+        jbeam = jnp.asarray(beam, dtype=Ralm.dtype)
+        convolved = Ralm * jbeam[:, None]
+        out = s2fft.inverse(convolved, L=L, method=method, spmd=False, reality=True)
+        return np.asarray(jnp.real(out))
 
 
     @staticmethod 
@@ -147,7 +202,8 @@ class SILCTools():
         if key_i not in doubled_MW_wav_c_j or key_fq not in doubled_MW_wav_c_j:
             raise KeyError(f"Missing data for keys {key_i} or {key_fq}.")
         return i, fq, SILCTools.smoothed_covariance(doubled_MW_wav_c_j[key_i], doubled_MW_wav_c_j[key_fq], method)
-                
+    
+
 
     @staticmethod
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
@@ -638,7 +694,7 @@ class SILCTools():
         outer_mid = W2 // 2
         start_col = outer_mid - (inner_h // 2)
         end_col = start_col + inner_h
-
+        
         # forward (numpy path)
         alm_doubled = s2fft.forward(MW_Doubled_Map, L=L2, method='numpy', spmd=False, reality=True)
         # trim in harmonic space
@@ -646,6 +702,11 @@ class SILCTools():
 
         # inverse back to pixels
         pix = s2fft.inverse(trimmed_alm, L=inner_v, method='numpy', spmd=False, reality=True)
+        '''
+        alm_doubled = s2fft.forward(MW_Doubled_Map, L=L2, method=method, spmd=False, reality=True)
+        trimmed_alm = alm_doubled[:inner_v, start_col:end_col]
+        pix = s2fft.inverse(trimmed_alm, L=inner_v, method=method, spmd=False, reality=True)
+        '''
         mw_map_original = pix[np.newaxis, ...]
 
         # ---- MIN SAVE: only if a template and tags are provided ----
@@ -811,27 +872,28 @@ class SILCTools():
         filter_bank = filters.filters_directional_vectorised(L, N_directions, lam=float(lam))
         MW_Pix = s2wav.synthesis(trimmed_maps, L=L, f_scal=f_scal, filters=filter_bank, N=N_directions)
 
-        # 5) (optional) visualise
-        if visualise:
-            try:
-                prefix = "cILC" if extract_comp else "ILC"
-                name = extract_comp.upper() if extract_comp else ""
-                title = f"{prefix} {name} | r={realisation_str}, lmax={int(lmax)}, N={N_directions}, λ={lam}".strip()
-                SILCTools.visualize_MW_Pix_map(MW_Pix, title)
-            except NameError:
-                pass
-
-        # 6) save to ilc_synth (template expects {extract_comp},{component},{frequencies},{realisation},{lmax},{lam})
+        # 5) SAVE FIRST (so plotting can never block saving)
         out_path = file_tmpl["ilc_synth"].format(
             extract_comp=extract_comp,
             component=component,
-            frequencies=freq_tag,              # <- FIX: use defined tag, not 'freq_'
+            frequencies=freq_tag,
             realisation=int(realisation_str),
             lmax=int(lmax),
             lam=str(lam),
         )
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         np.save(out_path, MW_Pix)
+    
+        # 6) (optional) visualise — ignore any plotting errors silently
+        if visualise:
+            try:
+                prefix = "cILC" if extract_comp else "ILC"
+                name = extract_comp.upper() if extract_comp else ""
+                title = f"{prefix} {name} | r={realisation_str}, lmax={int(lmax)}, N={N_directions}, λ={lam}".strip()
+                SILCTools.visualize_MW_Pix_map(MW_Pix, title)
+            except Exception:
+                pass
+            
         return MW_Pix
     
 
