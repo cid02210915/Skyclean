@@ -12,7 +12,6 @@ from .utils import *
 
 class HPTools():
     """Tools to process healpy/MW maps"""
-
     @staticmethod
     def reduce_hp_map_resolution(hp_map: np.ndarray, lmax: int, nside: int):
         """
@@ -31,21 +30,40 @@ class HPTools():
         processed_map = hp.alm2map(hp_alm, nside=nside)
         return processed_map, hp_alm
     
-    @staticmethod
-    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float): 
+
+    def pixwin_deconvolve(hp_map: np.ndarray, lmax: int):
         """
         Converts healpix map to alm space, deconvolves the pixel window function,
-        applies a standard beam, and converts back to map space.
-
-        #### Notes: In future, will use CMB data with simulated beams; for now, use theoretical CMB.
-        #### You will need to add functionality to *deconvolve* the CMB beam, then convolve with the
-        #### standard beam as performed here.
-
+        and converts back to map space.
+    
+        Parameters:
+            hp_map (numpy.ndarray): Input healpix map.
+            lmax (int): Maximum multipole moment for spherical harmonics.
+    
+        Returns:
+            numpy.ndarray: Reconstructed healpix map after pixel-window deconvolution.
+        """
+        nside = hp.get_nside(hp_map)
+        alm = hp.map2alm(hp_map, lmax=lmax)
+        # Pixel window function
+        pixwin = hp.sphtfunc.pixwin(nside, lmax=lmax, pol=False)
+        # Divide out pixel window function
+        alm_deconv = hp.almxfl(alm, 1/pixwin)
+        # Convert back to map
+        hp_map_deconv = hp.alm2map(alm_deconv, nside=nside)
+        return hp_map_deconv
+    
+    
+    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float):
+        """
+        Converts healpix map to alm space, applies a standard beam,
+        and converts back to map space.
+    
         Parameters:
             hp_map (numpy.ndarray): Input healpix map.
             lmax (int): Maximum multipole moment for spherical harmonics.
             standard_fwhm_rad (float): Standard beam FWHM in radians.   
-        
+    
         Returns:
             numpy.ndarray: Reconstructed healpix map after beam convolution.
         """
@@ -53,16 +71,13 @@ class HPTools():
         alm = hp.map2alm(hp_map, lmax=lmax)
         # Standard beam for the desired FWHM
         Standard_bl = hp.sphtfunc.gauss_beam(standard_fwhm_rad, lmax=lmax, pol=False)
-        # Pixel window function
-        pixwin = hp.sphtfunc.pixwin(nside, lmax=lmax, pol=False)
-        # Divide out pixel window function
-        alm_deconv = hp.almxfl(alm, 1/pixwin)
         # Apply standard beam
-        alm_reconv = hp.almxfl(alm_deconv, Standard_bl)
+        alm_conv = hp.almxfl(alm, Standard_bl)
         # Convert back to map
-        hp_map_reconv = hp.alm2map(alm_reconv, nside=nside)
-        return hp_map_reconv
+        hp_map_conv = hp.alm2map(alm_conv, nside=nside)
+        return hp_map_conv
     
+        
     @staticmethod
     def unit_convert(hp_map: np.ndarray, frequency: str):
         """
@@ -85,19 +100,24 @@ class HPTools():
             hp_map = hp_map  # No conversion for other frequencies
         return hp_map
     
+    # --- For synch/dust/tSZ/noise (have pixel window): deconv Pℓ -> beam -> reduce
     @staticmethod
-    def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float):
+    def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
         """
-        Convolve a Healpix map with a standard beam and reduce its resolution.
-        
-        Parameters:
-            hp_map (numpy.ndarray): Input Healpix map.
-            lmax (int): Maximum multipole moment for spherical harmonics.
-            nside (int): Desired nside resolution for the output map.
-            standard_fwhm_rad (float): Standard beam FWHM in radians.
-        
-        Returns:
-            numpy.ndarray: Processed Healpix map after convolution and resolution reduction.
+        Deconvolve pixel window, convolve with standard beam, then reduce resolution.
+        Use for components with pixel window (skyinbands foregrounds, noise).
+        """
+        hp_map_noP = HPTools.pixwin_deconvolve(hp_map, lmax=lmax)
+        hp_map_beamed = HPTools.beam_convolve(hp_map_noP, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
+        return hp_map_reduced
+
+    # --- For CMB synfast (no pixel window): beam -> reduce
+    @staticmethod
+    def convolve_and_reduce_cmb(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
+        """
+        Convolve with standard beam, then reduce resolution.
+        Use for CMB synfast maps (no pixel window to deconvolve).
         """
         hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)

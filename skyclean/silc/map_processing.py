@@ -45,49 +45,58 @@ class ProcessMaps():
 
         # file_template, file_templates
 
-    def create_cfn(self, frequency: str, realisation: int, save = True): 
+    def create_cfn(self, frequency: str, realisation: int, save=True):
         """
-        Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
-        the CMB and foregrounds with the standard beam and adding noise.
-
-        Parameters:
-            frequency (str): The frequency for which to create the CFN.
-            realisation (int): The realisation number for which to create the CFN.
-            lmax (int): The maximum multipole desired for the CFN map.
-            save (bool): Whether to save each processed component.
-        
-        Returns:
-            np.ndarray: The CFN map in HP format.
+        Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation,
+        by convolving the CMB and foregrounds with the standard beam and adding noise.
         """
         desired_lmax = self.desired_lmax
         standard_fwhm_rad = np.radians(5/60)
         nside = HPTools.get_nside_from_lmax(desired_lmax)
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+
         for comp in self.components:
-            # make 'comp' label 'processed_comp' for dictionary parsing
             processed_comp = "processed_" + comp
-            output_path = self.file_templates[processed_comp].format(frequency=frequency, realisation=realisation, lmax = desired_lmax)
-            if os.path.exists(output_path) and self.overwrite == False:
-                # Certain foreground components are frequency-independent, so we can skip processing
+            output_path = self.file_templates[processed_comp].format(
+                frequency=frequency, realisation=realisation, lmax=desired_lmax
+            )
+
+            if os.path.exists(output_path) and self.overwrite is False:
                 hp_map_reduced = hp.read_map(output_path)
             else:
-                if comp == "noise": 
-                    # we pick a random noise realisation from the chosen realisation ranges
-                    noise_realisation = np.random.randint(self.start_realisation, self.start_realisation + self.realisations)
-                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=noise_realisation)
+                if comp == "noise":
+                    noise_realisation = np.random.randint(
+                        self.start_realisation, self.start_realisation + self.realisations
+                    )
+                    filepath = self.file_templates[comp].format(
+                        frequency=frequency, realisation=noise_realisation
+                    )
                 else:
-                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation)
+                    filepath = self.file_templates[comp].format(
+                        frequency=frequency, realisation=realisation
+                    )
+
                 hp_map = hp.read_map(filepath)
                 hp_map = HPTools.unit_convert(hp_map, frequency)
-                if comp == "noise":
-                    hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map, lmax=desired_lmax, nside=nside)
+
+                if comp == "cmb":
+                    # CMB synfast has no pixel window to remove: beam -> reduce
+                    hp_map_reduced = HPTools.convolve_and_reduce_cmb(
+                        hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                    )
                 else:
-                    hp_map_reduced = HPTools.convolve_and_reduce(hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad)
+                    # Foregrounds + noise: deconv P_ell -> beam -> reduce
+                    hp_map_reduced = HPTools.convolve_and_reduce(
+                        hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                    )
+
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
-            cfn+= hp_map_reduced
+
+            cfn += hp_map_reduced
+
         return cfn
-    
+
     
     def process_single_component(self, comp: str, frequency: str, realisation: int,
                              save: bool = True, noise_realisation: int | None = None):
@@ -101,7 +110,7 @@ class ProcessMaps():
             frequency (str): Frequency channel, e.g. '143'.
             realisation (int): Processing realisation index (used for filenames & CMB).
             save (bool): If True, writes to file_templates['processed_' + comp].
-            noise_realisation (int | None): If comp=='noise', which MC (0..299) to use.
+            noise_realisation (int | None): If comp=='noise', which MC (0.299) to use.
                                             If None, picks a random one (mirrors create_cfn).
 
         Returns:
@@ -138,19 +147,21 @@ class ProcessMaps():
         # Load, convert units, and process
         hp_map = hp.read_map(in_path)
         hp_map = HPTools.unit_convert(hp_map, frequency)
-
-        if comp == "noise":
-            hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
-                hp_map, lmax=desired_lmax, nside=nside
+    
+        if comp == "cmb":
+            # CMB synfast has no pixel window to remove: beam -> reduce
+            hp_map_reduced = HPTools.convolve_and_reduce_cmb(
+                hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
             )
         else:
+            # Foregrounds + noise: deconv P_ell -> beam -> reduce (consistent)
             hp_map_reduced = HPTools.convolve_and_reduce(
                 hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
             )
-
+    
         if save:
             save_map(out_path, hp_map_reduced, self.overwrite)
-
+    
         return hp_map_reduced
 
 
@@ -215,6 +226,7 @@ class ProcessMaps():
         wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=N_directions, lam=lam)
         MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, realisation, lmax, lam, wavelet_coeffs_path, scaling_coeffs_path)
         return wavelet_coeffs, scaling_coeffs
+    
 
     def produce_and_save_wavelet_transforms(self, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
         """
