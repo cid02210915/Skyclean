@@ -100,19 +100,20 @@ class HPTools():
             hp_map = hp_map  # No conversion for other frequencies
         return hp_map
     
-    # --- For synch/dust/tSZ/noise (have pixel window): deconv Pℓ -> beam -> reduce
+    # For synch/dust/tSZ/noise (have pixel window): beam -> deconv Pℓ -> reduce
     @staticmethod
     def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
         """
         Deconvolve pixel window, convolve with standard beam, then reduce resolution.
         Use for components with pixel window (skyinbands foregrounds, noise).
         """
-        hp_map_noP = HPTools.pixwin_deconvolve(hp_map, lmax=lmax)
-        hp_map_beamed = HPTools.beam_convolve(hp_map_noP, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
-        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
+        
+        hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
+        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
         return hp_map_reduced
 
-    # --- For CMB synfast (no pixel window): beam -> reduce
+    # For CMB synfast (no pixel window): beam -> reduce
     @staticmethod
     def convolve_and_reduce_cmb(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
         """
@@ -381,22 +382,21 @@ class SamplingConverters():
         Returns:
             MW_alm (numpy.ndarray): 2D array of shape (Lmax, 2*Lmax-1) MW spherical harmonics coefficients 
         """
-        L_max = lmax + 1 # L_max as defined in MW sampling
-        MW_alm = np.zeros((L_max, 2 * L_max - 1), dtype=np.complex128)
-
-        for l in range(L_max):
-            for m in range(-l, l + 1):
-                index = hp.Alm.getidx(L_max - 1, l, abs(m))
-                if m < 0:
-                    MW_alm[l, L_max + m - 1] = (-1) ** m * np.conj(hp_alm[index])
-                else:
-                    MW_alm[l, L_max + m - 1] = hp_alm[index]
-                    
+        L = lmax + 1 # L as defined in MW sampling
+        MW_alm = np.zeros((L, 2 * L - 1), dtype=np.complex128) # MW does not invoke reality theorem
+        for l in range(L):
+            for m in range(l + 1):
+                index = hp.Alm.getidx(lmax, l, m)
+                col = m + L - 1
+                hp_point = hp_alm[index]
+                MW_alm[l, col] = hp_point
+                if m > 0: 
+                    MW_alm[l, L-m-1] = (-1)**m * hp_point.conj() # fill m < 0 by symmetry
         return MW_alm
         
     
     @staticmethod
-    def mw_alm_2_hp_alm(MW_alm: np.ndarray, lmax:int):
+    def mw_alm_2_hp_alm(mw_alm: np.ndarray, lmax:int):
         """
         Converts spherical harmonics (alm) from MW sampling to healpy representation.
 
@@ -414,16 +414,14 @@ class SamplingConverters():
         Returns:
             hp_alm (numpy.ndarray): 1D array of healpy spherical harmonics coefficients
         """
-        hp_alm = np.zeros(hp.Alm.getsize(lmax), dtype=np.complex128)
-        
-        for l in range(lmax + 1):
-            for m in range(-l, l + 1):
-                index = hp.Alm.getidx(lmax, l, abs(m))
-                if m < 0:
-                    hp_alm[index] = (-1)**m * np.conj(MW_alm[l, lmax + m])
-                else:
-                    hp_alm[index] = MW_alm[l, lmax + m]
-                    
+        L = mw_alm.shape[0] 
+        lmax = L-1 
+        hp_alm = np.zeros(hp.Alm.getsize(lmax), np.complex128)
+        for l in range(L):
+            for m in range(l+1):
+                col = lmax + m
+                idx = hp.Alm.getidx(lmax, l, m)
+                hp_alm[idx] = mw_alm[l, col]
         return hp_alm
     
 
