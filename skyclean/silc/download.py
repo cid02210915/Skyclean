@@ -115,7 +115,7 @@ class DownloadData():
         cl = (dl*2*np.pi)/(l*(l+1))
         cl *= 1E-12 # convert to K 
         nside = 2048
-        cmb_map = hp.synfast(cl, nside=nside) 
+        cmb_map = hp.synfast(cl, nside=nside, pixwin=True, lmax=1023) 
         hp.write_map(filename, cmb_map, overwrite=True)
         print(f"Downloaded CMB.")
 
