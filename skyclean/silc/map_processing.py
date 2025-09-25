@@ -1,4 +1,4 @@
-import os
+import os, glob
 import healpy as hp
 from .file_templates import FileTemplates
 from .map_tools import *
@@ -41,33 +41,94 @@ class ProcessMaps():
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
+        # file_template, file_templates
         
 
-        # file_template, file_templates
+    def _find_max_noise_realisation(self, frequency: str):
+        """
+        Find the maximum noise realisation number available for a given frequency.
+
+        Returns:
+            int: Maximum noise realisation number found.
+
+        Raises:
+            FileNotFoundError: If no noise files are found.
+            ValueError: If files exist but no realisation numbers can be parsed.
+        """
+        import glob
+        cmb_dir = os.path.join(self.directory, "CMB_realisations")
+        pattern = os.path.join(cmb_dir, f"noise_f{frequency}_r*.fits")
+        noise_files = glob.glob(pattern)
+
+        if not noise_files:
+            print(f"Warning: No noise files found for frequency {frequency}.")
+            raise FileNotFoundError(f"No noise files found for frequency {frequency}.")
+
+        realisations = []
+        for filepath in noise_files:
+            filename = os.path.basename(filepath)
+            try:
+                realisation_str = filename.split('_r')[1].split('.fits')[0]
+                realisations.append(int(realisation_str))
+            except (IndexError, ValueError):
+                continue
+
+        if realisations:
+            max_realisation = max(realisations)
+            print(f"Found {len(realisations)} noise files for frequency {frequency}, max realisation: {max_realisation}")
+            return max_realisation
+        else:
+            print(f"Warning: Could not parse realisation numbers for frequency {frequency}.")
+            raise ValueError(f"Could not parse realisation numbers for frequency {frequency}.")
+
 
     def create_cfn(self, frequency: str, realisation: int, save=True):
         """
-        Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation,
-        by convolving the CMB and foregrounds with the standard beam and adding noise.
+        Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
+        the CMB with the standard beam and 
+            foregrounds with the standard beam + pixel window and 
+            adding noise 
+
+        Parameters:
+            frequency (str): The frequency for which to create the CFN.
+            realisation (int): The realisation number for which to create the CFN.
+            lmax (int): The maximum multipole desired for the CFN map.
+            save (bool): Whether to save each processed component.
+        
+        Returns:
+            np.ndarray: The CFN map in HP format.
         """
         desired_lmax = self.desired_lmax
         standard_fwhm_rad = np.radians(5/60)
         nside = HPTools.get_nside_from_lmax(desired_lmax)
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
-
+    
         for comp in self.components:
             processed_comp = "processed_" + comp
             output_path = self.file_templates[processed_comp].format(
                 frequency=frequency, realisation=realisation, lmax=desired_lmax
             )
-
+    
             if os.path.exists(output_path) and self.overwrite is False:
                 hp_map_reduced = hp.read_map(output_path)
             else:
                 if comp == "noise":
-                    noise_realisation = np.random.randint(
-                        self.start_realisation, self.start_realisation + self.realisations
-                    )
+                    # MIN FIX: choose an existing noise realisation ID from disk
+                    noise_dir = os.path.join(self.directory, "CMB_realisations")
+                    pattern = os.path.join(noise_dir, f"noise_f{frequency}_r*.fits")
+                    files = glob.glob(pattern)
+                    available = []
+                    for p in files:
+                        try:
+                            rid = int(os.path.basename(p).rsplit(".fits", 1)[0].rsplit("_r", 1)[1])
+                            available.append(rid)
+                        except Exception:
+                            continue
+                    if not available:
+                        raise FileNotFoundError(
+                            f"No noise files found for frequency '{frequency}' matching '{pattern}'."
+                        )
+                    noise_realisation = int(np.random.choice(sorted(set(available))))
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=noise_realisation
                     )
@@ -75,26 +136,23 @@ class ProcessMaps():
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=realisation
                     )
-
+    
                 hp_map = hp.read_map(filepath)
-                hp_map = HPTools.unit_convert(hp_map, frequency)
-
-                if comp == "cmb":
-                    # CMB synfast has no pixel window to remove: beam -> reduce
-                    hp_map_reduced = HPTools.convolve_and_reduce_cmb(
-                        hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                if comp != "cmb":                     
+                    hp_map = HPTools.unit_convert(hp_map, frequency)
+    
+                if comp == "noise":
+                    hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
+                        hp_map, lmax=desired_lmax, nside=nside
                     )
                 else:
-                    # Foregrounds + noise: deconv P_ell -> beam -> reduce
                     hp_map_reduced = HPTools.convolve_and_reduce(
                         hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
                     )
 
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
-
             cfn += hp_map_reduced
-
         return cfn
 
     
@@ -146,19 +204,18 @@ class ProcessMaps():
 
         # Load, convert units, and process
         hp_map = hp.read_map(in_path)
-        hp_map = HPTools.unit_convert(hp_map, frequency)
-    
-        if comp == "cmb":
-            # CMB synfast has no pixel window to remove: beam -> reduce
-            hp_map_reduced = HPTools.convolve_and_reduce_cmb(
-                hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+        if comp != "cmb":  
+            hp_map = HPTools.unit_convert(hp_map, frequency)
+        
+        if comp == "noise":
+            hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
+                hp_map, lmax=desired_lmax, nside=nside
             )
         else:
-            # Foregrounds + noise: deconv P_ell -> beam -> reduce (consistent)
             hp_map_reduced = HPTools.convolve_and_reduce(
                 hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
             )
-    
+            
         if save:
             save_map(out_path, hp_map_reduced, self.overwrite)
     
@@ -193,7 +250,8 @@ class ProcessMaps():
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
 
 
-    def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
+    def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, 
+                                 lam: float = 2.0, method = "jax_cuda", visualise = False):
         """
         Create a wavelet transform of the specified component.
 
