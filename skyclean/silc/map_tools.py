@@ -474,3 +474,17 @@ class SamplingConverters():
         """
         return s2fft.utils.resampling_jax.mw_to_mwss(mw_map, L=L)
 
+    def mwss_map_2_mw_map(mwss_map, L: int):
+            """
+            Convert a MWSS map to a MW map. No s2fft function exists for this,
+            but the process is simply performing a harmonic transform.
+    
+            Parameters:
+                mwss_map (numpy.ndarray): The input MWSS map in spherical harmonics representation.
+                L (int): The maximum multipole moment for the spherical harmonics.
+    
+            Returns:
+                mw_map (numpy.ndarray): The converted MW map.
+            """
+            mw_alm = s2fft.forward(mwss_map, L=L, sampling = "mwss", reality = True)
+            return s2fft.inverse(mw_alm, L=L, sampling = "mw", reality = True)
