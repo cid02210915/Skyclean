@@ -356,8 +356,6 @@ class SILCTools():
         return save_path
     '''
 
-
-
     
     @staticmethod
     def save_doubled_wavelet_map(args):
@@ -591,6 +589,7 @@ class SILCTools():
         np.save(weight_vector_matrix_template.format(**fmt), weight_vectors)
         return inverses, weight_vectors, singular_matrices_location, extract_comp
     
+    
     @staticmethod
     def compute_ILC_for_pixel(i, j, frequencies, scale, weight_vector_load, doubled_MW_wav_c_j):
         """
@@ -619,7 +618,7 @@ class SILCTools():
             return np.einsum('ijc,ijc->ij', cube, W)
 
         raise ValueError(f"Unexpected weight_vector shape {W.shape}; expected (F,) or (H,W,F).")
-
+    
         
     '''
     @staticmethod
@@ -809,6 +808,56 @@ class SILCTools():
         )
         plt.show()
 
+        
+    def build_ilc_scaling_coeff(f_scal_template: str, *, frequencies: list[str], realisation: int,
+                                 lmax: int, lam: float | str, component: str, 
+                                 weight_vector_matrix_template: str,) ->     np.ndarray:
+         """
+         Return an ILC'ed scaling-coefficient map (L, 2L-1) using your existing
+         SILCTools.compute_weights_generalised solver (unconstrained ILC, global).
+         Assumes scaling coeffs are saved per-frequency with {frequency} in the template.
+         """
+         # --- normalise tags ---
+         realisation = int(realisation)
+         lam_str = str(lam)
+         L = int(lmax) + 1
+
+         # (1) Load per-frequency scaling maps (each is (L, 2L-1)) ---
+         S_list = []
+         for f in frequencies:
+             f_str = str(f)
+             path = f_scal_template.format(
+                 comp=component,
+                 component=component,
+                 frequency=f_str,
+                 realisation=realisation,
+                 lmax=int(lmax),
+                 lam=lam_str,
+             )
+             S_list.append(np.load(path))          # shape (L, 2L-1)
+
+         # (2) Stack along channel axis -> (L, 2L-1, F) ---
+         X = np.stack(S_list, axis=-1)
+         H, W, F = X.shape
+
+         # (3) Global (across pixels) covariance in channel space: (F,F) ---
+         Xp = X.reshape(-1, F)                     # (Npix, F)
+         R = (Xp.T @ Xp) / Xp.shape[0]             # (F, F)
+
+         # (4) Use your solver in 2D mode (global weights) ---
+         _, w_global, _, _ = SILCTools.compute_weights_generalised(
+             R=R,                                   # 2D -> global weights
+             scale=-1, realisation=realisation,
+             weight_vector_matrix_template=weight_vector_matrix_template,
+             comp=component, L_max=L, extract_comp=None,
+             constraint=False, F=None, f=None, reference_vectors=None, lam=lam_str
+        )
+
+        # (5) Apply weights per pixel -> (L, 2L-1) 
+        # w_global shape == (F,)
+         f_scal_ilc = (X @ w_global).astype(X.dtype)
+         return f_scal_ilc
+    
 
     @staticmethod
     def synthesize_ILC_maps_generalised(
@@ -841,31 +890,34 @@ class SILCTools():
             freq_tag = str(frequencies)
             freq0 = freq_tag.split("_")[0]
 
-        # 3) load f_scal (template expects {realisation,lmax,lam})
-        #    accept either 'f_scal' or 'scaling_coeffs' in templates
+        # 3) scaling coefficients: if per-frequency files exist, ILC-combine them once (global);
+        #    otherwise load the single pre-combined scaling map.
         f_key = "f_scal" if "f_scal" in file_tmpl else "scaling_coeffs"
-        f_t = file_tmpl[f_key]
+        f_t   = file_tmpl[f_key]
+
         if "{frequency}" in f_t:
-            if not freq0:
-                raise ValueError("Scaling-coeffs template requires {frequency} but none was provided.")
-            f_scal = np.load(
-                f_t.format(
-                    comp=component,               
-                    frequency=freq0,
-                    realisation=int(realisation_str),
-                    lmax=int(lmax),
-                    lam=str(lam),
-                )
+            # Build an ILC’ed scaling map from all channels using your existing solver
+            f_scal = SILCTools.build_ilc_scaling_coeff(
+                f_scal_template=f_t,
+                frequencies=frequencies,                 # <- pass the same list used for wavelet coeffs
+                realisation=realisation_str,             # int or str; the helper casts to int
+                lmax=int(lmax),
+                lam=lam,
+                component=component,
+                weight_vector_matrix_template=file_tmpl["weight_vector_matrices"],
             )
         else:
+            # Template is already single (no {frequency}) -> load as-is
             f_scal = np.load(
                 f_t.format(
                     comp=component,
+                    component=component,
                     realisation=int(realisation_str),
                     lmax=int(lmax),
                     lam=str(lam),
                 )
             )
+
 
         # 4) build filters and synthesise
         L = int(lmax) + 1
@@ -944,7 +996,7 @@ class ProduceSILC():
         filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam = lam) # use length of filter to obtain n_scales
         self.scales = range(len(filter_sample[0]) + 1) 
     
-
+    '''
     def process_wavelet_maps(self, save_intermediates: bool = False, visualise: bool = False):
         """
         Process wavelet maps for the specified components and frequencies.
@@ -1071,7 +1123,7 @@ class ProduceSILC():
                         np.save(ilc_synth_map_path, mw_pix)
                         print(f"Saved synthesised ILC map for realisation {realisation}.")
         return None
-
+    '''
 
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations,
                              output_templates, L_max, N_directions,
@@ -1185,11 +1237,9 @@ class ProduceSILC():
             print(f'Calculated covariance matrices in {dt:.2f} seconds')
             timings["covariance"].append(dt)
             '''
+
             # 4) Compute covariance matrices (serial, JAX backend)
             t0 = time.perf_counter()
-
-            # choose JAX backend; switch to "jax" if you want CPU-JAX
-            _cov_method = "jax_cuda"    # or: self.method if you already track it
 
             for scale in scales:
                 SILCTools.calculate_covariance_matrix(
@@ -1197,7 +1247,7 @@ class ProduceSILC():
                     doubled_MW_wav_c_j=doubled_MW_wav_c_j,
                     scale=int(scale),
                     realisation=int(realisation),
-                    method=_cov_method,                     # <<< JAX, not "numpy"
+                    method= "jax_cuda"  ,                  
                     path_template=output_templates["covariance_matrices"],
                     component=comp,
                     lmax=L_max - 1,
