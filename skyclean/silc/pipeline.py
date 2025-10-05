@@ -4,6 +4,7 @@ import time
 import numpy as np
 import jax
 import subprocess, sys
+import s2wav.filters as filters
 
 from .download import DownloadData
 from .map_processing import ProcessMaps
@@ -34,7 +35,7 @@ class Pipeline:
         constraint: bool = False,
         F = None,
         reference_vectors = None,
-        scales: list | None = None,   # optional: let caller pin j-scales
+        #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
         self.wavelet_components = wavelet_components
@@ -53,7 +54,7 @@ class Pipeline:
         self.constraint = constraint
         self.F = F
         self.reference_vectors = reference_vectors
-        self.scales = scales
+        #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
 
     # -------------------------
@@ -100,7 +101,7 @@ class Pipeline:
             method=self.method,
             overwrite=self.overwrite,
         )
-        processor.produce_and_save_all_maps()
+        processor.produce_and_save_maps()
 
     def step_wavelets(self):
         print("--- PRODUCING WAVELET TRANSFORMS ---")
@@ -130,51 +131,6 @@ class Pipeline:
             visualise=self.visualise,
         )
 
-    # ---------- helper to infer available j-scales from disk ----------
-    def _infer_scales_from_disk(self, file_template: str, comp_on_disk: str,
-                                frequency: str, realisation: int) -> list[int]:
-        """
-        Probe j=0.63 and collect those that exist on disk for the given (comp, freq, realisation).
-        Assumes the wavelet template uses {comp} and British {realisation:05d}.
-        Stops after the first gap once at least one scale is found.
-        """
-        scales = []
-        found_any = False
-
-        real_brit = f"{realisation:05d}"
-        for j in range(64):
-            try:
-                probe = file_template.format(
-                    comp=comp_on_disk,
-                    frequency=frequency,
-                    scale=j,
-                    realisation=int(real_brit),  # works with :05d
-                    lmax=self.lmax,
-                    lam=self.lam,
-                )
-            except KeyError:
-                # If template ever switches to US spelling (unlikely here)
-                probe = file_template.format(
-                    comp=comp_on_disk,
-                    frequency=frequency,
-                    scale=j,
-                    realisation=real_brit,
-                    lmax=self.lmax,
-                    lam=self.lam,
-                )
-            if os.path.exists(probe):
-                scales.append(j)
-                found_any = True
-            elif found_any:
-                break
-        if not scales:
-            raise FileNotFoundError(
-                "Could not infer any wavelet scales from disk.\n"
-                f"Checked with comp='{comp_on_disk}', frequency='{frequency}', realisation={realisation}.\n"
-                f"Template example:\n{file_template}"
-            )
-        return scales
-
     def step_ilc(self):
         """Run ILC_wav_coeff_maps_MP with optional theory/empirical F."""
         print("--- RUNNING ILC (new functional API) ---")
@@ -202,6 +158,7 @@ class Pipeline:
             "ilc_synth":              ft["ilc_synth"],
             "ilc_spectrum":           ft.get("ilc_spectrum"),
             "scaling_coeffs":         ft["scaling_coeffs"],
+            "f_scal":                 ft["f_scal"], 
         }
     
         # Realisations, freqs
@@ -210,11 +167,15 @@ class Pipeline:
     
         # Input mixture and scales
         comp_in = self.wavelet_components[0]
-        if getattr(self, "scales", None):
+
+        if getattr(self, "scales", None) is not None:
             scales = list(self.scales)
         else:
-            first_real, first_freq = realisations[0], freqs[0]
-            scales = self._infer_scales_from_disk(file_template, comp_in, first_freq, first_real)
+            # derive number of wavelet bands from the filter bank (no disk probing)
+            L = self.lmax + 1
+            filt = filters.filters_directional_vectorised(L, self.N_directions, lam=self.lam)
+            J = len(filt[0])              # number of wavelet bands (excludes scaling)
+            scales = list(range(J))       # use only wavelet bands for ILC
     
         # Constraint inputs (build F/ref on demand; default empirical)
         do_constraint = getattr(self, "constraint", False)
@@ -445,119 +406,3 @@ def main():
         directory=args.directory,
     )
     pipeline.run(steps=args.steps)
-
-'''
-def main():
-    parser = argparse.ArgumentParser(
-        description="Run the SILC pipeline with configurable parameters and GPU selection."
-    )
-    parser.add_argument('--components', nargs='+', default=["cmb", "sync", "dust", "noise", 'tsz'])
-    parser.add_argument('--wavelet-components', nargs='+', default=["cfn"])
-    parser.add_argument('--ilc-components', nargs='+', default=["cmb"])
-    parser.add_argument('--frequencies', nargs='+',
-                        default=["030", "044", "070", "100", "143", "217", "353", "545", "857"])
-    parser.add_argument('--realisations', type=int, default=1)
-    parser.add_argument('--start-realisation', type=int, default=0)
-    parser.add_argument('--lmax', type=int, default=512)
-    parser.add_argument('--N-directions', type=int, default=1)
-    parser.add_argument('--lam', type=float, default=2.0)
-    parser.add_argument('--method', type=str, default='jax_cuda')
-    parser.add_argument('--visualise', action='store_true')
-    parser.add_argument('--save-ilc-intermediates', action='store_true')
-    parser.add_argument('--overwrite', action='store_true')
-    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data')
-    parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--gpus', nargs='+', type=int, help="Optional: list of GPU ids to use, e.g. --gpus 0 1")
-    parser.add_argument('--steps', nargs='+',
-                        choices=['download', 'process', 'wavelets', 'ilc', 'all'],
-                        help="Which steps to run (one or more). Examples: --steps download  or  --steps process wavelets  or  --steps all")
-
-    args = parser.parse_args()
-
-    # -------- two-GPU launcher --------
-    if args.gpus and len(args.gpus) > 1:
-        total = int(args.realisations)
-        start = int(args.start_realisation)
-        if total < 2:
-            print("Two-GPU run requested but realisations < 2; falling back to single-GPU.")
-        else:
-            # split realisations roughly in half between the first two GPUs provided
-            half = total // 2
-            r0 = half
-            r1 = total - half
-            g0, g1 = args.gpus[0], args.gpus[1]
-
-            # reconstruct base argv for the child runs from current args
-            base_argv = []
-            def _extend(flag, val):
-                if val is None: return
-                if isinstance(val, bool):
-                    if val: base_argv.extend([flag])
-                elif isinstance(val, (list, tuple)):
-                    base_argv.extend([flag] + list(map(str, val)))
-                else:
-                    base_argv.extend([flag, str(val)])
-
-            _extend("--components", args.components)
-            _extend("--wavelet-components", args.wavelet_components)
-            _extend("--ilc-components", args.ilc_components)
-            _extend("--frequencies", args.frequencies)
-            _extend("--lmax", args.lmax)
-            _extend("--N-directions", args.N_directions)
-            _extend("--lam", args.lam)
-            _extend("--method", args.method)
-            if args.visualise: base_argv.append("--visualise")
-            if args.save_ilc_intermediates: base_argv.append("--save-ilc-intermediates")
-            if args.overwrite: base_argv.append("--overwrite")
-            _extend("--directory", args.directory)
-            if args.steps: _extend("--steps", args.steps)
-
-            print(f"[launcher] Spawning GPU {g0} for realisations {start}..{start+r0-1} "
-                  f"and GPU {g1} for {start+r0}..{start+total-1}")
-
-            p0 = _spawn_gpu_run(gpu_id=g0, start_real=start,     n_real=r0, base_argv=base_argv)
-            p1 = _spawn_gpu_run(gpu_id=g1, start_real=start+r0,  n_real=r1, base_argv=base_argv)
-
-            rc0 = p0.wait()
-            rc1 = p1.wait()
-            sys.exit(0 if (rc0 == 0 and rc1 == 0) else 1)
-
-    pipeline = Pipeline(
-        components=args.components,
-        wavelet_components=args.wavelet_components,
-        ilc_components=args.ilc_components,
-        frequencies=args.frequencies,
-        realisations=args.realisations,
-        start_realisation=args.start_realisation,
-        lmax=args.lmax,
-        N_directions=args.N_directions,
-        lam=args.lam,
-        method=args.method,
-        visualise=args.visualise,
-        save_ilc_intermediates=args.save_ilc_intermediates,
-        overwrite=args.overwrite,
-        directory=args.directory,
-        # pass-throughs unchanged
-    )
-    pipeline.run(steps=args.steps)
-'''
-
-# Example usage:
-#   python -m skyclean.silc.pipeline --gpu 0 --steps wavelets \
-#     --directory /Scratch/agnes/data --wavelet-components cfn \
-#     --frequencies 030 044 070 100 143 217 353 545 857 \
-#     --realisations 1 --start-realisation 0 --lmax 512 --N-directions 1 --lam 2.0
-#
-#   python -m skyclean.silc.pipeline --gpu 0 --steps ilc \
-#     --directory /Scratch/agnes/data --ilc-components cfn \
-#     --frequencies 030 044 070 100 143 217 353 545 857 \
-#     --realisations 1 --start-realisation 0 --lmax 512 --lam 2.0
-#
-#   python -m skyclean.silc.pipeline --gpu 0 --steps process wavelets ilc \
-#     --directory /Scratch/agnes/data --components cmb sync dust noise tsz \
-#     --wavelet-components cfn --ilc-components cfn \
-#     --frequencies 100 143 217 --realisations 1 --start-realisation 0 \
-#     --lmax 512 --N-directions 1 --lam 2.0 --method jax_cuda
-
-if __name__ == '__main__':
-    main()
