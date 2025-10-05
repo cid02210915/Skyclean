@@ -12,6 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from jax import config
 config.update("jax_enable_x64", True)
 from functools import lru_cache
+import s2wav.filters as filters
 
 from .map_tools import *
 from .utils import *
@@ -677,12 +678,14 @@ class SILCTools():
         """
 
         # 1) normalise realisation formatting
+        print('1')
         if isinstance(realisation, int):
             realisation_str = f"{realisation:04d}"
         else:
             realisation_str = str(realisation).zfill(4)
 
         # 2) use the passed parameters
+        print('2')
         file_tmpl = file_templates 
 
         # build frequencies tag for filename
@@ -696,11 +699,13 @@ class SILCTools():
             freq0 = freq_tag.split("_")[0]
 
         # 3) build filters and synthesise
+        print('3')
         L = int(lmax) + 1
 
-        MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=1, lam=float(lam))
+        MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=int(1), lam=float(2.0))
 
         # 4) Save
+        print('4')
         out_path = file_tmpl["ilc_synth"].format(
             extract_comp=extract_comp,
             component=component,
@@ -778,6 +783,8 @@ class ProduceSILC():
 
         lmax = L_max - 1  
         realisations = [int(r) for r in realisations]
+        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam =2.0) # use length of filter to obtain n_scales
+        scales = range(len(filter_sample[0]) + 1) 
 
         '''
         def _check_against_F(W, F, f, tol=1e-6, scale=None):
@@ -1176,7 +1183,7 @@ class ProduceSILC():
                     if os.path.exists(ilc_synth_map_path) and self.overwrite == False:
                         print(f"ILC synthesised map for realisation {realisation} already exists. Skipping synthesis.")
                     else:
-                        mw_pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions, lam)
+                        mw_pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=1, lam=float(lam))
                         np.save(ilc_synth_map_path, mw_pix)
                         print(f"Saved synthesised ILC map for realisation {realisation}.")
                     
