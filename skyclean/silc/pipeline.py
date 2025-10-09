@@ -186,21 +186,34 @@ class Pipeline:
             source = getattr(self, "F_source", "theory")
             kwargs = dict(getattr(self, "F_kwargs", {}))
             freq_arg = kwargs.pop("frequencies", freqs)
-            
-            # keep only relevant keys for the chosen source
+
+            # keep only relevant keys for the chosen source (NOTE: no 'normalize' anymore)
             if source == "theory":
+                # build_F_theory(beta_s, nu0, frequencies, components_order)
                 kwargs = {k: v for k, v in kwargs.items() if k in ("beta_s", "nu0")}
             else:  # empirical
+                # build_F_empirical(base_dir, file_templates, frequencies, realization, mask_path, components_order)
+                if "realisation" in kwargs and "realization" not in kwargs:
+                    kwargs["realization"] = kwargs.pop("realisation")
                 kwargs = {k: v for k, v in kwargs.items()
-                          if k in ("base_dir", "file_templates", "realization", "mask_path", "normalize")}
-            
-            F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(source, frequencies=freq_arg, **kwargs)
+                          if k in ("base_dir", "file_templates", "realization", "mask_path")}
+
+            # desired column order comes from your input component list; ignore extras like 'noise'
+            components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync")]
+
+            # build F with explicit column order (no normalization)
+            F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(
+                source=source,
+                frequencies=freq_arg,
+                components_order=components_order,
+                **kwargs
+            )
 
             self.F = F_new
             self.reference_vectors = ref_vecs
             F = self.F
             reference_vectors = self.reference_vectors
-            
+
         # Run ILC for requested targets
         for extract_comp in self.ilc_components:
             print(f"--- ILC target='{extract_comp}'  input='{comp_in}'  lmax={self.lmax}  scales={scales} ---")
