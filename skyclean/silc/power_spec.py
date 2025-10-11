@@ -1,6 +1,3 @@
-# --- Minimal OOP: Planck map -> alm (healpy or MW) ---
-
-# If you use MW -> alm with s2fft/JAX, enable x64 before importing jax:
 import os
 import numpy as np
 import healpy as hp
@@ -14,25 +11,26 @@ class MapAlmConverter:
     def __init__(self, file_templates: Dict[str, str]):
         self.file_templates = file_templates
 
-    # ---------- public ----------
     def to_alm(
         self,
         component: str,
         *,
-        source: str = "downloaded",         # "downloaded" | "processed" | "ilc_synth"
-        processed: Optional[bool] = None,
+        source: str = "downloaded",   # "downloaded" | "processed" | "ilc_synth"
         frequency: Optional[Union[int, str]] = None,
         realisation: Optional[int] = None,
         lmax: Optional[int] = None,
         field: int = 0,
-        # ilc_synth-only args:
         extract_comp: Optional[str] = None,
         frequencies: Optional[Union[str, int, Iterable[int]]] = None,
         lam: Optional[Union[int, float, str]] = None,
     ) -> Dict[str, Any]:
 
-        if processed is not None:
-            source = "processed" if processed else "downloaded"
+        # --- NEW: hard guard the source; do NOT override it ---
+        if source not in ("downloaded", "processed", "ilc_synth"):
+            raise ValueError(f"source must be 'downloaded', 'processed', or 'ilc_synth', got {source!r}")
+
+        # if processed is not None:
+        #     source = "processed" if processed else "downloaded"   # ← DELETE THIS OVERRIDE
 
         path = self._format_path(
             component=component, source=source,
@@ -40,26 +38,24 @@ class MapAlmConverter:
             extract_comp=extract_comp, frequencies=frequencies, lam=lam,
         )
 
-        # 2) Load the map from disk
+        # Load the map
         arr = self._load_map(path, field=field)
-    
-        # 3) Decide sampling by file extension first; fallback to shape
+
+        # Decide sampling by extension, fallback to shape
         pl = path.lower()
         if pl.endswith((".fits", ".fit")):
             sampling = "healpix"
         else:
-            sampling, _ = self._detect_sampling(arr)  # returns ("healpix"/"mw", info)
+            sampling, _ = self._detect_sampling(arr)
 
-    
-        # 4) Transform to alm
+        # Transform to alm
         if sampling == "healpix":
             if lmax is None:
                 raise ValueError("HEALPix input: please pass lmax explicitly.")
             lmax_used = int(lmax)
             alm_hp = hp.map2alm(arr, lmax=lmax_used, pol=False, iter=0).astype(np.complex128, copy=False)
             return {"alm": alm_hp, "format": "healpy", "lmax": lmax_used, "path": path}
-    
-        # sampling == 'mw'
+
         L = arr.shape[0]
         lmax_used = L - 1
         arr = np.asarray(np.real(np.squeeze(arr)), dtype=np.float64, order="C")

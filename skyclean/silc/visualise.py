@@ -329,7 +329,7 @@ class Visualise():
                             ell, D_ell,
                             label=label,
                             color=color,
-                            linewidth=1.5
+                            linewidth=2.0
                         )
                         
                         # Store the map for potential cross-correlation
@@ -358,7 +358,7 @@ class Visualise():
                         ell, D_ell,
                         label=comp,
                         color=color,
-                        linewidth=1.5
+                        linewidth=2.0
                     )
                     
                     # Store the map for potential cross-correlation
@@ -389,7 +389,7 @@ class Visualise():
                         label=cross_label,
                         color=color,
                         linestyle='--',
-                        linewidth=1.5
+                        linewidth=2.0
                     )
 
             ax.legend(title="Component", fontsize=10)
@@ -509,7 +509,7 @@ class Visualise():
                         result = D_ell_b - D_ell_a
                         label = f"Residual: $\\lambda$={lam_val}" if len(self.lam_list) > 1 else f"({comp_b}-{comp_a})"
                     
-                    ax.plot(ell, result, linewidth=1.5, label=label, linestyle='-')
+                    ax.plot(ell, result, linewidth=2.0, label=label, linestyle='-')
             else:
                 # Neither component is ILC, so no lambda loop needed
                 fp_a = self.file_templates[comp_a].format(
@@ -539,7 +539,7 @@ class Visualise():
                     result = D_ell_b - D_ell_a
                     label = f"({comp_b}-{comp_a})"
                     
-                ax.plot(ell, result, linewidth=1.5, label=label, linestyle='-')
+                ax.plot(ell, result, linewidth=2.0, label=label, linestyle='-')
                 
                 # Store maps for cross-correlation
                 if include_cross_correlation:
@@ -595,7 +595,7 @@ class Visualise():
                     cross_result = D_ell_cross - D_ell_a_auto
                     cross_label = f"Cross residual: ({comp_a}×{comp_b})-({comp_a}×{comp_a})"
                 
-                ax.plot(ell, cross_result, linewidth=1.5, 
+                ax.plot(ell, cross_result, linewidth=2.0, 
                        label=cross_label, 
                        linestyle='--', color='red')
             
