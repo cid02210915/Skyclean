@@ -643,4 +643,3 @@ class Visualise():
 # #visualiser.visualise_maps(map_comps)
 # #visualiser.visualise_power_spectra(map_comps, cross_correlation_indices=[[0, 1]])  
 # visualiser.visualise_component_ratio_power_spectra("cmb","ilc_synth", include_cross_correlation=True, ratio=False)
-
