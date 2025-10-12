@@ -1,6 +1,5 @@
 import os 
 
-
 class FileTemplates():
     def __init__(self, directory = "data/", start_realisation: int = 0):
         self.directory = directory
@@ -54,7 +53,7 @@ class FileTemplates():
         "cfn":             os.path.join(self.output_directories["cfn"],           "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
         # ---------------- wavelet transforms (keep existing placeholders) ----------------
-        # NOTE: loader/saver use {comp} and {realisation}; keep these unchanged.
+        # NOTE: loader/saver use {comp} and British {realisation}; keep these unchanged.
         "wavelet_coeffs": os.path.join(
             self.output_directories["wavelet_coeffs"],
             "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
@@ -68,13 +67,7 @@ class FileTemplates():
             self.output_directories["scaling_coeffs"],
             "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
         ),
-        # combined file 
-        "f_scal": os.path.join(
-            self.output_directories["scaling_coeffs"],
-            "{comp}_f_scal_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"   # <-- NO {frequency} here
-        ),
 
-        
         # ---------------- ILC intermediates & outputs (matches ILC_wav_coeff_maps_MP) ----------------
         # IMPORTANT: these use {component}, {extract_comp}, and US spelling {realisation}
         # Per-frequency, per-scale doubled wavelet maps (still per input component)
@@ -112,6 +105,7 @@ class FileTemplates():
             self.output_directories["ilc_trimmed_maps"],
             "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
+        
 
         # Final synthesized map — records target (extract_comp), source (component), and band-set
         "ilc_synth": os.path.join(
@@ -125,7 +119,7 @@ class FileTemplates():
             "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
 
-        # ---------------- ML ----------------
+        # ---------------- ML (left unchanged) ----------------
         "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
