@@ -221,7 +221,7 @@ class ProcessMaps():
     
         return hp_map_reduced
 
-    '''
+
     def produce_and_save_all_maps(self):
         """
         Process and save individual components AND CFN maps 
@@ -242,26 +242,6 @@ class ProcessMaps():
                 cfn_output_path = self.file_templates["cfn"].format(
                     frequency=frequency, realisation=realisation, lmax=desired_lmax
                 )
-                if os.path.exists(cfn_output_path) and self.overwrite == False:
-                    print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
-                    continue
-                cfn_map = self.create_cfn(frequency, realisation, save=True)
-                hp.write_map(cfn_output_path, cfn_map, overwrite=True)
-                print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
-    '''
-
-    def produce_and_save_maps(self):
-        """
-        Produce CFN maps across realisations and frequencies.
-
-        Returns:
-            None
-        """
-        desired_lmax = self.desired_lmax
-        for realisation in range(self.realisations):
-            realisation += self.start_realisation  
-            for frequency in self.frequencies:
-                cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                 if os.path.exists(cfn_output_path) and self.overwrite == False:
                     print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                     continue
@@ -328,5 +308,5 @@ class ProcessMaps():
                     print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation} saved.")
 
 # processor = ProcessMaps(components=["cmb", "sync"], wavelet_components=["cfn"], frequencies = ["030", "044"], realisations=0, desired_lmax=256, directory="/Scratch/matthew/data/", overwrite=False)
-# processor.produce_and_save_maps()
+# processor.produce_and_save_cfns()
 # processor.produce_and_save_wavelet_transforms(N_directions=1, lam=4.0, method="jax_cuda", visualise=False)
