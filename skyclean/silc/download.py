@@ -13,8 +13,7 @@ class DownloadData():
                  frequencies: list, 
                  realisations: int, 
                  start_realisation: int,
-                 directory: str = "data/",
-                 overwrite: bool = False): 
+                 directory: str = "data/"): 
         """
         Parameters: 
             components (list): List of components to download. Includes: 'cmb', 'sync', 'dust' (synchrotron)
@@ -28,7 +27,6 @@ class DownloadData():
         self.realisations = realisations
         self.start_realisation = start_realisation
         self.directory = directory
-        self.overwrite = overwrite
 
         files = FileTemplates(directory)
         self.download_templates = files.download_templates
@@ -72,18 +70,21 @@ class DownloadData():
         
     def download_cmb_spectrum(self):
         """
-        Instead of downloading Planck 2018 best-fit CMB TT spectrum,
-        load the theoretical CMB angular power spectrum from a local file.
-        """        
-        path = os.path.join(self.directory, "cmb_spectrum_theory.txt")
-        if os.path.exists(path):
-            print("cmb_spectrum_theory.txt exists. Skipping downloaing Planck's spectrum.")
-            return
-        # download from Planck
+        Download the Planck 2018 best-fit CMB TT spectrum
+        and save it as cmb_spectrum.txt in the data directory.
+        """
+
         url = "http://pla.esac.esa.int/pla/aio/product-action?COSMOLOGY.FILE_ID=COM_PowerSpect_CMB-TT-full_R3.01.txt"
+        path = os.path.join(self.directory, "cmb_spectrum.txt")
+
+        if os.path.exists(path):
+            print("cmb_spectrum.txt already exists. Skipping download.")
+            return
+
         print("Downloading Planck TT spectrum...")
         resp = requests.get(url, timeout=60)
         resp.raise_for_status()
+
         # Load directly into numpy
         data = np.loadtxt(StringIO(resp.text))
         ells = data[:, 0].astype(int)
@@ -92,10 +93,10 @@ class DownloadData():
         # Keep same 4-column format as before
         arr = np.column_stack([ells, Dl, np.zeros_like(ells), np.zeros_like(ells)])
         np.savetxt(path, arr, fmt="%.8e")
-        print(f"Wrote Planck cmb_spectrum.txt at {path}") 
+        print(f"Wrote Planck cmb_spectrum.txt at {path}")   
 
 
-    def generate_and_save_cmb_realisation(self, realisation: int, overwrite: bool = False):
+    def generate_and_save_cmb_realisation(self, realisation: int):
         """ Generates a CMB realisation based on the theoretical spectrum and downloads it.
         
         #### Notes: In future, will use CMB data with simulated beams; for now, use theoretical CMB.
@@ -105,36 +106,18 @@ class DownloadData():
 
         Returns:
             None
-        """
-        filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 for now
-        if os.path.exists(filename) and overwrite is False:
+        """ 
+        filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 
+        if os.path.exists(filename):
             print(f"CMB realisation {realisation} already exists. Skipping generation.")
             return None
-        # load the theoretical spectrum, if not exists, load the Planck one
-        if os.path.exists(os.path.join(self.directory, "cmb_spectrum_theory.txt")):
-            l, dl = np.loadtxt(os.path.join(self.directory, "cmb_spectrum_theory.txt"),
-                                comments="#", usecols=(0,1), unpack=True)
-            l = l.astype(int)
-            dl *= ((2.7255**2) * 1e12) # convert to μK^2
-            lmax = 1023
-            cl = np.zeros(lmax + 1)
-            m = (l >= 2) & (l <= lmax)
-            cl[l[m]] = dl[m] * (2.0 * np.pi) / (l[m] * (l[m] + 1.0))   # D_l -> C_l
-            nside = 2048
-            cmb_map = hp.synfast(cl, nside=nside, pixwin=True, lmax=1023) # convolve with pixel window
-            hp.write_map(filename, cmb_map, overwrite=overwrite)
-            print(f"Downloaded theoretical CMB.")
-        elif os.path.exists(os.path.join(self.directory, "cmb_spectrum.txt")):
-            l, dl, _, _ = np.loadtxt(os.path.join(self.directory, "cmb_spectrum.txt")).transpose()
-            cl = (dl*2*np.pi)/(l*(l+1))
-            cl *= 1E-12 # convert to K 
-            nside = 2048
-            cmb_map = hp.synfast(cl, nside=nside, pixwin=True, lmax=1023) # convolve with pixel window
-            hp.write_map(filename, cmb_map, overwrite=overwrite)
-            print(f"Downloaded Planck CMB.")
-        else:
-            raise FileNotFoundError("No CMB spectrum file found. Please ensure cmb_spectrum_theory.txt or cmb_spectrum.txt exists in the data directory.")
-
+        l, dl, _, _ = np.loadtxt(os.path.join(self.directory, "cmb_spectrum.txt")).transpose()
+        cl = (dl*2*np.pi)/(l*(l+1))
+        cl *= 1E-12 # convert to K 
+        nside = 2048
+        cmb_map = hp.synfast(cl, nside=nside, pixwin=True, lmax=1023) 
+        hp.write_map(filename, cmb_map, overwrite=True)
+        print(f"Downloaded CMB.")
 
 
     def download_all(self): 
@@ -161,9 +144,9 @@ class DownloadData():
             realisation += self.start_realisation  # Adjust for starting realisation
             print(realisation)
             print(f"Downloading CMB & noise for realisation {realisation}...")
-            self.generate_and_save_cmb_realisation(realisation, self.overwrite)
+            self.generate_and_save_cmb_realisation(realisation)
             if 'noise' in self.components:
-                if realisation > 299: 
+                if realisation > 235: 
                     continue # there are only ffp10 300 noise realisations
                 else:
                     for frequency in self.frequencies:
