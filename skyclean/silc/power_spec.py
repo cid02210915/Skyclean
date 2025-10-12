@@ -1,293 +1,168 @@
-import os
-import numpy as np
-import healpy as hp
-import jax.numpy as jnp
-import s2fft   # MW forward SHT
-import matplotlib.pyplot as plt 
+import os 
 
-from typing import Optional, Union, Iterable, Dict, Any
 
-class MapAlmConverter:
-    def __init__(self, file_templates: Dict[str, str]):
-        self.file_templates = file_templates
+class FileTemplates():
+    def __init__(self, directory = "data/", start_realisation: int = 0):
+        self.directory = directory
+        self.output_directories = {
+            # downloaded maps
+            "cmb_realisations": os.path.join(directory, "CMB_realisations/"),
+            # processed maps
+            "cfn": os.path.join(directory, "CFN_realisations"),
+            "processed_maps": os.path.join(directory, "processed_maps"),
+            # wavelet transforms
+            "wavelet_coeffs": os.path.join(directory, "wavelet_transforms/wavelet_coeffs"),
+            "scaling_coeffs": os.path.join(directory, "wavelet_transforms/scaling_coeffs"),
+            # ilc maps
+            "doubled_maps": os.path.join(directory, "SILC/doubled_maps"),
+            "covariance_matrix": os.path.join(directory, "SILC/covariance_matrix"),
+            "weight_vector_data": os.path.join(directory, "SILC/weight_vector_data"),
+            "ilc_doubled_wavelet_maps": os.path.join(directory, "SILC/ilc_doubled_wavelet_maps"),
+            "ilc_trimmed_maps": os.path.join(directory, "SILC/ilc_trimmed_maps"),
+            "ilc_synthesised_maps": os.path.join(directory, "SILC/ilc_synthesised_maps"),
+            # ML 
+            "ml_maps": os.path.join(directory, "ML/maps"),
+            "ml_models": os.path.join(directory, "ML/models"),
+        }
 
-    def to_alm(
-        self,
-        component: str,
-        *,
-        source: str = "downloaded",   # "downloaded" | "processed" | "ilc_synth"
-        frequency: Optional[Union[int, str]] = None,
-        realisation: Optional[int] = None,
-        lmax: Optional[int] = None,
-        field: int = 0,
-        extract_comp: Optional[str] = None,
-        frequencies: Optional[Union[str, int, Iterable[int]]] = None,
-        lam: Optional[Union[int, float, str]] = None,
-    ) -> Dict[str, Any]:
-
-        # --- NEW: hard guard the source; do NOT override it ---
-        if source not in ("downloaded", "processed", "ilc_synth"):
-            raise ValueError(f"source must be 'downloaded', 'processed', or 'ilc_synth', got {source!r}")
-
-        # if processed is not None:
-        #     source = "processed" if processed else "downloaded"   # ← DELETE THIS OVERRIDE
-
-        path = self._format_path(
-            component=component, source=source,
-            frequency=frequency, realisation=realisation, lmax=lmax,
-            extract_comp=extract_comp, frequencies=frequencies, lam=lam,
-        )
-
-        # Load the map
-        arr = self._load_map(path, field=field)
-
-        # Decide sampling by extension, fallback to shape
-        pl = path.lower()
-        if pl.endswith((".fits", ".fit")):
-            sampling = "healpix"
-        else:
-            sampling, _ = self._detect_sampling(arr)
-
-        # Transform to alm
-        if sampling == "healpix":
-            if lmax is None:
-                raise ValueError("HEALPix input: please pass lmax explicitly.")
-            lmax_used = int(lmax)
-            alm_hp = hp.map2alm(arr, lmax=lmax_used, pol=False, iter=0).astype(np.complex128, copy=False)
-            return {"alm": alm_hp, "format": "healpy", "lmax": lmax_used, "path": path}
-
-        L = arr.shape[0]
-        lmax_used = L - 1
-        arr = np.asarray(np.real(np.squeeze(arr)), dtype=np.float64, order="C")
-        alm_mw = s2fft.forward(arr, L=L)
-        return {"alm": alm_mw, "format": "mw", "lmax": lmax_used, "path": path}
-
-    # ---------- internals ----------
-    @staticmethod
-    def _fmt_has(fmt: str, name: str) -> bool:
-        """True if template contains '{name}' (handles '{name:04d}', etc.)."""
-        return ("{" + name) in fmt
-
-    def _format_path(
-        self,
-        *,
-        component: str,
-        source: str,
-        frequency: Optional[Union[int, str]],
-        realisation: Optional[int],
-        lmax: Optional[int],
-        extract_comp: Optional[str],
-        frequencies: Optional[Union[str, int, Iterable[int]]],
-        lam: Optional[Union[int, float, str]],
-    ) -> str:
+        for key, value in self.output_directories.items():
+            if not os.path.exists(value):
+                print(f"Creating directory: {value}")
+                os.makedirs(value)
         
-        if source == "downloaded":
-            key = component
-            fmt = self.file_templates[key]
-            kw = {}
-            if self._fmt_has(fmt, "frequency"):
-                if frequency is None: raise ValueError(f"{key} needs frequency")
-                kw["frequency"] = str(frequency)
-            if self._fmt_has(fmt, "realisation"):
-                if realisation is None: raise ValueError(f"{key} needs realisation")
-                kw["realisation"] = int(realisation)
-            if self._fmt_has(fmt, "lmax"):
-                if lmax is None: raise ValueError(f"{key} needs lmax")
-                kw["lmax"] = int(lmax)
-            return fmt.format(**kw)
+        self.download_templates = {
+            "sync": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "dust": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermaldust-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "noise": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_noise_{frequency}_full_map_mc_{realisation:05d}.fits",
+            'tsz': "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits"
+        }
 
-        if source == "processed":
-            key = f"processed_{component}"
-            fmt = self.file_templates[key]
-            kw = {}
-            if self._fmt_has(fmt, "frequency"):
-                if frequency is None: raise ValueError(f"{key} needs frequency")
-                kw["frequency"] = str(frequency)
-            if self._fmt_has(fmt, "realisation"):
-                if realisation is None: raise ValueError(f"{key} needs realisation")
-                kw["realisation"] = int(realisation)
-            if self._fmt_has(fmt, "lmax"):
-                if lmax is None: raise ValueError(f"{key} needs lmax")
-                kw["lmax"] = int(lmax)
-            return fmt.format(**kw)
+        self.file_templates = {
+        # ---------------- downloaded maps ----------------
+        "cmb":   os.path.join(self.output_directories["cmb_realisations"], "cmb_r{realisation:04d}.fits"),
+        "sync":  os.path.join(self.output_directories["cmb_realisations"], "sync_f{frequency}.fits"),
+        "dust":  os.path.join(self.output_directories["cmb_realisations"], "dust_f{frequency}.fits"),
+        "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
+        "tsz":   os.path.join(self.output_directories["cmb_realisations"], "tsz_f{frequency}.fits"),
 
-        if source == "ilc_synth":
-            fmt = self.file_templates["ilc_synth"]
+        # ---------------- processed maps ----------------
+        "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
+        "processed_sync":  os.path.join(self.output_directories["processed_maps"], "processed_sync_f{frequency}_lmax{lmax}.npy"),
+        "processed_dust":  os.path.join(self.output_directories["processed_maps"], "processed_dust_f{frequency}_lmax{lmax}.npy"),
+        "processed_noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
+        "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
+        "cfn":             os.path.join(self.output_directories["cfn"],           "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
-            # frequency tag: underscores, preserve provided order
-            if isinstance(frequencies, (list, tuple)):
-                freq_str = "_".join(str(x) for x in frequencies)
+        # ---------------- wavelet transforms (keep existing placeholders) ----------------
+        # NOTE: loader/saver use {comp} and {realisation}; keep these unchanged.
+        "wavelet_coeffs": os.path.join(
+            self.output_directories["wavelet_coeffs"],
+            "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        # Alias for older code that expects 'wavelet_c_j'
+        "wavelet_c_j": os.path.join(
+            self.output_directories["wavelet_coeffs"],
+            "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        "scaling_coeffs": os.path.join(
+            self.output_directories["scaling_coeffs"],
+            "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        # combined file 
+        "f_scal": os.path.join(
+            self.output_directories["scaling_coeffs"],
+            "{comp}_f_scal_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"   # <-- NO {frequency} here
+        ),
+
+        
+        # ---------------- ILC intermediates & outputs (matches ILC_wav_coeff_maps_MP) ----------------
+        # IMPORTANT: these use {component}, {extract_comp}, and US spelling {realisation}
+        # Per-frequency, per-scale doubled wavelet maps (still per input component)
+        "doubled_maps": os.path.join(
+            self.output_directories["doubled_maps"],
+            "doubled_{component}_f{frequency}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Covariance matrices per scale over the whole band-set (frequencies join tag, e.g. 30_44_70_...)
+        "covariance_matrices": os.path.join(
+            self.output_directories["covariance_matrix"],
+            "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Weights per scale; {type} is "weight_vector" (or "cilc_cmb" for constrained case)
+        "weight_vector_matrices": os.path.join(
+            self.output_directories["weight_vector_data"],
+            "{component}_{type}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
+        "ilc_maps": os.path.join(
+            self.output_directories["ilc_doubled_wavelet_maps"],
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Legacy alias (same path)
+        "ilc_doubled_maps": os.path.join(
+            self.output_directories["ilc_doubled_wavelet_maps"],
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        
+        # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
+        "trimmed_maps": os.path.join(
+            self.output_directories["ilc_trimmed_maps"],
+            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Final synthesized map — records target (extract_comp), source (component), and band-set
+        "ilc_synth": os.path.join(
+            self.output_directories["ilc_synthesised_maps"],
+            "{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Optional: power spectrum tagged likewise
+        "ilc_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_maps"],
+            "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # ---------------- ML ----------------
+        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+        }
+
+    
+    @staticmethod
+    def create_dir(directory: str):
+        """
+        Create a directory if it does not exist.
+
+        Parameters:
+            dir (str): The path of the directory to create.
+
+        Returns:
+            None
+        """
+        if not os.path.exists(directory):
+            print("Creating directory:", directory)
+            os.makedirs(directory)
+        else:
+            pass
+
+    def print_one_example_per_type(self):
+        """
+        Print a single example file (if any) from each managed output directory.
+        """
+        base = os.path.abspath(self.directory)
+        for key, root in self.output_directories.items():
+            example = None
+            for r, _, files in os.walk(root):
+                if files:
+                    # pick the first file we see; simple and fast
+                    example = os.path.join(r, files[0])
+                    break
+            if example:
+                rel = os.path.relpath(example, base)
+                print(f"{key}: {rel}")
             else:
-                freq_str = str(frequencies) if frequencies is not None else ""
-
-            if extract_comp is None or realisation is None or lmax is None or lam is None:
-                raise ValueError("ilc_synth needs extract_comp, realisation, lmax, lam, and frequencies")
-
-            lam_str = lam if isinstance(lam, str) else f"{float(lam):.1f}"
-
-            kw = dict(
-                extract_comp=extract_comp,   # target, e.g. 'cmb'
-                component=component,         # source mixture, e.g. 'cfn'
-                frequencies=freq_str,
-                realisation=int(realisation),
-                lmax=int(lmax),
-                lam=lam_str,
-            )
-            return fmt.format(**kw)
-
-        raise ValueError("source must be 'downloaded', 'processed', or 'ilc_synth'")
-    
-    def _load_map(self, path: str, field: int) -> np.ndarray:
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Map file not found: {path}")
-        pl = path.lower()
-
-        # If it’s actually FITS content (even misnamed), read with healpy
-        with open(path, "rb") as f:
-            head = f.read(10)
-        if head.startswith(b"SIMPLE  =") or head.startswith(b"\x53\x49\x4D\x50\x4C\x45\x20\x20\x3D"):
-            arr = hp.read_map(path, field=field, dtype=np.float64)
-            if isinstance(arr, np.ndarray) and arr.ndim == 2 and arr.shape[0] == 3:
-                arr = arr[0]
-            return np.asarray(arr, dtype=np.float64)
-
-        if pl.endswith((".fits", ".fit")):
-            arr = hp.read_map(path, field=field, dtype=np.float64)
-            if isinstance(arr, np.ndarray) and arr.ndim == 2 and arr.shape[0] == 3:
-                arr = arr[0]
-            return np.asarray(arr, dtype=np.float64)
-
-        if pl.endswith(".npy"):
-            try:
-                arr = np.load(path)  # allow_pickle=False by default
-            except ValueError as e:
-                if "pickled data" not in str(e).lower():
-                    raise
-                obj = np.load(path, allow_pickle=True)
-                if isinstance(obj, np.ndarray) and obj.dtype == object and obj.shape == ():
-                    obj = obj.item()
-                if isinstance(obj, dict):
-                    for k in ("map", "MW_Pix", "data", "arr", "array"):
-                        if k in obj:
-                            arr = obj[k]
-                            break
-                    else:
-                        raise ValueError(f"Pickled file lacks a known numeric map key. Keys: {list(obj.keys())}")
-                else:
-                    arr = obj
-            return np.asarray(arr, dtype=np.float64)
-
-        raise ValueError(f"Unsupported file type: {path}")
-
-    def _detect_sampling(self, arr: np.ndarray):
-        # HEALPix: 1D with Npix = 12 * nside^2
-        if arr.ndim == 1:
-            try:
-                nside = hp.npix2nside(arr.size)
-                return "healpix", {"nside": int(nside)}
-            except Exception:
-                pass
-        # MW: 2D with (L, 2L-1) only (by your spec)
-        if arr.ndim == 2:
-            n0, n1 = arr.shape
-            if n1 == 2 * n0 - 1:
-                return "mw", {"L": int(n0)}
-        raise ValueError("Could not determine sampling (neither HEALPix nor MW).")
-
-class PowerSpectrumTT:
-    '''
-    Minimal utilities to compute TT angular power spectra.
-
-    What it does
-    ------------
-    - `from_mw_alm`          : (MW a_{ℓm})   -> (ℓ, C_ℓ)
-    - `from_healpy_alm`      : (healpy alm)  -> (ℓ, C_ℓ)
-    - `cl_to_Dl`             : C_ℓ           -> D_ℓ = ℓ(ℓ+1)C_ℓ / (2π)
-    '''
-    @staticmethod
-    def from_mw_alm(alm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """
-        MW alm shape (L, 2L-1), columns m = -(L-1)..(L-1) -> (ell, C_ell)
-        """
-        alm = np.asarray(alm)
-        L = alm.shape[0]
-        m0 = L - 1                       # column index of m=0
-        cl = np.empty(L, dtype=np.float64)
-        for ell in range(L):
-            a = alm[ell, m0-ell : m0+ell+1]           # m in [-ell, ell]
-            cl[ell] = (a.real*a.real + a.imag*a.imag).sum() / (2*ell + 1)
-        return np.arange(L), cl
-
-    @staticmethod
-    def from_healpy_alm(alm_hp: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """healpy packed alm -> (ell, C_ell)"""
-        cl = hp.alm2cl(alm_hp)
-        return np.arange(cl.size), cl
-    
-    
-    @staticmethod
-    def cl_to_Dl(ell: np.ndarray, cl: np.ndarray, input_unit: str = "K") -> np.ndarray:
-        """
-        Convert C_ell -> D_ell = ell(ell+1) C_ell / (2π), returning D_ell in µK^2.
-    
-        input_unit:
-          - "K"  : C_ell provided in K^2  -> multiply by 1e12
-          - "uK" : C_ell provided in µK^2 -> multiply by 1
-        """
-        Dl = ell * (ell + 1) * cl / (2.0 * np.pi)
-        factor = 1e12 if str(input_unit).lower() in ("k", "kelvin") else 1.0
-        return Dl * factor
-
-
-    @staticmethod
-    def plot_Dl_series(curves, save_path=None, show=True):
-        """
-        curves can be:
-          - tuple: (ell, Dl) or (ell, Dl, label) or (ell, Dl, label, style)
-          - dict : {"ell":..., "Dl":..., "label":..., "source": "downloaded|processed|ilc_synth", "style": optional}
-    
-        Auto styles (if 'source' given in dict):
-          ilc_synth -> "-"
-          processed -> "--"
-          downloaded -> "-."
-        """
-    
-        # normalize input to a list
-        if isinstance(curves, (dict, tuple)):
-            curves = [curves]
-    
-        style_by_source = {"ilc_synth": "-", "processed": "--", "downloaded": "-."}
-    
-        plt.figure(figsize=(7, 4))
-        any_label = False
-        for it in curves:
-            if isinstance(it, dict):
-                ell = np.asarray(it["ell"]); Dl = np.asarray(it["Dl"])
-                label = it.get("label")
-                style = it.get("style") or style_by_source.get(it.get("source"), "-")
-            else:
-                ell = np.asarray(it[0]); Dl = np.asarray(it[1])
-                label = it[2] if len(it) > 2 else None
-                style = it[3] if len(it) > 3 else "-"
-            plt.plot(ell, Dl, style, label=label)
-            any_label |= bool(label)
-    
-        plt.xlabel(r"$\ell$")
-        plt.ylabel(r"$D_\ell\ [\mu\mathrm{K}^2]$")
-        plt.grid(True, alpha=0.5)
-        if any_label: plt.legend()
-        plt.tight_layout()
-        if save_path: plt.savefig(save_path, dpi=200)
-        if show: plt.show()
-    
-    @staticmethod
-    def load_planck_Dl(directory: str):
-        """Load Planck 2018 TT theory from <directory>/cmb_spectrum.txt (cols: ell, Dl[µK^2], ...)."""
-        path = os.path.join(directory, "cmb_spectrum.txt")
-        if not os.path.exists(path):
-            return None
-        data = np.loadtxt(path)
-        ell = data[:, 0].astype(int)
-        Dl  = data[:, 1].astype(np.float64)   # already µK^2
-        return ell, Dl
-
+                print(f"{key}: (no files)")
