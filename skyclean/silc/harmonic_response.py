@@ -22,7 +22,7 @@ class AxisymmetricGenerators:
         self.b = - (self.lam + 1.0) / (self.lam - 1.0)
 
         # Precompute k_λ(t) ingredients on a dense grid in [1/λ, 1]
-        self.t_grid = np.linspace(1.0/self.lam, 1.0, 40001)
+        self.t_grid = np.linspace(1.0/self.lam, 1.0, 80001)
         w = self.s_lam(self.t_grid)**2 / self.t_grid
         dt = self.t_grid[1] - self.t_grid[0]
         # Trapezoidal cumulative integral from left
@@ -83,10 +83,10 @@ class AxisymmetricGenerators:
 
 class HarmonicWindows:
     """
-    Build windows on demand from your AxisymmetricGenerators.
+    Build windows on demand from AxisymmetricGenerators.
     Inputs:
       L   : band-limit (ℓ = 0..L-1)
-      lam : same λ you used to build the generators
+      lam : same λ used to build the generators
       J0  : lowest wavelet scale index (0 ≤ J0 ≤ J)
       g   : AxisymmetricGenerators(lam) instance
     """
@@ -96,7 +96,7 @@ class HarmonicWindows:
         self.J0  = int(J0)
         self.g   = AxisymmetricGenerators(self.lam)
         self.ells = np.arange(self.L)
-        self.J    = int(np.floor(np.log(self.L - 1) / np.log(self.lam)))
+        self.J = int(np.ceil(np.log(max(1, self.L - 1)) / np.log(self.lam)))
 
     def scaling(self):
         # Φ_{ℓ0} = sqrt((2ℓ+1)/(4π)) * η_λ(ℓ / λ^{J0})
@@ -122,17 +122,25 @@ def admissibility(Phi_l0, Psi_j_l0, ells, tol=1e-6):
     ok : bool
         True if admissibility holds (excluding ℓ=0), else False.
     """
+    ells = np.asarray(ells)
     S = np.abs(Phi_l0)**2
     for W in Psi_j_l0.values():
-        S = S + np.abs(W)**2
-    S = (4.0*np.pi) / (2.0*ells + 1.0) * S
+        S += np.abs(W)**2
+    S = (4.0*np.pi)/(2.0*ells + 1.0) * S
 
-    ok = np.all(np.abs(S[1:] - 1.0) < tol)
-    return S, bool(ok)
+    err = np.abs(S - 1.0)
+    ok = bool(np.all(err < tol))
+    if not ok:
+        i = int(np.argmax(err))
+        print(f"[admissibility] FAIL: max |S-1|={err[i]:.3e} at ℓ={int(ells[i])}")
+        for k in np.where(err >= tol)[0][:10]:
+            print(f"  ℓ={int(ells[k])}  S={S[k]:.8f}  |S-1|={err[k]:.3e}")
+    return S, ok
+
 
 class HRFigures:
     """
-    Plot the generator curves using your existing content.
+    Plot the generator curves using existing content.
     """
     def __init__(self, generators: AxisymmetricGenerators):
         self.g = generators
@@ -163,4 +171,50 @@ class HRFigures:
         plt.xlabel("t"); plt.ylabel("eta_lambda(t)")
         plt.grid(True)
         plt.show()
-   
+
+    @staticmethod
+    def visualise_generating_functions(L: int, lam: float = 3.0, J0: int = 0):
+        ells = np.arange(L)
+        hw   = HarmonicWindows(L=L, lam=lam, J0=J0)
+
+        # scaling generating windows
+        eta = hw.g.eta(ells / (lam**J0))
+        plt.plot(ells, eta, '--', label='Scal.')
+
+        # wavelet generating windows
+        for j in range(J0, hw.J + 1):
+            kappa = hw.g.kappa(ells / (lam**j))
+            plt.plot(ells, kappa, label=f'j={j}')
+
+        plt.xlabel('ℓ')
+        plt.ylabel('Generating response')
+        plt.grid(ls=':')
+        plt.legend()
+        plt.title(f'Generating functions (λ={lam}, J0={J0}, L={L})')
+        plt.show()
+
+
+def build_axisym_filter_bank(L, lam, J0=0):
+    """
+    Build axisymmetric filter bank in the exact format required by s2wav.analysis,
+    using HarmonicWindows (scale-discretised wavelets).
+    """
+    hw = HarmonicWindows(L=L, lam=lam, J0=J0)
+    J = hw.J                          # highest scale index
+    n_scales = J - J0 + 1             # number of wavelet scales
+
+    # Wavelet filters: shape (n_scales, L, 2L-1)
+    wavelets = np.zeros((n_scales, L, 2*L - 1))
+    mid_m = L - 1                     # m = 0 position
+
+    # Fill each scale's Ψ_{j,ℓ0}
+    for j in range(n_scales):
+        psi_l = hw.wavelet(J0 + j)    # shape (L,)
+        wavelets[j, :, mid_m] = psi_l # put only at m=0
+
+    # Scaling filter: shape (L, 2L-1)
+    scaling = np.zeros((L, 2*L - 1))
+    scaling[:, mid_m] = hw.scaling()
+
+    # s2wav expects [wavelet_filters, scaling_filter]
+    return [wavelets, scaling]
