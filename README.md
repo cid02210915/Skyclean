@@ -36,17 +36,20 @@ skyclean/
 │      ├─ map_processing.py          # - convolve and downsample downloaded maps, convert to MW, wavelet transform 
 │      ├─ ilc.py          # - GPU-accelerated ILC on MW wavelet maps
 │      ├─ pipeline.py          # - Wrapper for running entire SILC process. CLI included.
+│      ├─ power_spec.py          # TT power spectrum utilities
+│      ├─ mixing_matrix_constraint.py      # Build spectral response F and cILC constraints    
+│      ├─ run_ILC.py         # Example entry script to run the pipeline end-to-end
+│
+│
 │
 ├── ml/          # ML post-processing stage (WIP)
-│      ├─ data.py                  # - Produce CMB-free and ML-ready transformed input and output datasets for training (using tf)
+│      ├─ data.py                # - Produce CMB-free and ML-ready transformed input and output datasets for training (using tf)
 │      ├─ model.py               # - S2 UNET architectures
 │      ├─ train.py              # - Run the training loops. CLI included.
-│      ├─ inference.py              # - apply trained model to improve ILC
-├── tutorials/          # ML post-processing stage (WIP)
-│      ├─ silc_tutorial.ipynb                  # - demonstrates stages of the SILC pipeline
-│      ├─ ml_tutorial.ipynb              # - demonstrates the ML pipeline and inference
-├── tests/        # pytests (WIP)
-│      ├─ test_ilc.py                  # - tests for SILC pipeline
+       ├─ inference.py              # - apply trained model to improve ILC
+
+tests/        # pytests (WIP)
+├── test_ilc.py # tests for ILC pipeline
 ```
 
 ## Installation ⚙️

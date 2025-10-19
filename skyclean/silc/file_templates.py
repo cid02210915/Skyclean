@@ -34,6 +34,7 @@ class FileTemplates():
             "sync": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "dust": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermaldust-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "noise": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_noise_{frequency}_full_map_mc_{realisation:05d}.fits",
+            'tsz': "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits"
         }
 
         self.file_templates = {
@@ -87,10 +88,20 @@ class FileTemplates():
         else:
             pass
 
-
-
-
-
-
-
-
+    def print_one_example_per_type(self):
+        """
+        Print a single example file (if any) from each managed output directory.
+        """
+        base = os.path.abspath(self.directory)
+        for key, root in self.output_directories.items():
+            example = None
+            for r, _, files in os.walk(root):
+                if files:
+                    # pick the first file we see; simple and fast
+                    example = os.path.join(r, files[0])
+                    break
+            if example:
+                rel = os.path.relpath(example, base)
+                print(f"{key}: {rel}")
+            else:
+                print(f"{key}: (no files)")

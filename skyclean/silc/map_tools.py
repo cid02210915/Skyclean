@@ -8,12 +8,10 @@ jax.config.update("jax_enable_x64", True)
 import s2fft
 import s2wav
 import s2wav.filters as filters
-
 from .utils import *
 
 class HPTools():
     """Tools to process healpy/MW maps"""
-
     @staticmethod
     def reduce_hp_map_resolution(hp_map: np.ndarray, lmax: int, nside: int):
         """
@@ -32,21 +30,40 @@ class HPTools():
         processed_map = hp.alm2map(hp_alm, nside=nside)
         return processed_map, hp_alm
     
-    @staticmethod
-    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float): 
+
+    def pixwin_deconvolve(hp_map: np.ndarray, lmax: int):
         """
         Converts healpix map to alm space, deconvolves the pixel window function,
-        applies a standard beam, and converts back to map space.
-
-        #### Notes: In future, will use CMB data with simulated beams; for now, use theoretical CMB.
-        #### You will need to add functionality to *deconvolve* the CMB beam, then convolve with the
-        #### standard beam as performed here.
-
+        and converts back to map space.
+    
+        Parameters:
+            hp_map (numpy.ndarray): Input healpix map.
+            lmax (int): Maximum multipole moment for spherical harmonics.
+    
+        Returns:
+            numpy.ndarray: Reconstructed healpix map after pixel-window deconvolution.
+        """
+        nside = hp.get_nside(hp_map)
+        alm = hp.map2alm(hp_map, lmax=lmax)
+        # Pixel window function
+        pixwin = hp.sphtfunc.pixwin(nside, lmax=lmax, pol=False)
+        # Divide out pixel window function
+        alm_deconv = hp.almxfl(alm, 1/pixwin)
+        # Convert back to map
+        hp_map_deconv = hp.alm2map(alm_deconv, nside=nside)
+        return hp_map_deconv
+    
+    
+    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float):
+        """
+        Converts healpix map to alm space, applies a standard beam,
+        and converts back to map space.
+    
         Parameters:
             hp_map (numpy.ndarray): Input healpix map.
             lmax (int): Maximum multipole moment for spherical harmonics.
             standard_fwhm_rad (float): Standard beam FWHM in radians.   
-        
+    
         Returns:
             numpy.ndarray: Reconstructed healpix map after beam convolution.
         """
@@ -54,16 +71,13 @@ class HPTools():
         alm = hp.map2alm(hp_map, lmax=lmax)
         # Standard beam for the desired FWHM
         Standard_bl = hp.sphtfunc.gauss_beam(standard_fwhm_rad, lmax=lmax, pol=False)
-        # Pixel window function
-        pixwin = hp.sphtfunc.pixwin(nside, lmax=lmax, pol=False)
-        # Divide out pixel window function
-        alm_deconv = hp.almxfl(alm, 1/pixwin)
         # Apply standard beam
-        alm_reconv = hp.almxfl(alm_deconv, Standard_bl)
+        alm_conv = hp.almxfl(alm, Standard_bl)
         # Convert back to map
-        hp_map_reconv = hp.alm2map(alm_reconv, nside=nside)
-        return hp_map_reconv
+        hp_map_conv = hp.alm2map(alm_conv, nside=nside)
+        return hp_map_conv
     
+        
     @staticmethod
     def unit_convert(hp_map: np.ndarray, frequency: str):
         """
@@ -86,19 +100,25 @@ class HPTools():
             hp_map = hp_map  # No conversion for other frequencies
         return hp_map
     
+    # For synch/dust/tSZ/noise (have pixel window): beam -> deconv Pℓ -> reduce
     @staticmethod
-    def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float):
+    def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
         """
-        Convolve a Healpix map with a standard beam and reduce its resolution.
+        Deconvolve pixel window, convolve with standard beam, then reduce resolution.
+        Use for components with pixel window (skyinbands foregrounds, noise).
+        """
         
-        Parameters:
-            hp_map (numpy.ndarray): Input Healpix map.
-            lmax (int): Maximum multipole moment for spherical harmonics.
-            nside (int): Desired nside resolution for the output map.
-            standard_fwhm_rad (float): Standard beam FWHM in radians.
-        
-        Returns:
-            numpy.ndarray: Processed Healpix map after convolution and resolution reduction.
+        hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
+        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
+        return hp_map_reduced
+
+    # For CMB synfast (no pixel window): beam -> reduce
+    @staticmethod
+    def convolve_and_reduce_cmb(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
+        """
+        Convolve with standard beam, then reduce resolution.
+        Use for CMB synfast maps (no pixel window to deconvolve).
         """
         hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
@@ -152,8 +172,9 @@ class MWTools():
         )
         print(wavelet_coeffs[0].shape)
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
-        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        #wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
+
     
     @staticmethod
     def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
@@ -181,11 +202,11 @@ class MWTools():
         )
         scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
-        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        #wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
     
     @staticmethod
-    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0,):
+    def inverse_wavelet_transform(wavelet_coeffs: list, scaling_coeffs, L: int, N_directions: int = 1, lam: float = 2.0,):
         """
         Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
 
@@ -232,15 +253,26 @@ class MWTools():
         Returns:
             None
         """
-        # Save wavelet coefficients
-        np_scaling = np.array(scaling_coeffs)  # Convert JAX array to numpy array
-        np.save(scal_template.format(comp = comp, frequency=frequency, realisation=realisation, lmax = lmax, lam = lam), np_scaling)
-
-        # Save each wavelet coefficient map at each scale. (scale 0 = scaling coefficients.)
+        # Save scaling coefficients (kept separate; do NOT treat as "scale 0")
+        np_scaling = np.array(scaling_coeffs)
+        # If N_directions==1 the scaling may be (1, L, 2L-1) — squeeze to (L, 2L-1)
+        if np_scaling.ndim == 3 and np_scaling.shape[0] == 1:
+            np_scaling = np_scaling[0]
+        np.save(
+            scal_template.format(comp=comp, frequency=frequency, realisation=realisation, lmax=lmax, lam=lam),
+            np_scaling,
+        )
+    
+        # Save each **wavelet band** at each scale. (Disk scale 0 == first wavelet band.)
         for scale, wav in enumerate(wavelet_coeffs):
-            np_wav = np.array(wav)  # Convert JAX array to numpy array
-            np.save(wav_template.format(comp = comp, frequency=frequency, scale=scale, realisation=realisation, lmax = lmax, lam = lam), np_wav)
-        
+            np_wav = np.array(wav)
+            # If N_directions==1 and wav is (1, L, 2L-1), squeeze to (L, 2L-1)
+            if np_wav.ndim == 3 and np_wav.shape[0] == 1:
+                np_wav = np_wav[0]
+            np.save(
+                wav_template.format(comp=comp, frequency=frequency, scale=scale, realisation=realisation, lmax=lmax, lam=lam),
+                np_wav,
+            )
 
     @staticmethod
     def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
@@ -304,6 +336,7 @@ class MWTools():
             )                                           
         plt.savefig(f'{title}.png')
         plt.show()
+
     
     @staticmethod
     def visualise_axisym_wavelets(L: int, lam: float = 2.0):
@@ -328,6 +361,7 @@ class MWTools():
             plt.legend()
             plt.grid(ls=':')
         plt.show()
+
 
 class SamplingConverters():
     """Converters between Healpy and MW sampling"""
@@ -365,7 +399,7 @@ class SamplingConverters():
         
     
     @staticmethod
-    def mw_alm_2_hp_alm(mw_alm: np.ndarray):
+    def mw_alm_2_hp_alm(mw_alm: np.ndarray, lmax:int):
         """
         Converts spherical harmonics (alm) from MW sampling to healpy representation.
 
@@ -384,7 +418,7 @@ class SamplingConverters():
             hp_alm (numpy.ndarray): 1D array of healpy spherical harmonics coefficients
         """
         L = mw_alm.shape[0] 
-        lmax = L-1 # lmax as defined in healpy sampling
+        lmax = L-1 
         hp_alm = np.zeros(hp.Alm.getsize(lmax), np.complex128)
         for l in range(L):
             for m in range(l+1):
@@ -393,6 +427,7 @@ class SamplingConverters():
                 hp_alm[idx] = mw_alm[l, col]
         return hp_alm
     
+
     @staticmethod
     def hp_map_2_mw_map(hp_map: np.ndarray, lmax: int, method = "jax_cuda"):
         """
@@ -425,7 +460,7 @@ class SamplingConverters():
         """
         L = lmax + 1 
         mw_alm = s2fft.forward(mw_map, L=L, method=method, reality = True)
-        hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm)
+        hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm, lmax)
         hp_map = hp.alm2map(hp_alm, nside=HPTools.get_nside_from_lmax(lmax))
         return hp_map
     

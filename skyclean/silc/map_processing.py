@@ -1,4 +1,4 @@
-import os
+import os, glob
 import healpy as hp
 from .file_templates import FileTemplates
 from .map_tools import *
@@ -18,7 +18,7 @@ class ProcessMaps():
                  overwrite: bool = False): 
         """
         Parameters: 
-            components (list): List of foreground components to process. Includes: 'sync' (synchrotron)
+            components (list): List of foreground components to process. Includes: 'sync', 'tsz', 'dust' 
             wavelet_components (list): List of components to produce wavelet transforms for.
             directory (str): Directory where data is stored / saved to.
             frequencies (list): Frequencies of maps to be processed.
@@ -41,9 +41,15 @@ class ProcessMaps():
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
+        # file_template, file_templates
         
 
-        # file_template, file_templates
+    def _find_max_noise_realisation(self, frequency: str):
+        """
+        Find the maximum noise realisation number available for a given frequency.
+
+        Returns:
+            int: Maximum noise realisation number found.
 
     def _find_max_noise_realisation(self, frequency: str):
         """
@@ -90,7 +96,9 @@ class ProcessMaps():
     def create_cfn(self, frequency: str, realisation: int, save = True): 
         """
         Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
-        the CMB and foregrounds with the standard beam and adding noise.
+        the CMB with the standard beam and 
+            foregrounds with the standard beam + pixel window and 
+            adding noise 
 
         Parameters:
             frequency (str): The frequency for which to create the CFN.
@@ -105,12 +113,14 @@ class ProcessMaps():
         standard_fwhm_rad = np.radians(5/60)
         nside = HPTools.get_nside_from_lmax(desired_lmax)
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+    
         for comp in self.components:
-            # make 'comp' label 'processed_comp' for dictionary parsing
             processed_comp = "processed_" + comp
-            output_path = self.file_templates[processed_comp].format(frequency=frequency, realisation=realisation, lmax = desired_lmax)
-            if os.path.exists(output_path) and self.overwrite == False:
-                # Certain foreground components are frequency-independent, so we can skip processing
+            output_path = self.file_templates[processed_comp].format(
+                frequency=frequency, realisation=realisation, lmax=desired_lmax
+            )
+    
+            if os.path.exists(output_path) and self.overwrite is False:
                 hp_map_reduced = hp.read_map(output_path)
             else:
                 if comp == "noise": 
@@ -120,21 +130,99 @@ class ProcessMaps():
                     noise_realisation = np.random.randint(0, max_noise_realisation + 1)
                     filepath = self.file_templates[comp].format(frequency=frequency, realisation=noise_realisation)
                 else:
-                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation)
+                    filepath = self.file_templates[comp].format(
+                        frequency=frequency, realisation=realisation
+                    )
+    
                 hp_map = hp.read_map(filepath)
-                hp_map = HPTools.unit_convert(hp_map, frequency)
+                if comp != "cmb":                     
+                    hp_map = HPTools.unit_convert(hp_map, frequency)
+    
                 if comp == "noise":
-                    hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map, lmax=desired_lmax, nside=nside)
+                    hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
+                        hp_map, lmax=desired_lmax, nside=nside
+                    )
                 else:
-                    hp_map_reduced = HPTools.convolve_and_reduce(hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad)
+                    hp_map_reduced = HPTools.convolve_and_reduce(
+                        hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                    )
+
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
-            cfn+= hp_map_reduced
+            cfn += hp_map_reduced
         return cfn
 
-    def produce_and_save_cfns(self):
+    
+    def process_single_component(self, comp: str, frequency: str, realisation: int,
+                             save: bool = True, noise_realisation: int | None = None):
         """
-        Produce CFN maps across realisations and frequencies.
+        Process ONE component (e.g. 'cmb', 'sync', 'dust', 'tsz', or 'noise') at a given
+        frequency and realisation, applying unit conversion, beam smoothing (except noise),
+        and band-limit reduction. Returns the processed map (HEALPix 1D array).
+
+        Parameters:
+            comp (str): One of {'cmb','sync','dust','tsz','noise'}.
+            frequency (str): Frequency channel, e.g. '143'.
+            realisation (int): Processing realisation index (used for filenames & CMB).
+            save (bool): If True, writes to file_templates['processed_' + comp].
+            noise_realisation (int | None): If comp=='noise', which MC (0.299) to use.
+                                            If None, picks a random one (mirrors create_cfn).
+
+        Returns:
+            np.ndarray: Processed HEALPix map at target nside (from desired_lmax).
+        """
+        desired_lmax = self.desired_lmax
+        nside = HPTools.get_nside_from_lmax(desired_lmax)
+        standard_fwhm_rad = np.radians(5/60)
+
+        processed_key = "processed_" + comp
+        if processed_key not in self.file_templates:
+            raise KeyError(f"Missing file_templates['{processed_key}'] for component '{comp}'.")
+
+        out_path = self.file_templates[processed_key].format(
+            frequency=frequency, realisation=realisation, lmax=desired_lmax
+        )
+
+        # Fast path: reuse if exists and not overwriting
+        if (not self.overwrite) and os.path.exists(out_path):
+            return hp.read_map(out_path)
+
+        # Build input path
+        if comp == "noise":
+            if noise_realisation is None:
+                noise_realisation = np.random.randint(self.start_realisation, self.start_realisation + self.realisations)
+            in_path = self.file_templates["noise"].format(
+                frequency=frequency, realisation=noise_realisation
+            )
+        else:
+            in_path = self.file_templates[comp].format(
+                frequency=frequency, realisation=realisation
+            )
+
+        # Load, convert units, and process
+        hp_map = hp.read_map(in_path)
+        if comp != "cmb":  
+            hp_map = HPTools.unit_convert(hp_map, frequency)
+        
+        if comp == "noise":
+            hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
+                hp_map, lmax=desired_lmax, nside=nside
+            )
+        else:
+            hp_map_reduced = HPTools.convolve_and_reduce(
+                hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+            )
+            
+        if save:
+            save_map(out_path, hp_map_reduced, self.overwrite)
+    
+        return hp_map_reduced
+
+
+    def produce_and_save_all_maps(self):
+        """
+        Process and save individual components AND CFN maps 
+        across realisations and frequencies.
 
         Returns:
             None
@@ -143,7 +231,14 @@ class ProcessMaps():
         for realisation in range(self.realisations):
             realisation += self.start_realisation  # Adjust for starting realisation
             for frequency in self.frequencies:
-                cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                # Process & save each individual component
+                for comp in self.components:
+                    _ = self.process_single_component(comp, frequency, realisation, save=True)
+
+                # Then build and save the combined CFN map
+                cfn_output_path = self.file_templates["cfn"].format(
+                    frequency=frequency, realisation=realisation, lmax=desired_lmax
+                )
                 if os.path.exists(cfn_output_path) and self.overwrite == False:
                     print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                     continue
@@ -152,7 +247,8 @@ class ProcessMaps():
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
 
 
-    def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, lam: float = 2.0, method = "jax_cuda", visualise = False):
+    def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, 
+                                 lam: float = 2.0, method = "jax_cuda", visualise = False):
         """
         Create a wavelet transform of the specified component.
 
@@ -211,4 +307,3 @@ class ProcessMaps():
 # processor = ProcessMaps(components=["cmb", "sync"], wavelet_components=["cfn"], frequencies = ["030", "044"], realisations=0, desired_lmax=256, directory="/Scratch/matthew/data/", overwrite=False)
 # processor.produce_and_save_cfns()
 # processor.produce_and_save_wavelet_transforms(N_directions=1, lam=4.0, method="jax_cuda", visualise=False)
-
