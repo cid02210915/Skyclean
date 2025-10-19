@@ -14,7 +14,16 @@ SILC is designed to minimise variance. However, many foregrounds have higher-ord
 `skyclean` aims to apply an ML stage to improve the SILC-processed maps [MORE INFORMATION NEEDED ON SPECIFIC METHOD CHOSEN], with the novelty of performing this on the entire sphere. This requires the use of geometric deep learning, a field which extends the idea of translational equivariance in traditional Euclidean convolutional networks to general group manifolds (see [Cohen et al. (2015)](https://proceedings.mlr.press/v48/cohenc16.html)); in this case, aiming to capture rotational equivariance on the $S^2$ and $\text{SO}(3)$ manifolds. The `s2ai` package used in `skyclean.ml` employs so-called discrete-continuous convolutions on the sphere, which capture equivaraince whilst avoiding expensive harmonic space transforms (see [Ocampo et al. (2022)](https://arxiv.org/abs/2209.13603)). In `skyclean.ml`, an $S^2$ UNET architecture is employed to map to the ILC residual, with the goal being to make the ILC power spectrum closer to the true CMB power spectrum. 
 
 ## Usage ♦️
+Check the tutorials directory for a detailed walkthrough of the SILC and ML pipelines, with diagrams and examples. It is highly recommended to run the code on a GPU-based system, especially for larger multipole bandlimits.
 
+The SILC pipeline and ML training can be ran directly from the terminal, for example:
+
+```bash
+python3 -m skyclean.silc.pipeline --gpu 0 --components cmb sync dust noise --realisations 1 --start-realisation 0 --lmax 511 --lam 4.0 --frequencies 030 100 353 --directory data/
+
+python3 -m skyclean.ml.train   --gpu 1   --frequencies 030 100 353   --realisations 1000   --lmax 511   --lam 2.0   --batch-size 8   --epochs 100   --learning-rate 1e-3  --directory data/
+```
+See `train.py` and `pipeline.py` for more options.
 ## Directories 📞
 
 ``` bash
@@ -44,9 +53,16 @@ tests/        # pytests (WIP)
 ```
 
 ## Installation ⚙️
-
-## Tests 🚥
-
+`skyclean` is not currently available as a package, and must be ran directly from the repo. This requires you to setup an environment matching the `skyclean` dependencies. A working environment can be reproduced as follows. 
+First, git clone and enter this repo and run: 
+```bash
+conda env create -f environment.yml
+```
+This will install a conda environment `sc-gpu`. You will also need to install `s2ai`, a private repo, manually. First, request access from Jason McEwen: http://www.jasonmcewen.org/. Then, git clone and enter `s2ai` and run: 
+```bash
+pip install --no-deps .
+```
+in your `sc-gpu` environment. 
 
 
 

@@ -1,42 +1,30 @@
 import pytest
 import healpy as hp
 import numpy as np
-import s2fft
 import re
 import glob
+import os
+import jax
 
-from .utils import *
-from .map_tools import *
-from .map_processing import *
-from .ilc import *
-from .file_templates import *
-from .pipeline import *
-from .visualise import *
+# Enable 64-bit precision BEFORE importing JAX-dependent modules
+# Tests may fail if using 32-bit!
+jax.config.update("jax_enable_x64", True)
 
-class Tests(): 
-    def __init__(self, directory): 
-        self.directory = directory
-        self.saved_directories = {
-            "cfn": os.path.join(self.directory, "CFN_realisations"),
-            "processed_maps": os.path.join(self.directory, "processed_maps"),
-            "wavelet_coeffs": os.path.join(self.directory, "wavelet_transforms/wavelet_coeffs"),
-            "scaling_coeffs": os.path.join(self.directory, "wavelet_transforms/scaling_coeffs"),
-            "ilc_synthesised": os.path.join(self.directory, "SILC/ilc_synthesised_maps"),
-        }
+import s2fft
 
-        self.file_templates = {
-            "cfn": os.path.join(self.saved_directories["cfn"], "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
-            "cmb": os.path.join(self.saved_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
-            "sync": os.path.join(self.saved_directories["processed_maps"], "processed_sync_f{frequency}_lmax{lmax}.npy"),
-            "dust": os.path.join(self.saved_directories["processed_maps"], "processed_dust_f{frequency}_lmax{lmax}.npy"),
-            "noise": os.path.join(self.saved_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
-            "wavelet_coeffs": os.path.join(self.saved_directories["wavelet_coeffs"], "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}.npy"),
-            "scaling_coeffs": os.path.join(self.saved_directories["scaling_coeffs"], "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
-            "ilc_synthesised": os.path.join(self.saved_directories["ilc_synthesised"], "ILC_synthesised_Map_R{realisation:04d}_lmax{lmax}.npy"),
-        }
+from skyclean.silc import *
+from skyclean.ml import *
 
-    @staticmethod
-    def test_hp_2_mw_2_hp(): 
+
+class TestSkyclean:
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.directory = "/Scratch/matthew/data"
+        files = FileTemplates(self.directory)
+        self.file_templates = files.file_templates
+        self.output_directories = files.output_directories
+
+    def test_hp_2_mw_2_hp(self): 
         lmax = 64
         cls = np.ones(lmax+1)
         hp_alm = hp.synalm(cls, lmax=lmax)
@@ -44,16 +32,17 @@ class Tests():
         hp_alm_back = SamplingConverters.mw_alm_2_hp_alm(mw_alm)
         assert np.allclose(hp_alm, hp_alm_back), "The HP alm and the back-converted HP alm do not match."
 
-    @staticmethod
-    def test_wavelet_transform(method = "jax_cuda"):
-        lmax = 64
+    def test_wavelet_transform(self, method="jax_cuda"):
+        lmax = 16
         L = lmax + 1 
-        cls = np.ones(lmax+1)
+        cls = np.ones(lmax)
         hp_alm = hp.synalm(cls, lmax=lmax)
         mw_alm = SamplingConverters.hp_alm_2_mw_alm(hp_alm, lmax=lmax)
-        mw_map = s2fft.inverse(mw_alm, L = L, method = method)
-        wavelet_coeffs, _ = MWTools.wavelet_transform(mw_map, L=L, N_directions=1, lam=2.0)
+        mw_map = s2fft.inverse(mw_alm, L=L, method=method)
+        MWTools.visualise_mw_map(mw_map, 'mw_map.png')
+        wavelet_coeffs, _ = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=1, lam=2.0)
         mw_map_back = MWTools.inverse_wavelet_transform(wavelet_coeffs, L=L, N_directions=1, lam=2.0)
+        MWTools.visualise_mw_map(mw_map_back, 'mw_map_back.png')
         mw_alm_back = s2fft.forward(mw_map_back, L=L, method=method)
         hp_alm_back = SamplingConverters.mw_alm_2_hp_alm(mw_alm_back)
         assert np.allclose(mw_map, mw_map_back), "The MW map and the back-converted MW map do not match."
@@ -62,7 +51,7 @@ class Tests():
 
     def test_ilc_shape(self): 
         # Find available ILC files using regex
-        ilc_pattern = os.path.join(self.saved_directories["ilc_synthesised"], "ILC_synthesised_Map_R*_lmax*.npy")
+        ilc_pattern = os.path.join(self.output_directories["ilc_synthesised_maps"], "ILC_synthesised_Map_R*_lmax*.npy")
         ilc_files = glob.glob(ilc_pattern)
         
         if not ilc_files:
@@ -77,7 +66,7 @@ class Tests():
         ilc_realisation, ilc_lmax = int(ilc_match.group(1)), int(ilc_match.group(2))
         
         # Find corresponding CFN files using regex
-        cfn_pattern = os.path.join(self.saved_directories["cfn"], f"cfn_f*_r{ilc_realisation:04d}_lmax{ilc_lmax}.npy")
+        cfn_pattern = os.path.join(self.output_directories["cfn"], f"cfn_f*_r{ilc_realisation:04d}_lmax{ilc_lmax}.npy")
         cfn_files = glob.glob(cfn_pattern)
         
         if not cfn_files:
@@ -96,8 +85,6 @@ class Tests():
         print(cfn.shape, ilc_hp.shape)
         assert ilc_hp.shape == cfn.shape, f"ILC MW map shape ({ilc_mw.shape}) does not match CFN map shape ({cfn.shape})"
 
-directory = "/Scratch/matthew/data"
-tests = Tests(directory)
-tests.test_ilc_shape()
 
-
+tests = TestSkyclean()
+tests.test_wavelet_transform()

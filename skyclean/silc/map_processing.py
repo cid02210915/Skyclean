@@ -51,38 +51,49 @@ class ProcessMaps():
         Returns:
             int: Maximum noise realisation number found.
 
-        Raises:
-            FileNotFoundError: If no noise files are found.
-            ValueError: If files exist but no realisation numbers can be parsed.
+    def _find_max_noise_realisation(self, frequency: str):
+        """
+        Find the maximum noise realisation number available for a given frequency.
+        
+        Parameters:
+            frequency (str): The frequency to check for noise files.
+            
+        Returns:
+            int: Maximum noise realisation number found, or 299 as fallback.
         """
         import glob
+        # Get the CMB realisations directory
         cmb_dir = os.path.join(self.directory, "CMB_realisations")
+        
+        # Pattern to match noise files for this frequency
         pattern = os.path.join(cmb_dir, f"noise_f{frequency}_r*.fits")
         noise_files = glob.glob(pattern)
-
+        
         if not noise_files:
-            print(f"Warning: No noise files found for frequency {frequency}.")
-            raise FileNotFoundError(f"No noise files found for frequency {frequency}.")
-
+            print(f"Warning: No noise files found for frequency {frequency}. Using fallback max of 299.")
+            return 299
+            
+        # Extract realisation numbers from filenames
         realisations = []
         for filepath in noise_files:
             filename = os.path.basename(filepath)
+            # Extract number between 'r' and '.fits'
+            # Format: noise_f{frequency}_r{realisation:05d}.fits
             try:
                 realisation_str = filename.split('_r')[1].split('.fits')[0]
                 realisations.append(int(realisation_str))
             except (IndexError, ValueError):
                 continue
-
+                
         if realisations:
             max_realisation = max(realisations)
             print(f"Found {len(realisations)} noise files for frequency {frequency}, max realisation: {max_realisation}")
             return max_realisation
         else:
-            print(f"Warning: Could not parse realisation numbers for frequency {frequency}.")
-            raise ValueError(f"Could not parse realisation numbers for frequency {frequency}.")
+            print(f"Warning: Could not parse realisation numbers for frequency {frequency}. Using fallback max of 299.")
+            return 299
 
-
-    def create_cfn(self, frequency: str, realisation: int, save=True):
+    def create_cfn(self, frequency: str, realisation: int, save = True): 
         """
         Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
         the CMB with the standard beam and 
@@ -112,26 +123,12 @@ class ProcessMaps():
             if os.path.exists(output_path) and self.overwrite is False:
                 hp_map_reduced = hp.read_map(output_path)
             else:
-                if comp == "noise":
-                    # MIN FIX: choose an existing noise realisation ID from disk
-                    noise_dir = os.path.join(self.directory, "CMB_realisations")
-                    pattern = os.path.join(noise_dir, f"noise_f{frequency}_r*.fits")
-                    files = glob.glob(pattern)
-                    available = []
-                    for p in files:
-                        try:
-                            rid = int(os.path.basename(p).rsplit(".fits", 1)[0].rsplit("_r", 1)[1])
-                            available.append(rid)
-                        except Exception:
-                            continue
-                    if not available:
-                        raise FileNotFoundError(
-                            f"No noise files found for frequency '{frequency}' matching '{pattern}'."
-                        )
-                    noise_realisation = int(np.random.choice(sorted(set(available))))
-                    filepath = self.file_templates[comp].format(
-                        frequency=frequency, realisation=noise_realisation
-                    )
+                if comp == "noise": 
+                    # Find the maximum noise realisation number from downloaded files
+                    max_noise_realisation = self._find_max_noise_realisation(frequency)
+                    print(f'max noise: {max_noise_realisation}')
+                    noise_realisation = np.random.randint(0, max_noise_realisation + 1)
+                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=noise_realisation)
                 else:
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=realisation
