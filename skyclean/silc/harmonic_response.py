@@ -109,7 +109,6 @@ class HarmonicWindows:
                self.g.kappa(self.ells / (self.lam**j))
 
 
-
 def admissibility(Phi_l0, Psi_j_l0, ells, tol=1e-6):
     """
     Compute S_ell = (4π/(2ℓ+1)) ( |Φ_{ℓ0}|^2 + Σ_j |Ψ_{j;ℓ0}|^2 ) for ℓ=0..L-1
@@ -172,8 +171,9 @@ class HRFigures:
         plt.grid(True)
         plt.show()
 
+
     @staticmethod
-    def visualise_generating_functions(L: int, lam: float = 3.0, J0: int = 0):
+    def visualise_generating_functions(L: int, lam: float = 2.0, J0: int = 0):
         ells = np.arange(L)
         hw   = HarmonicWindows(L=L, lam=lam, J0=J0)
 
@@ -194,27 +194,55 @@ class HRFigures:
         plt.show()
 
 
+    # without factors of sqrt((2ℓ+1)/(4π))
+    @staticmethod
+    def visualise_harmonic_generators(L: int, lam: float = 2.0, J0: int = 0):
+        ells = np.arange(L)
+        hw   = HarmonicWindows(L=L, lam=lam, J0=J0)
+        sph  = np.sqrt((2.0*ells + 1.0) / (4.0*np.pi)) 
+
+        # scaling η_λ 
+        plt.plot(ells, sph * hw.g.eta(ells / (lam**J0)), '--', label='Scal.')
+
+        # wavelet κ_λ 
+        for j in range(J0, hw.J + 1):
+            plt.plot(ells, sph * hw.g.kappa(ells / (lam**j)), label=f'j={j}')
+
+        plt.xlabel('ℓ'); plt.ylabel('Generating response')
+        plt.grid(ls=':'); plt.legend()
+        plt.title(f'Harmonic Response (λ={lam}, J0={J0}, L={L})')
+        plt.show()
+
+
 def build_axisym_filter_bank(L, lam, J0=0):
     """
-    Build axisymmetric filter bank in the exact format required by s2wav.analysis,
-    using HarmonicWindows (scale-discretised wavelets).
+    Format to match `filters.filters_directional_vectorised(L, N_directions, lam)`:
+      - psi: (J, L, 2L-1)   complex, only m=0 (col L-1) nonzero
+      - phi: (L,)           complex, radial (m=0 column only)
+    Returns [psi, phi].
     """
-    hw = HarmonicWindows(L=L, lam=lam, J0=J0)
-    J = hw.J                          # highest scale index
-    n_scales = J - J0 + 1             # number of wavelet scales
+    # --- scale count: J = ceil(log_lam(L)) so that L=129, lam=2 -> J=8 -> J-J0+1 = 9 bands
+    J_hi = int(np.ceil(np.log(L) / np.log(lam)))
+    J = max(1, J_hi - J0 + 1)  # number of wavelet bands
 
-    # Wavelet filters: shape (n_scales, L, 2L-1)
-    wavelets = np.zeros((n_scales, L, 2*L - 1))
-    mid_m = L - 1                     # m = 0 position
+    M   = 2*L - 1
+    mid = L - 1                # m = 0 column
 
-    # Fill each scale's Ψ_{j,ℓ0}
-    for j in range(n_scales):
-        psi_l = hw.wavelet(J0 + j)    # shape (L,)
-        wavelets[j, :, mid_m] = psi_l # put only at m=0
+    # Wavelets Ψ^{(j)}_{ℓ0} placed at m=0
+    hw  = HarmonicWindows(L=L, lam=lam, J0=J0)
+    psi = np.zeros((J, L, M), dtype=np.complex64)
+    for j in range(J):
+        idx   = J0 + j
+        psi_l = hw.wavelet(idx).astype(np.float64)          # (L,)
+        psi[j, :, mid] = psi_l.astype(np.complex64)
 
-    # Scaling filter: shape (L, 2L-1)
-    scaling = np.zeros((L, 2*L - 1))
-    scaling[:, mid_m] = hw.scaling()
+    # Scaling Φ_{ℓ0}: return *radial vector* (L,), match the input format of s2wav.analysis()
+    phi_l = hw.scaling().astype(np.float64).astype(np.complex64)   # (L,)
 
-    # s2wav expects [wavelet_filters, scaling_filter]
-    return [wavelets, scaling]
+    # Optional: remove monopole & dipole
+    lmin = min(2, L)
+    if lmin > 0:
+        psi[:, :lmin, :] = 0.0
+        phi_l[:lmin]     = 0.0
+
+    return [psi, phi_l]
