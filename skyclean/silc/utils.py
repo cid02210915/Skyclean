@@ -84,3 +84,32 @@ def save_array(task):
 def _norm(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
     return v if n == 0 else (v / n)
+
+@staticmethod
+def top_scale_index(L, lam):
+    """
+    Compute J = floor(log_{lam}(L-1)).
+    """
+    L = int(L); lam = float(lam)
+    return int(np.floor(np.log(L - 1) / np.log(lam)))
+
+@staticmethod
+def admissibility(Phi_l0, Psi_j_l0, ells, tol=1e-6):
+    """
+    Compute S_ell = (4π/(2ℓ+1)) ( |Φ_{ℓ0}|^2 + Σ_j |Ψ_{j;ℓ0}|^2 ) for ℓ=0..L-1
+    and check admissibility: |S_ell - 1| < tol for all ℓ ≥ 1.
+
+    Returns
+    -------
+    S : np.ndarray, shape (L,)
+        The admissibility sum over ℓ.
+    ok : bool
+        True if admissibility holds (excluding ℓ=0), else False.
+    """
+    S = np.abs(Phi_l0)**2
+    for W in Psi_j_l0.values():
+        S = S + np.abs(W)**2
+    S = (4.0*np.pi) / (2.0*ells + 1.0) * S
+
+    ok = np.all(np.abs(S[1:] - 1.0) < tol)
+    return S, bool(ok)

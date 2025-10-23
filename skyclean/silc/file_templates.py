@@ -12,6 +12,7 @@ class FileTemplates():
             # wavelet transforms
             "wavelet_coeffs": os.path.join(directory, "wavelet_transforms/wavelet_coeffs"),
             "scaling_coeffs": os.path.join(directory, "wavelet_transforms/scaling_coeffs"),
+            "f_scal": os.path.join(directory, "SILC/f_scal"),
             # ilc maps
             "doubled_maps": os.path.join(directory, "SILC/doubled_maps"),
             "covariance_matrix": os.path.join(directory, "SILC/covariance_matrix"),
@@ -38,36 +39,97 @@ class FileTemplates():
         }
 
         self.file_templates = {
-            # downloaded maps
-            "cmb": os.path.join(self.output_directories["cmb_realisations"], "cmb_r{realisation:04d}.fits"),
-            "sync": os.path.join(self.output_directories["cmb_realisations"], "sync_f{frequency}.fits"),
-            "dust": os.path.join(self.output_directories["cmb_realisations"], "dust_f{frequency}.fits"),
-            "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
-            # processed maps
-            "processed_cmb": os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
-            "processed_sync": os.path.join(self.output_directories["processed_maps"], "processed_sync_f{frequency}_lmax{lmax}.npy"),
-            "processed_dust": os.path.join(self.output_directories["processed_maps"], "processed_dust_f{frequency}_lmax{lmax}.npy"),
-            "processed_noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
-            "cfn": os.path.join(self.output_directories["cfn"], "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
-            # wavelet transforms
-            "wavelet_coeffs": os.path.join(self.output_directories["wavelet_coeffs"], "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"),
-            "scaling_coeffs": os.path.join(self.output_directories["scaling_coeffs"], "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"),
-            # ilc intermediates and maps
-            'doubled_maps': os.path.join(self.output_directories["doubled_maps"], "doubled_maps_f{frequency}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'covariance_matrices': os.path.join(self.output_directories["covariance_matrix"],"cov_MW_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'weight_vector_matrices': os.path.join(self.output_directories["weight_vector_data"], "weight_vector_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'ilc_doubled_maps': os.path.join(self.output_directories["ilc_doubled_wavelet_maps"], "ilc_doubled_Map_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'ilc_trimmed_maps': os.path.join(self.output_directories["ilc_trimmed_maps"], "ilc_trimmed_wav_Map_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'ilc_synth': os.path.join(self.output_directories["ilc_synthesised_maps"], "ilc_synthesised_map_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'ilc_improved': os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            # spectrum templates
-            'ilc_synth_spectrum': os.path.join(self.output_directories["ilc_synthesised_maps"], "ilc_synth_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            'ilc_improved_spectrum': os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            # ML
-            "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            "ilc_residual": os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            "ilc_mwss": os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-            "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}.npy")
+        # ---------------- downloaded maps ----------------
+        "cmb":   os.path.join(self.output_directories["cmb_realisations"], "cmb_r{realisation:04d}.fits"),
+        "sync":  os.path.join(self.output_directories["cmb_realisations"], "sync_f{frequency}.fits"),
+        "dust":  os.path.join(self.output_directories["cmb_realisations"], "dust_f{frequency}.fits"),
+        "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
+        "tsz":   os.path.join(self.output_directories["cmb_realisations"], "tsz_f{frequency}.fits"),
+
+        # ---------------- processed maps ----------------
+        "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
+        "processed_sync":  os.path.join(self.output_directories["processed_maps"], "processed_sync_f{frequency}_lmax{lmax}.npy"),
+        "processed_dust":  os.path.join(self.output_directories["processed_maps"], "processed_dust_f{frequency}_lmax{lmax}.npy"),
+        "processed_noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
+        "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
+        "cfn":             os.path.join(self.output_directories["cfn"],           "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
+
+        # ---------------- wavelet transforms (keep existing placeholders) ----------------
+        # NOTE: loader/saver use {comp} and British {realisation}; keep these unchanged.
+        "wavelet_coeffs": os.path.join(
+            self.output_directories["wavelet_coeffs"],
+            "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        # Alias for older code that expects 'wavelet_c_j'
+        "wavelet_c_j": os.path.join(
+            self.output_directories["wavelet_coeffs"],
+            "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        "scaling_coeffs": os.path.join(
+            self.output_directories["scaling_coeffs"],
+            "{comp}_scaling_f{frequency}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        "f_scal": os.path.join(
+            self.output_directories["f_scal"],
+            "f_scal_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+),
+
+
+        # ---------------- ILC intermediates & outputs (matches ILC_wav_coeff_maps_MP) ----------------
+        # IMPORTANT: these use {component}, {extract_comp}, and US spelling {realisation}
+        # Per-frequency, per-scale doubled wavelet maps (still per input component)
+        "doubled_maps": os.path.join(
+            self.output_directories["doubled_maps"],
+            "doubled_{component}_f{frequency}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Covariance matrices per scale over the whole band-set (frequencies join tag, e.g. 30_44_70_...)
+        "covariance_matrices": os.path.join(
+            self.output_directories["covariance_matrix"],
+            "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Weights per scale; {type} is "weight_vector" (or "cilc_cmb" for constrained case)
+        "weight_vector_matrices": os.path.join(
+            self.output_directories["weight_vector_data"],
+            "{component}_{type}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
+        "ilc_maps": os.path.join(
+            self.output_directories["ilc_doubled_wavelet_maps"],
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Legacy alias (same path)
+        "ilc_doubled_maps": os.path.join(
+            self.output_directories["ilc_doubled_wavelet_maps"],
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        
+        # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
+        "trimmed_maps": os.path.join(
+            self.output_directories["ilc_trimmed_maps"],
+            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+        
+
+        # Final synthesized map — records target (extract_comp), source (component), and band-set
+        "ilc_synth": os.path.join(
+            self.output_directories["ilc_synthesised_maps"],
+            "{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # Optional: power spectrum tagged likewise
+        "ilc_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_maps"],
+            "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+        ),
+
+        # ---------------- ML (left unchanged) ----------------
+        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         }
 
     

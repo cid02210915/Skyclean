@@ -1,3 +1,6 @@
+from jax import config as jax_config
+jax_config.update("jax_enable_x64", True)
+
 import os
 import jax
 import jax.numpy as jnp
@@ -9,8 +12,6 @@ import healpy as hp
 from s2wav import filters
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from jax import config
-config.update("jax_enable_x64", True)
 from functools import lru_cache
 import s2wav.filters as filters
 
@@ -19,7 +20,7 @@ from .utils import *
 from .file_templates import FileTemplates
 from .utils import normalize_targets   
 from .utils import save_array
-from skyclean.silc.mixing_matrix_constraint import ILCConstraints 
+from .mixing_matrix_constraint import ILCConstraints 
 import concurrent.futures
 import time
 
@@ -38,7 +39,7 @@ class SILCTools():
         Returns:
             mw_map_doubled: The MW pixel map with increased resolution.
         """
-        # use jax/numpy
+        # use jax/numpy 
         #print('Single_Map_doubleworker', flush = True)
 
         alm = s2fft.forward(mw_map, L=mw_map.shape[0], method = method, spmd = False, reality = True)
@@ -280,7 +281,7 @@ class SILCTools():
         #print("compute_weights_generalised", flush=True)
         """
         Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
-    
+
         Args:
             R (np.ndarray): (Nf,Nf) or (H,W,Nf,Nf)
             scale (int): Wavelet scale index.
@@ -292,12 +293,12 @@ class SILCTools():
             F (np.ndarray): Spectral response, shape (Nf, Nc) when constraint=True.
             f (np.ndarray): Constraint vector, shape (Nc,).
             reference_vectors (dict): Dict of named reference spectra (for auto-f).
-    
+
         Returns:
             inverses, weight_vectors, singular_matrices_location, extract_comp
         """
         #print('R:', R.shape)
-        
+
         # --- shape handling --- what?
         # Swap the axes to get R_Pix
         R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3) #(pix,pix,freq,freq)
@@ -312,7 +313,7 @@ class SILCTools():
         identity_vector = np.ones(subdim2, dtype=float)
         singular_matrices_location = []
         singular_matrices = []
-        
+
         N_freq = subdim2 
 
         # --- branch config ---
@@ -323,7 +324,7 @@ class SILCTools():
             Nf_F, N_comp = F.shape
             if Nf_F != N_freq:
                 raise ValueError(f"F has {Nf_F} rows but R has {N_freq} channels")
-    
+
             # Automatically set f from extract_comp if given
             if f is None and extract_comp is not None:
                 f = ILCConstraints.find_f_from_extract_comp(F, extract_comp, reference_vectors)
@@ -334,10 +335,11 @@ class SILCTools():
                 raise ValueError(f"Constraint vector f must have shape ({N_comp},)")
         else:
             # Unconstrained ILC uses the all-ones vector; no F/extract_comp needed
-            identity_vector = np.ones(N_freq, dtype=float)   
-    
+            identity_vector = np.ones(N_freq, dtype=float)
+            print (identity_vector)   
+
             # ----------------------------------------------------------
-    
+
         # Common filename fields (provide both 'component' and 'comp'; pass ints so {:04d} works)
         name = f"cilc_{extract_comp}" if constraint else "weight_vector"
         fmt = dict(
@@ -350,10 +352,14 @@ class SILCTools():
             lmax=int(L_max-1),
             lam=str(lam),
         )
-    
+
+        # Track constraint singularities (mirrors R singular tracking)
+        singular_constraints_location = []
+        singular_constraints = []
+
         for i in range(dim1):
             for j in range(dim2):
-    
+
                 det = np.linalg.det(R_Pix[i, j])
                 if det == 0:
                     zeros = np.zeros((subdim1))
@@ -369,18 +375,32 @@ class SILCTools():
                         # Step 1: Fᵗ R⁻¹
                         FT_Rinv = np.dot(F.T, R_inv)                 # (Nc, Nf)
                         #print ('FT_Rinv:', FT_Rinv.shape)
+
                         # Step 2: Fᵗ R⁻¹ F
                         constraint_matrix = np.dot(FT_Rinv, F)       # (Nc, Nc)
                         #print ('constraint_matrix:', constraint_matrix.shape)
+
+                        # singularity check for (Fᵗ R⁻¹ F) --- mirrors your R check
+                        G_det = np.linalg.det(constraint_matrix)
+                        if G_det == 0:
+                            zeros = np.zeros((subdim1))
+                            singular_constraints_location.append((i, j))
+                            singular_constraints.append(constraint_matrix)
+                            weight_vectors[i, j] = zeros
+                            continue  # skip the rest for this pixel
+
                         # Step 3: (Fᵗ R⁻¹ F)⁻¹
                         constraint_matrix_inv = np.linalg.inv(constraint_matrix)
                         #print ('constraint_matrix_inv:', constraint_matrix_inv.shape)
+
                         # Step 4: build temp = (Fᵗ R⁻¹ F)⁻¹ f
                         temp = np.dot(constraint_matrix_inv, f)      # (Nc,)
                         #print ('temp:', temp.shape)
+
                         # Step 5: F temp
                         F_temp = np.dot(F, temp)                     # (Nf,)
                         #print ('F_temp:', F_temp.shape)
+
                         # Step 6: w = R⁻¹ F (Fᵗ R⁻¹ F)⁻¹ f
                         w = np.dot(R_inv, F_temp)                    # (Nf,)
                         w = np.asarray(w).ravel()
@@ -402,6 +422,9 @@ class SILCTools():
 
         if len(singular_matrices_location) > 0:
             print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
+        if len(singular_constraints_location) > 0:
+            print("Discovered ", len(singular_constraints_location),
+              "constraint singularities (F^T R^{-1} F) at scale", scale, "realisation", realisation)
 
         # save final weight vector matrix
         np.save(weight_vector_matrix_template.format(**fmt), weight_vectors)
@@ -616,7 +639,8 @@ class SILCTools():
 
         # 3) build filters and synthesise
         L = int(lmax) + 1
-
+        
+        print([w.shape for w in trimmed_maps])
         MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=int(1), lam=float(2.0))
 
         # 4) Save

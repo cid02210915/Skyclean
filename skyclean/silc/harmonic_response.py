@@ -194,24 +194,25 @@ class HRFigures:
         plt.show()
 
 
-    # without factors of sqrt((2ℓ+1)/(4π))
     @staticmethod
     def visualise_harmonic_generators(L: int, lam: float = 2.0, J0: int = 0):
-        ells = np.arange(L)
         hw   = HarmonicWindows(L=L, lam=lam, J0=J0)
-        sph  = np.sqrt((2.0*ells + 1.0) / (4.0*np.pi)) 
+        ells = hw.ells  # 0..L-1
 
-        # scaling η_λ 
-        plt.plot(ells, sph * hw.g.eta(ells / (lam**J0)), '--', label='Scal.')
+        # scaling Φ_{ℓ0}
+        plt.plot(ells, hw.scaling(), '--', label='Scal.')
 
-        # wavelet κ_λ 
+        # wavelets Ψ_{j;ℓ0}
         for j in range(J0, hw.J + 1):
-            plt.plot(ells, sph * hw.g.kappa(ells / (lam**j)), label=f'j={j}')
+            plt.plot(ells, hw.wavelet(j), label=f'j={j}')
 
-        plt.xlabel('ℓ'); plt.ylabel('Generating response')
+        plt.xlabel('ℓ'); plt.ylabel('Response (with √((2ℓ+1)/(4π)))')
         plt.grid(ls=':'); plt.legend()
         plt.title(f'Harmonic Response (λ={lam}, J0={J0}, L={L})')
+        plt.xlim(0, 10)   
+        plt.ylim(0, 1)  
         plt.show()
+
 
 
 def build_axisym_filter_bank(L, lam, J0=0):

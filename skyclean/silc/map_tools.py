@@ -9,6 +9,8 @@ import s2fft
 import s2wav
 import s2wav.filters as filters
 from .utils import *
+from .harmonic_response import build_axisym_filter_bank
+
 
 class HPTools():
     """Tools to process healpy/MW maps"""
@@ -144,7 +146,7 @@ class HPTools():
 
 class MWTools():
     """Tools to process maps in MW (McEwen & Wiaux) sampling"""
-
+    ''' 
     @staticmethod
     def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0,):
         """
@@ -159,23 +161,56 @@ class MWTools():
         Returns:
             tuple: A tuple containing the wavelet coefficients and scaling coefficients.
         """
+
         # default JAX path
         j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-    
+        print ('shape:', j_filter[0].shape) 
+        print ('shape:', j_filter[1].shape) 
+        #print ('shape:', j_filter[2].shape) 
+        
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
             mw_map,
             N       = N_directions,
             L       = L,
-            lam     = lam,
+            lam     = lam, 
             filters = j_filter,
-            reality = False,
+            reality = True,
         )
-        print(wavelet_coeffs[0].shape)
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
-        #wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
-        return wavelet_coeffs, scaling_coeffs
+        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        return wavelet_coeffs, scaling_coeffs  
+    '''   
 
     
+    @staticmethod
+    def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
+        """
+        Performs a wavelet transform on MW map using scale-discretised filters
+        for axisym (N_directions=1), otherwise the library's directional filters.
+        """
+        # --- minimal fix: choose filters based on N_directions ---
+        if N_directions == 1:
+            j_filter = build_axisym_filter_bank(L, lam) 
+            print ('shape:', j_filter[0].shape) 
+            print ('shape:', j_filter[1].shape) 
+        else:
+            j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+
+        wavelet_coeffs, scaling_coeffs = s2wav.analysis(
+            mw_map,
+            N       = N_directions,
+            L       = L,
+            lam     = lam, 
+            filters = j_filter,
+            reality = True,
+        )
+
+        # output format
+        scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)
+        wavelet_coeffs.insert(0, scaling_coeffs)
+        return wavelet_coeffs, scaling_coeffs
+    
+
     @staticmethod
     def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
         """
@@ -202,11 +237,12 @@ class MWTools():
         )
         scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
-        #wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
-    
+
+
     @staticmethod
-    def inverse_wavelet_transform(wavelet_coeffs: list, scaling_coeffs, L: int, N_directions: int = 1, lam: float = 2.0,):
+    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0,):
         """
         Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
 
@@ -219,21 +255,24 @@ class MWTools():
         Returns:
             jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
         """
-        j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+        j_filter = build_axisym_filter_bank(L, lam)
+        #print(wavelet_coeffs[0].shape)
         f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
         wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
-        print(wavelet_coeffs[0].shape)
-        print(f_scal.shape)
+        #print(wavelet_coeffs[0].shape)
+    
         mw_map = s2wav.synthesis(
             wavelet_coeffs,
-            L       = L,
             f_scal  = f_scal,
+            L       = L,
             lam     = lam,
             filters = j_filter,
             reality = False,
             N = N_directions
         )
         return mw_map
+
 
     @staticmethod
     def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, comp: str, frequency: str, realisation: int, lmax: int, lam: float, wav_template: str, scal_template: str):
@@ -274,6 +313,7 @@ class MWTools():
                 np_wav,
             )
 
+
     @staticmethod
     def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
         """
@@ -292,6 +332,7 @@ class MWTools():
         wavelet_coeffs = [np.real(np.load(wav_template.format(frequency=frequency, scale=scale, realisation=realisation))) for scale in range(num_wavelets)]
         scaling_coeffs = np.real(np.load(scal_template.format(frequency=frequency, realisation=realisation)))
         return wavelet_coeffs, scaling_coeffs
+    
     
     @staticmethod
     def visualise_mw_map(mw_map: np.ndarray, title: str = None, coord: list = ["G"], unit: str = r"K", directional: bool = False, method = "jax_cuda",):
@@ -350,8 +391,11 @@ class MWTools():
         """
         j_filter = filters.filters_directional_vectorised(L=L, N=1, lam=lam)[0]
         shape = j_filter.shape
+        print ('shape:', j_filter[0].shape) 
+        print ('shape:', j_filter[8].shape) 
         l_list = np.arange(L)
-        middle_m = shape[2]//2 # m = 0 along which the axisymmetric wavelet is defined
+        middle_m = L-1 # m = 0 along which the axisymmetric wavelet is defined
+        
         for i in range(shape[0]):
             plt.plot(l_list, np.real(j_filter[i][:,middle_m]), label = f"scale {i}")
             plt.xlabel("l", fontsize=16)
@@ -464,7 +508,8 @@ class SamplingConverters():
         hp_map = hp.alm2map(hp_alm, nside=HPTools.get_nside_from_lmax(lmax))
         return hp_map
     
-    def mw_map_2_mwss_map(mw_map, L: int): 
+    
+    def mw_map_2_mwss_map(mw_map, L: int, ): 
         """
         Soft wrapper to convert a MW map to a MWSS map.
 
@@ -476,18 +521,20 @@ class SamplingConverters():
             mwss_map (numpy.ndarray): The converted MWSS map.
         """
         return s2fft.utils.resampling_jax.mw_to_mwss(mw_map, L=L)
+    
 
     def mwss_map_2_mw_map(mwss_map, L: int):
-        """
-        Convert a MWSS map to a MW map. No s2fft function exists for this,
-        but the process is simply performing a harmonic transform.
-
-        Parameters:
-            mwss_map (numpy.ndarray): The input MWSS map in spherical harmonics representation.
-            L (int): The maximum multipole moment for the spherical harmonics.
-
-        Returns:
-            mw_map (numpy.ndarray): The converted MW map.
-        """
-        mw_alm = s2fft.forward(mwss_map, L=L, sampling = "mwss", reality = True)
-        return s2fft.inverse(mw_alm, L=L, sampling = "mw", reality = True)
+            """
+            Convert a MWSS map to a MW map. No s2fft function exists for this,
+            but the process is simply performing a harmonic transform.
+    
+            Parameters:
+                mwss_map (numpy.ndarray): The input MWSS map in spherical harmonics representation.
+                L (int): The maximum multipole moment for the spherical harmonics.
+    
+            Returns:
+                mw_map (numpy.ndarray): The converted MW map.
+            """
+            mw_alm = s2fft.forward(mwss_map, L=L, sampling = "mwss", reality = True)
+            return s2fft.inverse(mw_alm, L=L, sampling = "mw", reality = True)
+    
