@@ -25,7 +25,7 @@ class MapAlmConverter:
         lam: Optional[Union[int, float, str]] = None,
     ) -> Dict[str, Any]:
 
-        # --- NEW: hard guard the source; do NOT override it ---
+        # --- hard guard the source; do NOT override it ---
         if source not in ("downloaded", "processed", "ilc_synth"):
             raise ValueError(f"source must be 'downloaded', 'processed', or 'ilc_synth', got {source!r}")
 
@@ -134,7 +134,6 @@ class MapAlmConverter:
                 lam=lam_str,
             )
             return fmt.format(**kw)
-
         raise ValueError("source must be 'downloaded', 'processed', or 'ilc_synth'")
     
     def _load_map(self, path: str, field: int) -> np.ndarray:
@@ -187,7 +186,7 @@ class MapAlmConverter:
                 return "healpix", {"nside": int(nside)}
             except Exception:
                 pass
-        # MW: 2D with (L, 2L-1) only (by your spec)
+        # MW: 2D with (L, 2L-1) only 
         if arr.ndim == 2:
             n0, n1 = arr.shape
             if n1 == 2 * n0 - 1:
@@ -224,7 +223,7 @@ class PowerSpectrumTT:
         cl = hp.alm2cl(alm_hp)
         return np.arange(cl.size), cl
     
-    
+
     @staticmethod
     def cl_to_Dl(ell: np.ndarray, cl: np.ndarray, input_unit: str = "K") -> np.ndarray:
         """
@@ -279,14 +278,53 @@ class PowerSpectrumTT:
         plt.tight_layout()
         if save_path: plt.savefig(save_path, dpi=200)
         if show: plt.show()
-    
+        
+
     @staticmethod
     def load_planck_Dl(directory: str):
         """Load Planck 2018 TT theory from <directory>/cmb_spectrum.txt (cols: ell, Dl[µK^2], ...)."""
-        path = os.path.join(directory, "cmb_spectrum.txt")
+        path = os.path.join(directory, "cmb_spectrum_theory.txt")
         if not os.path.exists(path):
             return None
         data = np.loadtxt(path)
         ell = data[:, 0].astype(int)
         Dl  = data[:, 1].astype(np.float64)   # already µK^2
         return ell, Dl
+
+
+class PowerSpectrumCrossTT:
+    """
+    Minimal cross-spectrum utilities (TT):
+
+    - from_mw_alms(ax, ay)        : MW a_{ℓm} (L, 2L-1) -> (ℓ, C_ℓ^{XY})
+    - from_healpy_alms(ax, ay)    : healpy-packed alms   -> (ℓ, C_ℓ^{XY})
+    - cl_to_Dl(ell, cl, unit)     : C_ℓ -> D_ℓ = ℓ(ℓ+1)C_ℓ/(2π), in µK² if unit="K"
+    """
+
+    @staticmethod
+    def from_mw_alm(alm_X: np.ndarray, alm_Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Cross C_ell from MW layout alms shaped (L, 2L-1); columns m = -(L-1)..(L-1)."""
+        aX = np.asarray(alm_X); aY = np.asarray(alm_Y)
+        if aX.shape != aY.shape or aX.ndim != 2 or aX.shape[1] != 2*aX.shape[0]-1:
+            raise ValueError("Expected matching MW alms of shape (L, 2L-1).")
+        L = aX.shape[0]
+        m0 = L - 1
+        Cl = np.empty(L, dtype=np.float64)
+        for l in range(L):
+            sl = slice(m0 - l, m0 + l + 1)  # m = -l..+l
+            Cl[l] = np.real(np.dot(aX[l, sl], np.conj(aY[l, sl]))) / (2*l + 1)
+        return np.arange(L, dtype=int), Cl
+
+    @staticmethod
+    def from_healpy_alm(alm_X: np.ndarray, alm_Y: np.ndarray, lmax: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Cross C_ell from healpy-packed alms; lmax inferred if not provided."""
+        if lmax is None:
+            lmax = hp.Alm.getlmax(np.asarray(alm_X).size)
+        Cl = hp.alm2cl(alm_X, alm_Y, lmax=int(lmax))
+        return np.arange(Cl.size, dtype=int), Cl
+
+    @staticmethod
+    def cl_to_Dl(ell: np.ndarray, cl: np.ndarray, input_unit: str = "K") -> np.ndarray:
+        """D_ell = ell(ell+1) C_ell / (2π); returns µK² if input_unit=='K'."""
+        Dl = ell * (ell + 1) * np.asarray(cl) / (2.0 * np.pi)
+        return Dl * (1e12 if str(input_unit).lower() in ("k", "kelvin") else 1.0)
