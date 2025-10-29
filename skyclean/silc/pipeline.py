@@ -10,7 +10,7 @@ from .download import DownloadData
 from .map_processing import ProcessMaps
 from .file_templates import FileTemplates
 from .ilc import ProduceSILC  
-from .power_spec import MapAlmConverter, PowerSpectrumTT
+from .power_spec import MapAlmConverter, PowerSpectrumTT, PowerSpectrumCrossTT
 from .mixing_matrix_constraint import SpectralVector
 
 
@@ -198,7 +198,7 @@ class Pipeline:
                 kwargs = {k: v for k, v in kwargs.items()
                           if k in ("base_dir", "file_templates", "realization", "mask_path")}
 
-            # desired column order comes from your input component list; ignore extras like 'noise'
+            # desired column order comes from input component list; ignore extras like 'noise'
             components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync")]
 
             # build F with explicit column order (no normalization)
@@ -238,7 +238,7 @@ class Pipeline:
         save_path: str | None = None,
         *,
         source: str = "auto",                  # "auto" | "ilc_synth" | "processed" | "downloaded"
-        component: str | None = None,          # map component ("cmb","sync", "dust","noise","tsz") or "cfn" for ilc_synth {component}
+        component: str | None = None,          # map component ("cmb","sync","dust","noise","tsz") or "cfn"
         extract_comp: str | None = None,       # ilc_synth target (e.g. "cmb")
         frequencies: list[str] | None = None,  # ilc_synth band-set
         frequency: str | int | None = None,    # single band for processed/downloaded
@@ -251,21 +251,34 @@ class Pipeline:
         Compute TT C_ell (and plot D_ell). Returns (ell, cl).
         unit: "K" (input C_ell in K^2) or "uK"/"µK" (input already µK^2). Plot is in µK^2.
         """
-       
+    
         # defaults from pipeline
         r     = self.start_realisation if realisation is None else int(realisation)
         lmax_ = self.lmax if lmax is None else int(lmax)
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         freqs = self.frequencies if frequencies is None else list(frequencies)
-
-        # choose source automatically (preserves your old behavior)
-        if source == "auto":
-            source = "ilc_synth" if self.ilc_components else "downloaded"
-
-        # templates + converter
+    
+        # --- templates + processed-CFN detection ---
         ft = FileTemplates(self.directory).file_templates
-        conv = MapAlmConverter(ft)
-
+        has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
+    
+        # --- choose source automatically (prefer processed CFN if present) ---
+        if source == "auto":
+            if has_processed_cfn:
+                source = "processed"
+            elif self.ilc_components:
+                source = "ilc_synth"
+            else:
+                source = "downloaded"
+    
+        # --- make a local copy of templates and alias processed_cfn -> cfn if needed ---
+        ft_local = dict(ft)
+        if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
+            # allow processed/cfn loads even if only "cfn" key exists
+            ft_local["processed_cfn"] = ft_local["cfn"]
+    
+        conv = MapAlmConverter(ft_local)
+    
         # ---- load selected map ----
         if source == "ilc_synth":
             comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")  # template {component}
@@ -276,15 +289,20 @@ class Pipeline:
                 realisation=r, lmax=lmax_, lam=lam_,
             )
             src = "ilc_synth"; label = f"ILC-synth ({tgt})"
-
+    
         elif source == "processed":
-            comp_use = component or "cmb"
+            # default to CFN if available; otherwise fall back to 'cmb'
+            if component is not None:
+                comp_use = component
+            else:
+                comp_use = "cfn" if has_processed_cfn else "cmb"
+    
             out = conv.to_alm(
                 component=comp_use, source="processed",
                 frequency=frequency, realisation=r, lmax=lmax_,
             )
             src = "processed"; label = f"Processed {comp_use}"
-
+    
         elif source == "downloaded":
             comp_use = component or "cmb"
             out = conv.to_alm(
@@ -292,31 +310,133 @@ class Pipeline:
                 frequency=frequency, realisation=r, lmax=lmax_, field=field,
             )
             src = "downloaded"; label = f"Downloaded {comp_use}"
-
+    
         else:
             raise ValueError("source must be one of: 'auto', 'ilc_synth', 'processed', 'downloaded'.")
-
+    
         # ---- alm -> C_ell ----
         if out["format"] == "mw":
             ell, cl = PowerSpectrumTT.from_mw_alm(np.asarray(out["alm"]))
         else:
             ell, cl = PowerSpectrumTT.from_healpy_alm(out["alm"])
-
+    
         # ---- C_ell -> D_ell (plot in µK^2) ----
         Dl = PowerSpectrumTT.cl_to_Dl(ell, cl, input_unit=unit)  # "K" or "uK"
-
+    
         # pick a simple style by source (works with tuple-plotter or dict-plotter)
         style = {"ilc_synth": "-", "processed": "--", "downloaded": "-."}.get(src, "-")
-
+    
         try:
-            # if your plotter accepts dicts
+            # dict path
             PowerSpectrumTT.plot_Dl_series({"ell": ell, "Dl": Dl, "label": label, "source": src},
                                            save_path=save_path, show=True)
         except Exception:
-            # fallback if your plotter only accepts tuples
+            # tuple fallback
             PowerSpectrumTT.plot_Dl_series([(ell, Dl, label, style)], save_path=save_path, show=True)
-
+    
         return ell, cl
+    
+    # --- step_cross_power_spec ---
+    def step_cross_power_spec(
+        self,
+        unit: str = "K",
+        save_path: str | None = None,
+        *,
+        # X side
+        source_X: str = "auto",
+        component_X: str | None = None,
+        extract_comp_X: str | None = None,
+        frequencies_X: list[str] | None = None,
+        frequency_X: str | int | None = None,
+        # Y side
+        source_Y: str = "auto",
+        component_Y: str | None = None,
+        extract_comp_Y: str | None = None,
+        frequencies_Y: list[str] | None = None,
+        frequency_Y: str | int | None = None,
+        # shared
+        realisation: int | None = None,
+        lmax: int | None = None,
+        lam: str | float | int | None = None,
+        field: int = 0
+    ):
+        """
+        Compute TT cross C_ell^{XY} (and plot D_ell^{XY}). Returns (ell, cl_xy).
+        """
+        # defaults (mirror step_power_spec)
+        r     = self.start_realisation if realisation is None else int(realisation)
+        lmax_ = self.lmax if lmax is None else int(lmax)
+        lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
+        fX    = self.frequencies if frequencies_X is None else list(frequencies_X)
+        fY    = self.frequencies if frequencies_Y is None else list(frequencies_Y)
+
+        # templates + processed-CFN detection (mirror)
+        ft = FileTemplates(self.directory).file_templates
+        has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
+        ft_local = dict(ft)
+        if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
+            ft_local["processed_cfn"] = ft_local["cfn"]
+        conv = MapAlmConverter(ft_local)
+
+        # auto source (mirror)
+        def pick_source(s: str) -> str:
+            if s != "auto":
+                return s
+            if has_processed_cfn:
+                return "processed"
+            elif self.ilc_components:
+                return "ilc_synth"
+            else:
+                return "downloaded"
+
+        # loader (single place)
+        def load_one(source, component, extract_comp, frequencies, frequency):
+            src = pick_source(source)
+            if src == "ilc_synth":
+                comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")
+                tgt     = extract_comp or (self.ilc_components[0] if self.ilc_components else "cmb")
+                out = conv.to_alm(component=comp_in, source="ilc_synth",
+                                   extract_comp=tgt, frequencies=frequencies,
+                                   realisation=r, lmax=lmax_, lam=lam_)
+                label = f"ILC-synth ({tgt})"; fmt = "mw" if out["format"] == "mw" else "hp"
+            elif src == "processed":
+                comp_use = component or ("cfn" if has_processed_cfn else "cmb")
+                out = conv.to_alm(component=comp_use, source="processed",
+                                   frequency=frequency, realisation=r, lmax=lmax_)
+                label = f"Processed {comp_use}"; fmt = "mw" if out["format"] == "mw" else "hp"
+            else:  # downloaded
+                comp_use = component or "cmb"
+                out = conv.to_alm(component=comp_use, source="downloaded",
+                                   frequency=frequency, realisation=r, lmax=lmax_, field=field)
+                label = f"Downloaded {comp_use}"; fmt = "mw" if out["format"] == "mw" else "hp"
+            return out, label, fmt
+
+        # load X and Y
+        outX, labelX, fmtX = load_one(source_X, component_X, extract_comp_X, fX, frequency_X)
+        outY, labelY, fmtY = load_one(source_Y, component_Y, extract_comp_Y, fY, frequency_Y)
+
+        if fmtX != fmtY:
+            raise ValueError("X and Y alm formats must match ('mw' vs 'healpy').")
+
+        # alms -> C_ell^{XY}
+        if outX["format"] == "mw":
+            ell, cl_xy = PowerSpectrumCrossTT.from_mw_alm(np.asarray(outX["alm"]), np.asarray(outY["alm"]))
+        else:
+            ell, cl_xy = PowerSpectrumCrossTT.from_healpy_alm(outX["alm"], outY["alm"], lmax=lmax_)
+
+        # C_ell -> D_ell^{XY} (µK^2) and plot
+        Dl_xy = PowerSpectrumTT.cl_to_Dl(ell, cl_xy, input_unit=unit)
+        style = "--"
+        try:
+            PowerSpectrumTT.plot_Dl_series({"ell": ell, "Dl": Dl_xy,
+                                            "label": f"Cross: {labelX} × {labelY}",
+                                            "source": "processed"},
+                                           save_path=save_path, show=True)
+        except Exception:
+            PowerSpectrumTT.plot_Dl_series([(ell, Dl_xy, f"Cross: {labelX} × {labelY}", style)],
+                                           save_path=save_path, show=True)
+
+        return ell, cl_xy
 
         
     def run(self, steps=None):
