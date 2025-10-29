@@ -10,6 +10,7 @@ import s2wav
 import s2wav.filters as filters
 from .utils import *
 from .harmonic_response import build_axisym_filter_bank
+from .power_spec import PowerSpectrumTT
 
 
 class HPTools():
@@ -102,6 +103,7 @@ class HPTools():
             hp_map = hp_map  # No conversion for other frequencies
         return hp_map
     
+
     # For synch/dust/tSZ/noise (have pixel window): beam -> deconv Pℓ -> reduce
     @staticmethod
     def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
@@ -114,6 +116,7 @@ class HPTools():
         hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
         return hp_map_reduced
+    
 
     # For CMB synfast (no pixel window): beam -> reduce
     @staticmethod
@@ -125,6 +128,7 @@ class HPTools():
         hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
         return hp_map_reduced
+    
 
     @staticmethod
     def get_nside_from_lmax(lmax: int):
@@ -146,7 +150,7 @@ class HPTools():
 
 class MWTools():
     """Tools to process maps in MW (McEwen & Wiaux) sampling"""
-    ''' 
+    
     @staticmethod
     def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0,):
         """
@@ -179,14 +183,14 @@ class MWTools():
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs  
-    '''   
+ 
 
-    
+    ''' 
     @staticmethod
     def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
         """
         Performs a wavelet transform on MW map using scale-discretised filters
-        for axisym (N_directions=1), otherwise the library's directional filters.
+        for axisym (N_directions=1), otherwise the library's directional filters
         """
         # --- minimal fix: choose filters based on N_directions ---
         if N_directions == 1:
@@ -208,8 +212,9 @@ class MWTools():
         # output format
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)
         wavelet_coeffs.insert(0, scaling_coeffs)
-        return wavelet_coeffs, scaling_coeffs
-    
+        return wavelet_coeffs, scaling_coeffs 
+    ''' 
+
 
     @staticmethod
     def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
@@ -226,7 +231,7 @@ class MWTools():
             tuple: A tuple containing the wavelet coefficients and scaling coefficients.
         """
         j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-        # remove the last filter (temporary)
+
         wavelet_coeffs, scaling_coeffs = s2wav.flm_to_analysis(
             mw_alm,
             N       = N_directions,
@@ -242,36 +247,90 @@ class MWTools():
 
 
     @staticmethod
-    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0,):
+    def wavelet_to_mw_alm(
+        wavelet_coeffs,
+        L: int,
+        N_directions: int,
+        lam: float = 2.0,
+        reality: bool = False,
+        band_index: int | None = None,
+    ):
         """
-        Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
-
-        Parameters:
-            wavelet_coeffs (list): List of wavelet coefficients.
-            L (int): Maximum multipole moment for the wavelet transform; lmax+1.
-            N_directions (int, options): Number of directions for the wavelet transform, default is 1.
-            lam (float, optional): Wavelet parameter, default is 2.0.
-
-        Returns:
-            jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
+        Minimal version — accepts only a single wavelet band (not a list).
+        Reconstructs MW alm for that band by zeroing all others.
         """
-        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
-        j_filter = build_axisym_filter_bank(L, lam)
-        #print(wavelet_coeffs[0].shape)
-        f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
-        wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
-        #print(wavelet_coeffs[0].shape)
-    
-        mw_map = s2wav.synthesis(
-            wavelet_coeffs,
-            f_scal  = f_scal,
-            L       = L,
-            lam     = lam,
-            filters = j_filter,
-            reality = False,
-            N = N_directions
+        
+        # 1) Build filter bank
+        print("1")
+        j_filter = filters.filters_directional_vectorised(L, N_directions, J_min=0, lam=float(lam))
+        J = len(j_filter[0])  # number of expected wavelet bands
+        print ("number of wavelet bands J:", J)
+
+        # --- Must have band_index if passing one band ---
+        if band_index is None:
+            raise ValueError("Must specify band_index (0-based) when passing a single wavelet band.")
+
+        # 2) Prepare the single wavelet band
+        print("2")
+        w_band = jnp.array(wavelet_coeffs)
+
+        # Axisymmetric (L, 2L-1) → add dir axis for N=1
+        if w_band.ndim == 2 and N_directions == 1:
+            assert w_band.shape == (L, 2 * L - 1), f"band shape {w_band.shape} != (L, 2L-1)"
+            w_band = w_band[jnp.newaxis, ...]
+        else:
+            # Directional case sanity check
+            assert w_band.shape[1:] == (L, 2 * L - 1), f"band shape {w_band.shape} incompatible with L={L}"
+
+        # 3) Create 2D scaling (low-pass)
+        print("3")
+        scaling = jnp.zeros((L, 2 * L - 1), dtype=w_band.dtype)
+        print("scaling shape:", scaling.shape)
+
+        # 4) Build exactly J bands (others zero)
+        print("4")
+        bands = [jnp.zeros_like(w_band) for _ in range(J)]
+        bands[band_index] = w_band                   
+        print("band shape:", w_band.shape)      
+        print("length of bands:", len(bands))
+
+        # 5) Reconstruct MW map
+        print("5")
+        f_mw = s2wav.synthesis(
+            bands,
+            f_scal=scaling,
+            L=L,
+            lam=lam,
+            filters=j_filter,
+            reality=reality,
+            N=N_directions,
         )
-        return mw_map
+
+        # 6) Map → alm (MW)
+        print("6")
+        mw_alm = s2fft.forward(f_mw, L=L, reality=reality)
+
+        # 7) (Optional) per-band spectra plot (kept as-is but using the normalized 'bands')
+        print("7")
+        ell_all, Dl_all = [], []
+        for j in range(J):
+            sc0 = jnp.zeros_like(scaling)
+            bands_j = [bands[k] if k == j else jnp.zeros_like(bands[k]) for k in range(J)]
+            f_band = s2wav.synthesis(
+                bands_j, f_scal=sc0, L=L, lam=lam, filters=j_filter, reality=reality, N=N_directions
+            )
+            alm_band = s2fft.forward(f_band, L=L, reality=reality)
+            ell, Cl = PowerSpectrumTT.from_mw_alm(alm_band)
+            Dl = PowerSpectrumTT.cl_to_Dl(ell, Cl, input_unit="K")
+            ell_all.append(ell); Dl_all.append(Dl)
+
+        plt.figure(figsize=(6, 4))
+        for j, (ell, Dl) in enumerate(zip(ell_all, Dl_all)):
+            plt.plot(ell, Dl, label=f"Band {j}")
+        plt.xlabel(r"$\ell$"); plt.ylabel(r"$D_\ell\ [\mu\mathrm{K}^2]$")
+        plt.grid(alpha=0.4); plt.legend(); plt.tight_layout(); plt.show()
+
+        return mw_alm
 
 
     @staticmethod
@@ -313,7 +372,38 @@ class MWTools():
                 np_wav,
             )
 
+    @staticmethod
+    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0,):
+        """
+        Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
 
+        Parameters:
+            wavelet_coeffs (list): List of wavelet coefficients.
+            L (int): Maximum multipole moment for the wavelet transform; lmax+1.
+            N_directions (int, options): Number of directions for the wavelet transform, default is 1.
+            lam (float, optional): Wavelet parameter, default is 2.0.
+
+        Returns:
+            jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
+        """
+        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+        j_filter = build_axisym_filter_bank(L, lam)
+        #print(wavelet_coeffs[0].shape)
+        f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
+        wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
+        #print(wavelet_coeffs[0].shape)
+    
+        mw_map = s2wav.synthesis(
+            wavelet_coeffs,
+            f_scal  = f_scal,
+            L       = L,
+            lam     = lam,
+            filters = j_filter,
+            reality = False,
+            N = N_directions
+        )
+        return mw_map
+    
     @staticmethod
     def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
         """
