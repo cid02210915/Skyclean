@@ -56,6 +56,45 @@ class HPTools():
         hp_map_deconv = hp.alm2map(alm_deconv, nside=nside)
         return hp_map_deconv
     
+
+    def beam_convolve_noise(hp_map: np.ndarray, lmax: int, frequency: str, standard_fwhm_rad: float,
+                            LFI_beam_fwhm = {"030": 32.33, "044": 27.01, "070": 13.25}):
+        """
+        Converts healpix map to alm space, deconvolve beam according to different frequency,
+        and converts back to map space.
+    
+        Parameters:
+            hp_map (numpy.ndarray): Input healpix map.
+            lmax (int): Maximum multipole moment for spherical harmonics.
+            frequency (str): Frequency identifier (e.g., "030", "044").
+            standard_fwhm_rad (float): Standard beam FWHM in radians.   
+            LFI_beam_fwhm (dict): Dictionary of beam full-width half-maximum (FWHM) in arcminutes for LFI frequencies.
+    
+        Returns:
+            numpy.ndarray: Reconstructed healpix map after beam deconvolution.
+        """
+        # convert map to alm
+        nside = hp.get_nside(hp_map)
+        alm = hp.map2alm(hp_map, lmax=lmax)
+        # get LFI beam
+        if frequency in {"030", "044", "070"}:
+            fwhm_rad = np.radians(LFI_beam_fwhm[frequency] / 60)
+            bl = hp.sphtfunc.gauss_beam(fwhm_rad, lmax=lmax, pol=False)
+        # get HFI beam
+        else:
+            HFI_beam_path = "HFI_beams/"+ f"Bl_T_R3.01_fullsky_{frequency}x{frequency}.fits"
+            from astropy.io import fits
+            hfi = fits.open(HFI_beam_path)
+            bl = hfi[1].data["TEMPERATURE"]
+        # Deconvolve with frequency-dependent beam 
+        alm_deconv = hp.almxfl(alm, 1/bl)
+        # Convolve with standard beam with the desired FWHM
+        Standard_bl = hp.sphtfunc.gauss_beam(standard_fwhm_rad, lmax=lmax, pol=False)
+        alm_conv = hp.almxfl(alm_deconv, Standard_bl)
+        # Convert back to map
+        hp_map_conv = hp.alm2map(alm_conv, nside=nside)
+        return hp_map_conv
+    
     
     def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float):
         """
@@ -104,7 +143,7 @@ class HPTools():
         return hp_map
     
 
-    # For synch/dust/tSZ/noise (have pixel window): beam -> deconv Pℓ -> reduce
+    # For synch/dust/tSZ (have pixel window): coonv standard beam -> deconv Pℓ -> reduce
     @staticmethod
     def convolve_and_reduce(hp_map: np.ndarray, lmax: int, nside: int, standard_fwhm_rad: float) -> np.ndarray:
         """
@@ -117,6 +156,17 @@ class HPTools():
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
         return hp_map_reduced
     
+    @staticmethod
+    def convolve_and_reduce_noise(hp_map: np.ndarray, lmax: int, nside: int, frequency: str, standard_fwhm_rad: float) -> np.ndarray:
+        """
+        Deconvolve pixel window, deconvolve frequency-dependent beam and convolve with standard beam, then reduce resolution.
+        Use specifically for noise.
+        """
+        hp_map_beamed = HPTools.beam_convolve_noise(hp_map, lmax=lmax, frequency=frequency, standard_fwhm_rad=standard_fwhm_rad)
+        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
+        return hp_map_reduced
+
 
     # For CMB synfast (no pixel window): beam -> reduce
     @staticmethod
