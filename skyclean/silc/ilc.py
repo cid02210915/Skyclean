@@ -758,7 +758,7 @@ class ProduceSILC():
             "create_ilc_maps": [],
             "trim": [],
         }
-        # --- Prepare constraint vector / tags (unchanged) ---
+        # --- Prepare constraint vector / tags ---
         if constraint:
             if F is None or extract_comp is None:
                 raise ValueError("Must provide F and extract_comp if constraint=True")
