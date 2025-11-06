@@ -13,9 +13,11 @@ class ProcessMaps():
                  realisations: int,
                  start_realisation: int,
                  desired_lmax:int, 
+                 file_templates: FileTemplates | None = None,
                  directory: str = "data/", 
                  method = "jax_cuda", 
-                 overwrite: bool = False): 
+                 overwrite: bool = False, 
+                ): 
         """
         Parameters: 
             components (list): List of foreground components to process. Includes: 'sync', 'tsz', 'dust' 
@@ -38,6 +40,7 @@ class ProcessMaps():
         self.desired_lmax = desired_lmax
         self.directory = directory
         self.overwrite = overwrite
+        self.templates = FileTemplates(directory="/Scratch/agnes/data")
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
@@ -51,49 +54,38 @@ class ProcessMaps():
         Returns:
             int: Maximum noise realisation number found.
 
-    def _find_max_noise_realisation(self, frequency: str):
-        """
-        Find the maximum noise realisation number available for a given frequency.
-        
-        Parameters:
-            frequency (str): The frequency to check for noise files.
-            
-        Returns:
-            int: Maximum noise realisation number found, or 299 as fallback.
+        Raises:
+            FileNotFoundError: If no noise files are found.
+            ValueError: If files exist but no realisation numbers can be parsed.
         """
         import glob
-        # Get the CMB realisations directory
         cmb_dir = os.path.join(self.directory, "CMB_realisations")
-        
-        # Pattern to match noise files for this frequency
         pattern = os.path.join(cmb_dir, f"noise_f{frequency}_r*.fits")
         noise_files = glob.glob(pattern)
-        
+
         if not noise_files:
-            print(f"Warning: No noise files found for frequency {frequency}. Using fallback max of 299.")
-            return 299
-            
-        # Extract realisation numbers from filenames
+            print(f"Warning: No noise files found for frequency {frequency}.")
+            raise FileNotFoundError(f"No noise files found for frequency {frequency}.")
+
         realisations = []
         for filepath in noise_files:
             filename = os.path.basename(filepath)
-            # Extract number between 'r' and '.fits'
-            # Format: noise_f{frequency}_r{realisation:05d}.fits
             try:
                 realisation_str = filename.split('_r')[1].split('.fits')[0]
                 realisations.append(int(realisation_str))
             except (IndexError, ValueError):
                 continue
-                
+
         if realisations:
             max_realisation = max(realisations)
             print(f"Found {len(realisations)} noise files for frequency {frequency}, max realisation: {max_realisation}")
             return max_realisation
         else:
-            print(f"Warning: Could not parse realisation numbers for frequency {frequency}. Using fallback max of 299.")
-            return 299
+            print(f"Warning: Could not parse realisation numbers for frequency {frequency}.")
+            raise ValueError(f"Could not parse realisation numbers for frequency {frequency}.")
 
-    def create_cfn(self, frequency: str, realisation: int, save = True): 
+
+    def create_cfn(self, frequency: str, realisation: int, save=True):
         """
         Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
         the CMB with the standard beam and 
@@ -123,29 +115,51 @@ class ProcessMaps():
             if os.path.exists(output_path) and self.overwrite is False:
                 hp_map_reduced = hp.read_map(output_path)
             else:
-                if comp == "noise": 
-                    # Find the maximum noise realisation number from downloaded files
-                    max_noise_realisation = self._find_max_noise_realisation(frequency)
-                    print(f'max noise: {max_noise_realisation}')
-                    noise_realisation = np.random.randint(0, max_noise_realisation + 1)
-                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=noise_realisation)
+                if comp == "noise":
+                    # Choose an existing noise realisation ID from disk
+                    noise_dir = os.path.join(self.directory, "CMB_realisations")
+                    pattern = os.path.join(noise_dir, f"noise_f{frequency}_r*.fits")
+                    files = glob.glob(pattern)
+                    available = []
+                    for p in files:
+                        try:
+                            rid = int(os.path.basename(p).rsplit(".fits", 1)[0].rsplit("_r", 1)[1])
+                            available.append(rid)
+                        except Exception:
+                            continue
+                    if not available:
+                        raise FileNotFoundError(
+                            f"No noise files found for frequency '{frequency}' matching '{pattern}'."
+                        )
+                    noise_realisation = int(np.random.choice(sorted(set(available))))
+                    filepath = self.file_templates[comp].format(
+                        frequency=frequency, realisation=noise_realisation
+                    )
                 else:
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=realisation
                     )
     
                 hp_map = hp.read_map(filepath)
-                if comp != "cmb":                     
+                if comp != "cmb":
                     hp_map = HPTools.unit_convert(hp_map, frequency)
-    
+                    print('1')
+
                 if comp == "noise":
-                    hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
-                        hp_map, lmax=desired_lmax, nside=nside
+                    beam_path = None
+                    if frequency not in {"030","044","070"}:
+                        beam_path = self.templates.hfi_beam_path(frequency)
+                        
+                    hp_map_reduced = HPTools.deconvolve_and_convolve_and_reduce(
+                        hp_map, lmax=desired_lmax, nside=nside, frequency=frequency,
+                        standard_fwhm_rad=standard_fwhm_rad, beam_path=beam_path
                     )
+                    print('2')
                 else:
                     hp_map_reduced = HPTools.convolve_and_reduce(
                         hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
                     )
+                    print('3')
 
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
@@ -218,34 +232,6 @@ class ProcessMaps():
     
         return hp_map_reduced
 
-    '''
-    def produce_and_save_all_maps(self):
-        """
-        Process and save individual components AND CFN maps 
-        across realisations and frequencies.
-
-        Returns:
-            None
-        """
-        desired_lmax = self.desired_lmax
-        for realisation in range(self.realisations):
-            realisation += self.start_realisation  # Adjust for starting realisation
-            for frequency in self.frequencies:
-                # Process & save each individual component
-                for comp in self.components:
-                    _ = self.process_single_component(comp, frequency, realisation, save=True)
-
-                # Then build and save the combined CFN map
-                cfn_output_path = self.file_templates["cfn"].format(
-                    frequency=frequency, realisation=realisation, lmax=desired_lmax
-                )
-                if os.path.exists(cfn_output_path) and self.overwrite == False:
-                    print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
-                    continue
-                cfn_map = self.create_cfn(frequency, realisation, save=True)
-                hp.write_map(cfn_output_path, cfn_map, overwrite=True)
-                print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
-    '''
 
     def produce_and_save_maps(self):
         """
@@ -256,7 +242,7 @@ class ProcessMaps():
         """
         desired_lmax = self.desired_lmax
         for realisation in range(self.realisations):
-            realisation += self.start_realisation  
+            realisation += self.start_realisation  # Adjust for starting realisation
             for frequency in self.frequencies:
                 cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                 if os.path.exists(cfn_output_path) and self.overwrite == False:
@@ -325,5 +311,5 @@ class ProcessMaps():
                     print(f"Wavelet transform for {comp} at {frequency} GHz for realisation {realisation} saved.")
 
 # processor = ProcessMaps(components=["cmb", "sync"], wavelet_components=["cfn"], frequencies = ["030", "044"], realisations=0, desired_lmax=256, directory="/Scratch/matthew/data/", overwrite=False)
-# processor.produce_and_save_maps()
+# processor.produce_and_save_cfns()
 # processor.produce_and_save_wavelet_transforms(N_directions=1, lam=4.0, method="jax_cuda", visualise=False)
