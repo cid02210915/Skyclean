@@ -232,6 +232,7 @@ class Pipeline:
                 reference_vectors=reference_vectors,
             )
 
+
     def step_power_spec(
         self,
         unit: str = "K",
@@ -336,6 +337,8 @@ class Pipeline:
     
         return ell, cl
     
+
+
     # --- step_cross_power_spec ---
     def step_cross_power_spec(
         self,
@@ -358,7 +361,8 @@ class Pipeline:
         realisation: int | None = None,
         lmax: int | None = None,
         lam: str | float | int | None = None,
-        field: int = 0
+        field: int = 0,
+        plot_r: bool = False, 
     ):
         """
         Compute TT cross C_ell^{XY} (and plot D_ell^{XY}). Returns (ell, cl_xy).
@@ -435,6 +439,18 @@ class Pipeline:
         except Exception:
             PowerSpectrumTT.plot_Dl_series([(ell, Dl_xy, f"Cross: {labelX} × {labelY}", style)],
                                            save_path=save_path, show=True)
+        if plot_r:
+            if outX["format"] == "mw":
+                _, cl_xx = PowerSpectrumTT.from_mw_alm(np.asarray(outX["alm"]))
+                _, cl_yy = PowerSpectrumTT.from_mw_alm(np.asarray(outY["alm"]))
+            else:
+                _, cl_xx = PowerSpectrumTT.from_healpy_alm(outX["alm"])
+                _, cl_yy = PowerSpectrumTT.from_healpy_alm(outY["alm"])
+
+            PowerSpectrumCrossTT.plot_r_ell(
+                ell, cl_xy, cl_xx, cl_yy,
+                label=f"{labelX} × {labelY}"
+            )
 
         return ell, cl_xy
 
@@ -469,29 +485,12 @@ class Pipeline:
         if "power_spec" in steps:
             self.step_power_spec()
 
+        if "cross_power_spec" in steps:
+            self.step_cross_power_spec()
+
         elapsed = time.perf_counter() - start_time
         print(f"SELECTED STEPS COMPLETED IN {elapsed:.2f} SECONDS (lam={self.lam}).")
 
-def _spawn_gpu_run(gpu_id: int, start_real: int, n_real: int, base_argv: list[str]) -> subprocess.Popen:
-    env = os.environ.copy()
-
-    # isolate the GPU for this child and make x64 deterministic
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    env["JAX_ENABLE_X64"] = "True"
-
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "False"
-    #os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.3" 
-
-    # argv for the child run
-    argv = [
-        sys.executable,
-        sys.argv[0],
-        "--gpu", "0",                         # child's visible GPU is now device 0
-        "--start-realisation", str(start_real),
-        "--realisations", str(n_real),
-    ] + base_argv
-
-    return subprocess.Popen(argv, env=env)
 
 # when not using multi-processing 
 def main():
