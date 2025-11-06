@@ -32,42 +32,46 @@ class DownloadData():
         self.download_templates = files.download_templates
         self.file_templates = files.file_templates
 
+    
     def download_foreground_component(self, component: str, frequency: str, realisation: int = None):
-        """
-        Downloads the specified foreground component for a given frequency.
+            """
+            Downloads the specified foreground component for a given frequency.
 
-        Parameters:
-            component (str): The foreground component to download.
-            frequency (str): The frequency for which to download the component.
-            realisation (int, optional): The realisation number to be downloaded (for noise).
-        
-        Returns:
-            None
-        """ 
-        template, file_template = self.download_templates[component], self.file_templates[component]
-        if realisation is None: 
-            # foreground components same across realisations
-            filename = file_template.format(frequency=frequency)
-        else:
-            filename = file_template.format(frequency=frequency, realisation=realisation)
-        # Check if the file already exists
-        if os.path.exists(filename):
-            print(f"File {filename} already exists. Skipping download.")
-            return None
+            Parameters:
+                component (str): The foreground component to download.
+                frequency (str): The frequency for which to download the component.
+                realisation (int, optional): The realisation number to be downloaded (for noise).
 
-        # Format the URL with the current frequency and realisation
-        url = template.format(frequency=frequency, realisation=realisation)
-        # Send a GET request to the URL
-        response = requests.get(url)
-        # Check if the request was successful
-        if response.status_code == 200:
-            # Open the file in binary write mode and write the content
-            with open(filename, 'wb') as f:
-                f.write(response.content)
-            print(f"Downloaded {component} data for frequency {frequency}.")
-        else:
-            raise ValueError(f"Failed to download {component} data for frequency {frequency}. Status code: {response.status_code}")
+            Returns:
+                None
+            """ 
+            template, file_template = self.download_templates[component], self.file_templates[component]
+            if realisation is None: 
+                # foreground components same across realisations
+                filename = file_template.format(frequency=frequency)
+            else:
+                filename = file_template.format(frequency=frequency, realisation=realisation)
+            # Check if the file already exists
+            if os.path.exists(filename):
+                print(f"File {filename} already exists. Skipping download.")
+                return None
+
+            # Format the URL with the current frequency and realisation
+            url = template.format(frequency=frequency, realisation=realisation)
+            # Send a GET request to the URL
+            response = requests.get(url)
+            # Check if the request was successful
+            if response.status_code == 200:
+                # Open the file in binary write mode and write the content
+                with open(filename, 'wb') as f:
+                    f.write(response.content)
+                print(f"Downloaded {component} data for frequency {frequency}.")
+            else:
+                raise ValueError(f"Failed to download {component} data for frequency {frequency}. Status code: {response.status_code}")
+            
+            
         
+
     def download_cmb_spectrum(self):
         """
         Download the Planck 2018 best-fit CMB TT spectrum
@@ -97,61 +101,66 @@ class DownloadData():
 
 
     def generate_and_save_cmb_realisation(self, realisation: int):
-        """ Generates a CMB realisation based on the theoretical spectrum and downloads it.
-        
-        #### Notes: In future, will use CMB data with simulated beams; for now, use theoretical CMB.
+            """ Generates a CMB realisation based on the theoretical spectrum and downloads it.
 
-        Parameters:
-            realisation (int): The realisation number to be generated and downloaded.
+            #### Notes: In future, will use CMB data with simulated beams; for now, use theoretical CMB.
 
-        Returns:
-            None
-        """ 
-        filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 
-        if os.path.exists(filename):
-            print(f"CMB realisation {realisation} already exists. Skipping generation.")
-            return None
-        l, dl, _, _ = np.loadtxt(os.path.join(self.directory, "cmb_spectrum.txt")).transpose()
-        cl = (dl*2*np.pi)/(l*(l+1))
-        cl *= 1E-12 # convert to K 
-        nside = 2048
-        cmb_map = hp.synfast(cl, nside=nside, pixwin=True, lmax=1023) 
-        hp.write_map(filename, cmb_map, overwrite=True)
-        print(f"Downloaded CMB.")
+            Parameters:
+                realisation (int): The realisation number to be generated and downloaded.
+
+            Returns:
+                None
+            """
+            filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 for now
+            if os.path.exists(filename):
+                print(f"CMB realisation {realisation} already exists. Skipping generation.")
+                return None
+            # load the theoretical spectrum, if not exists, load the Planck one
+            if os.path.exists(os.path.join(self.directory, "cmb_spectrum_theory.txt")):
+                l, dl = np.loadtxt(os.path.join(self.directory, "cmb_spectrum_theory.txt"),
+                                    comments="#", usecols=(0,1), unpack=True)
+                l = l.astype(int)
+                dl *= (2.7255**2)
+                lmax = 1023
+                cl = np.zeros(lmax + 1)
+                m = (l >= 2) & (l <= lmax)
+                cl[l[m]] = dl[m] * (2.0 * np.pi) / (l[m] * (l[m] + 1.0))   # D_l -> C_l
+                nside = 2048
+                cmb_map = hp.synfast(cl, nside=nside, pixwin=True, lmax=1023) # convolve with pixel window
+                hp.write_map(filename, cmb_map)
+                print(f"Downloaded CMB realisation {realisation}.")
+            else:
+                raise ValueError("No theoretical CMB spectrum found. Please provide cmb_spectrum_theory.txt in the data directory.")
 
 
     def download_all(self): 
-        """
-        Downloads all specified foreground components, noise and CMB realisations.
+            """
+            Downloads all specified foreground components, noise and CMB realisations.
 
-        Returns:
-            None
-        """
-        # Download foregrounds, which have only one realisation.
-        print("Downloading foreground components...")
-        for component in self.components:
-            if component == "cmb" or component == "noise":
-                continue
-            else:
-                for frequency in self.frequencies:
-                    self.download_foreground_component(component, frequency)
-
-        # ensure spectrum exists before generating CMB maps
-        self.download_cmb_spectrum()
-
-        # now download CMB and noise, which are realisation dependent.
-        for realisation in range(self.realisations):
-            realisation += self.start_realisation  # Adjust for starting realisation
-            print(realisation)
-            print(f"Downloading CMB & noise for realisation {realisation}...")
-            self.generate_and_save_cmb_realisation(realisation)
-            if 'noise' in self.components:
-                if realisation > 235: 
-                    continue # there are only ffp10 300 noise realisations
+            Returns:
+                None
+            """
+            # Download foregrounds, which have only one realisation.
+            print("Downloading foreground components...")
+            for component in self.components:
+                if component == "cmb" or component == "noise":
+                    continue
                 else:
                     for frequency in self.frequencies:
-                        self.download_foreground_component("noise", frequency, realisation)
+                        self.download_foreground_component(component, frequency)
 
+            # now download CMB and noise, which are realisation dependent.
+            for realisation in range(self.realisations):
+                realisation += self.start_realisation  # Adjust for starting realisation
+                print(realisation)
+                print(f"Downloading CMB & noise for realisation {realisation}...")
+                self.generate_and_save_cmb_realisation(realisation)
+                if 'noise' in self.components:
+                    if realisation > 299: 
+                        continue # there are only ffp10 300 noise realisations
+                    else:
+                        for frequency in self.frequencies:
+                            self.download_foreground_component("noise", frequency, realisation)
 
 # components = ["sync", "dust"]
 # frequencies = ["030", "070", "143", "217", "353"]
