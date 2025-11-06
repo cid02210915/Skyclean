@@ -1,6 +1,17 @@
 import os 
 
 class FileTemplates():
+
+    # --- HFI beam filenames live at the data root, HFI_RIMO_BEAMS_R3.01.TAR.GZ from https://pla.esac.esa.int/#docsw ---
+    HFI_BEAM_FILE = {
+        "100": "Bl_T_R3.01_fullsky_100x100.fits",
+        "143": "Bl_T_R3.01_fullsky_143x143.fits",
+        "217": "Bl_T_R3.01_fullsky_217x217.fits",
+        "353": "Bl_T_R3.01_fullsky_353x353.fits",
+        "545": "Bl_T_R3.01_fullsky_545x545.fits",
+        "857": "Bl_T_R3.01_fullsky_857x857.fits",
+    }
+
     def __init__(self, directory = "data/", start_realisation: int = 0):
         self.directory = directory
         self.output_directories = {
@@ -54,8 +65,7 @@ class FileTemplates():
         "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
         "cfn":             os.path.join(self.output_directories["cfn"],           "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
-        # ---------------- wavelet transforms (keep existing placeholders) ----------------
-        # NOTE: loader/saver use {comp} and British {realisation}; keep these unchanged.
+        # ---------------- wavelet transforms ----------------
         "wavelet_coeffs": os.path.join(
             self.output_directories["wavelet_coeffs"],
             "{comp}_wavelet_f{frequency}_s{scale}_r{realisation:05d}_lmax{lmax}_lam{lam}.npy"
@@ -72,8 +82,7 @@ class FileTemplates():
         "f_scal": os.path.join(
             self.output_directories["f_scal"],
             "f_scal_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
-),
-
+        ),
 
         # ---------------- ILC intermediates & outputs (matches ILC_wav_coeff_maps_MP) ----------------
         # IMPORTANT: these use {component}, {extract_comp}, and US spelling {realisation}
@@ -120,7 +129,7 @@ class FileTemplates():
             "{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
         ),
 
-        # Optional: power spectrum tagged likewise
+        # Optional: power spectrum
         "ilc_spectrum": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
             "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
@@ -132,7 +141,9 @@ class FileTemplates():
         "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         }
 
-    
+    def hfi_beam_path(self, frequency: str) -> str:
+        return os.path.join(self.directory, self.HFI_BEAM_FILE[str(frequency)])
+     
     @staticmethod
     def create_dir(directory: str):
         """
@@ -167,3 +178,4 @@ class FileTemplates():
                 print(f"{key}: {rel}")
             else:
                 print(f"{key}: (no files)")
+    
