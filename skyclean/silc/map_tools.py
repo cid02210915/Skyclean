@@ -262,8 +262,8 @@ class MWTools():
 
         # default JAX path
         j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-        print ('shape:', j_filter[0].shape) 
-        print ('shape:', j_filter[1].shape) 
+        #print ('shape:', j_filter[0].shape) 
+        #print ('shape:', j_filter[1].shape) 
         #print ('shape:', j_filter[2].shape) 
         
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
@@ -355,17 +355,15 @@ class MWTools():
         """
         
         # 1) Build filter bank
-        print("1")
         j_filter = filters.filters_directional_vectorised(L, N_directions, J_min=0, lam=float(lam))
         J = len(j_filter[0])  # number of expected wavelet bands
-        print ("number of wavelet bands J:", J)
+        #print ("number of wavelet bands J:", J)
 
         # --- Must have band_index if passing one band ---
         if band_index is None:
             raise ValueError("Must specify band_index (0-based) when passing a single wavelet band.")
 
         # 2) Prepare the single wavelet band
-        print("2")
         w_band = jnp.array(wavelet_coeffs)
 
         # Axisymmetric (L, 2L-1) → add dir axis for N=1
@@ -377,19 +375,16 @@ class MWTools():
             assert w_band.shape[1:] == (L, 2 * L - 1), f"band shape {w_band.shape} incompatible with L={L}"
 
         # 3) Create 2D scaling (low-pass)
-        print("3")
         scaling = jnp.zeros((L, 2 * L - 1), dtype=w_band.dtype)
-        print("scaling shape:", scaling.shape)
+        #print("scaling shape:", scaling.shape)
 
         # 4) Build exactly J bands (others zero)
-        print("4")
         bands = [jnp.zeros_like(w_band) for _ in range(J)]
         bands[band_index] = w_band                   
-        print("band shape:", w_band.shape)      
-        print("length of bands:", len(bands))
+        #print("band shape:", w_band.shape)      
+        #print("length of bands:", len(bands))
 
         # 5) Reconstruct MW map
-        print("5")
         f_mw = s2wav.synthesis(
             bands,
             f_scal=scaling,
@@ -401,11 +396,9 @@ class MWTools():
         )
 
         # 6) Map → alm (MW)
-        print("6")
         mw_alm = s2fft.forward(f_mw, L=L, reality=reality)
 
         # 7) (Optional) per-band spectra plot (kept as-is but using the normalized 'bands')
-        print("7")
         ell_all, Dl_all = [], []
         for j in range(J):
             sc0 = jnp.zeros_like(scaling)
@@ -480,8 +473,8 @@ class MWTools():
         Returns:
             jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
         """
-        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
-        j_filter = build_axisym_filter_bank(L, lam)
+        j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+        #j_filter = build_axisym_filter_bank(L, lam)
         #print(wavelet_coeffs[0].shape)
         f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
         wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
@@ -575,8 +568,8 @@ class MWTools():
         """
         j_filter = filters.filters_directional_vectorised(L=L, N=1, lam=lam)[0]
         shape = j_filter.shape
-        print ('shape:', j_filter[0].shape) 
-        print ('shape:', j_filter[8].shape) 
+        #print ('shape:', j_filter[0].shape) 
+        #print ('shape:', j_filter[8].shape) 
         l_list = np.arange(L)
         middle_m = L-1 # m = 0 along which the axisymmetric wavelet is defined
         
