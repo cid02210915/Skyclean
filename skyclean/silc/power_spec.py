@@ -192,6 +192,7 @@ class MapAlmConverter:
             if n1 == 2 * n0 - 1:
                 return "mw", {"L": int(n0)}
         raise ValueError("Could not determine sampling (neither HEALPix nor MW).")
+    
 
 class PowerSpectrumTT:
     '''
@@ -250,7 +251,6 @@ class PowerSpectrumTT:
           processed -> "--"
           downloaded -> "-."
         """
-    
         # normalize input to a list
         if isinstance(curves, (dict, tuple)):
             curves = [curves]
@@ -279,7 +279,6 @@ class PowerSpectrumTT:
         if save_path: plt.savefig(save_path, dpi=200)
         if show: plt.show()
         
-
     @staticmethod
     def load_planck_Dl(directory: str):
         """Load Planck 2018 TT theory from <directory>/cmb_spectrum.txt (cols: ell, Dl[µK^2], ...)."""
@@ -290,7 +289,6 @@ class PowerSpectrumTT:
         ell = data[:, 0].astype(int)
         Dl  = data[:, 1].astype(np.float64)   # already µK^2
         return ell, Dl
-
 
 class PowerSpectrumCrossTT:
     """
@@ -328,3 +326,72 @@ class PowerSpectrumCrossTT:
         """D_ell = ell(ell+1) C_ell / (2π); returns µK² if input_unit=='K'."""
         Dl = ell * (ell + 1) * np.asarray(cl) / (2.0 * np.pi)
         return Dl * (1e12 if str(input_unit).lower() in ("k", "kelvin") else 1.0)
+    
+
+    @staticmethod
+    def r_ell(Cl_xy: np.ndarray, Cl_xx: np.ndarray, Cl_yy: np.ndarray) -> np.ndarray:
+        """
+        ratio per multipole:
+            r_ell = C_ell^{xy} / sqrt(C_ell^{xx} * C_ell^{yy})
+
+        Parameters:
+        Cl_xy : np.ndarray
+            Cross spectrum C_ell^{xy}.
+        Cl_xx : np.ndarray
+            Auto spectrum C_ell^{xx}.
+        Cl_yy : np.ndarray
+            Auto spectrum C_ell^{yy}.
+
+        Returns:
+        np.ndarray
+            r_ell array (same length as inputs). Entries are NaN where the
+            denominator is zero or invalid.
+        """
+        Cl_xy = np.asarray(Cl_xy); Cl_xx = np.asarray(Cl_xx); Cl_yy = np.asarray(Cl_yy)
+        denom = np.sqrt(Cl_xx * Cl_yy)
+        r = Cl_xy / denom
+        return r
+
+    @staticmethod
+    def plot_r_ell(ell: np.ndarray,
+                   Cl_xy: np.ndarray,
+                   Cl_xx: np.ndarray,
+                   Cl_yy: np.ndarray,
+                   *,
+                   save_path: str | None = None,
+                   show: bool = True,
+                   label: str | None = None,
+                   style: str = '-') -> np.ndarray:
+        """
+        Plot per-ℓ r_ell.
+
+        Parameters:
+        ell : np.ndarray
+            Multipole array (same length as spectra).
+        Cl_xy : np.ndarray
+            Cross spectrum C_ell^{xy}.
+        Cl_xx : np.ndarray
+            Auto spectrum C_ell^{xx}.
+        Cl_yy : np.ndarray
+            Auto spectrum C_ell^{yy}.
+
+        Returns:
+        np.ndarray
+            The computed r_ell values (NaN for invalid entries).
+        """
+
+        ell = np.asarray(ell)
+        r = PowerSpectrumCrossTT.r_ell(Cl_xy, Cl_xx, Cl_yy)
+        m = np.isfinite(r)
+
+        plt.figure(figsize=(7, 4))
+        plt.plot(ell[m], r[m], style, label=label)
+        plt.axhline(0.0, ls=':', lw=1)
+        plt.xlabel(r'$\ell$')
+        plt.ylabel(r'$r_\ell = C_\ell^{xy}/\sqrt{C_\ell^{xx} C_\ell^{yy}}$')
+        plt.legend()
+        plt.grid(True, alpha=0.5)
+        plt.tight_layout()
+        plt.show()
+        if save_path: plt.savefig(save_path, dpi=200)
+        return r
