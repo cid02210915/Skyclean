@@ -133,7 +133,7 @@ class SILCTools():
     @staticmethod
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
                                     realisation: int, method: str, path_template: str, *,
-                                    component: str = "cfn", lmax: int = 64, lam: float | str = 2.0,):
+                                    component: str = "cfn", lmax: int = 64, lam: float | None = None):
         
         #print("calculate_covariance_matrix", flush = True)
 
@@ -200,7 +200,7 @@ class SILCTools():
     @staticmethod
     def double_and_save_wavelet_maps(
         original_wavelet_c_j, frequencies, scales, realisation, 
-        component, path_template, *, lmax=64, lam="2.0", method="jax_cuda"
+        component, path_template, *, lmax=64, lam: float | None = None, method="jax_cuda"
     ):
         #print ('double_and_save_wavelet_maps', flush = True)
         """Minimal fix: compute + save doubled maps serially (no MP)."""
@@ -277,7 +277,7 @@ class SILCTools():
     
     def compute_weights_generalised(R, scale, realisation, weight_vector_matrix_template, comp, L_max, 
                                     extract_comp, *, constraint=False, F=None, f=None, 
-                                    reference_vectors=None, lam="2.0"):
+                                    reference_vectors=None, lam: float | None = None):
         #print("compute_weights_generalised", flush=True)
         """
         Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
@@ -453,7 +453,7 @@ class SILCTools():
 
     @staticmethod
     def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str, *, 
-                         path_template:str, component: str, extract_comp: str, lmax:int, lam: str = 2.0):
+                         path_template:str, component: str, extract_comp: str, lmax:int, lam: float | None = None):
 
         #print("trim_to_original", flush=True)
         """
@@ -478,7 +478,6 @@ class SILCTools():
                 f"num_allocs={ms.get('num_allocs', 'n/a')}")
         '''
 
-        # --- minimal debug & guards ---
         #print(f"[DEBUG] scale={scale}, realisation={realisation}, shape={MW_Doubled_Map.shape}", flush=True)
         if MW_Doubled_Map.ndim != 2:
             raise ValueError(f"[DEBUG] Not 2D: got {MW_Doubled_Map.shape}")
@@ -508,7 +507,7 @@ class SILCTools():
 
         mw_map_original = pix[np.newaxis, ...]
 
-        # ---- MIN SAVE: only if a template and tags are provided ----
+        # ---- only if a template and tags are provided ----
         if path_template and component and extract_comp:
             lmax = inner_v - 1
             lam_str = str(lam)
@@ -529,7 +528,7 @@ class SILCTools():
 
     @staticmethod
     def load_frequency_data(file_template: str, frequencies: list, scales: list, comp: str, lmax: int, *,
-                        realisation: int, lam: float = 2.0):
+                        realisation: int, lam: float | None = None):
         #print("load_frequency_data", flush = True)
         """
         Load NumPy arrays from dynamically generated file paths for each frequency and scale.
@@ -609,7 +608,7 @@ class SILCTools():
 
     @staticmethod
     def synthesize_ILC_maps_generalised(
-        trimmed_maps, realisation, file_templates, lmax, N_directions,lam=2.0, component=None, 
+        trimmed_maps, realisation, file_templates, lmax, N_directions,lam, component=None, 
         extract_comp=None, visualise=False, constraint=None, frequencies=None, F=None, f=None, 
         reference_vectors=None,
     ):
@@ -641,7 +640,7 @@ class SILCTools():
         L = int(lmax) + 1
         
         print([w.shape for w in trimmed_maps])
-        MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=int(1), lam=float(2.0))
+        MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=int(1), lam=float(lam))
 
         # 4) Save
         out_path = file_tmpl["ilc_synth"].format(
@@ -677,8 +676,8 @@ class ProduceSILC():
                  realisations: int, 
                  start_realisation: int,
                  lmax: int, 
-                 N_directions: int = 1, 
-                 lam: float = 2.0, 
+                 lam: float,
+                 N_directions: int = 1,  
                  synthesise = True, 
                  directory: str = "data/", 
                  method: str = "jax_cuda", 
@@ -711,17 +710,17 @@ class ProduceSILC():
         self.file_templates = files.file_templates
 
         # ilc_wavelet_paths, wavelet_map_directories, silc_output_dir, file_templates
-        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam = lam) # use length of filter to obtain n_scales
+        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam) # use length of filter to obtain n_scales
         self.scales = range(len(filter_sample[0]) + 1) 
 
 
-    def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, 
+    def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, lam,
                               N_directions, comp, constraint=False, F=None, extract_comp=None,
                              reference_vectors=None):
 
         lmax = L_max - 1  
         realisations = [int(r) for r in realisations]
-        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam =2.0) # use length of filter to obtain n_scales
+        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam = float(lam)) # use length of filter to obtain n_scales
         scales = range(len(filter_sample[0]) + 1) 
 
         '''
@@ -786,7 +785,7 @@ class ProduceSILC():
                 comp=comp,
                 realisation=int(realisation),   # int
                 lmax=L_max-1,
-                lam=2.0,
+                lam=lam,
             )
 
             # 2) Double resolution and save (single call)
@@ -800,7 +799,7 @@ class ProduceSILC():
                 path_template=output_templates['doubled_maps'],
                 component=comp,
                 lmax=L_max-1,
-                lam=2.0,
+                lam=lam,
             )
             dt = time.perf_counter() - t0
             print(f'Doubled and saved wavelet maps in {dt:.2f} seconds')
@@ -814,7 +813,7 @@ class ProduceSILC():
                 comp=comp,
                 realisation=int(realisation),   # int
                 lmax=L_max-1,
-                lam=2.0,
+                lam=lam,
             )
 
             # 4) Compute covariance matrices (serial, JAX backend)
@@ -830,7 +829,7 @@ class ProduceSILC():
                     path_template=output_templates["covariance_matrices"],
                     component=comp,
                     lmax=L_max - 1,
-                    lam=2.0,
+                    lam=lam,
                 )
 
             dt = time.perf_counter() - t0
@@ -848,7 +847,7 @@ class ProduceSILC():
                         scale=scale,
                         realisation=int(realisation),
                         lmax=L_max-1,
-                        lam = '2.0', 
+                        lam = str(lam), 
                     )
                 )
                 for scale in scales
@@ -869,7 +868,7 @@ class ProduceSILC():
                     F=F,
                     f=f,
                     reference_vectors=reference_vectors,
-                    lam='2.0',
+                    lam=str(lam),
                 )
 
             dt = time.perf_counter() - t0
@@ -889,7 +888,7 @@ class ProduceSILC():
                     scale=scale,
                     realisation=int(realisation),
                     lmax=L_max-1,
-                    lam='2.0',
+                    lam=str(lam),
                 )
                 W = np.load(weight_vector_path)  # mmap_mode='r' optional
                 print("→ loading:", weight_vector_path)
@@ -920,7 +919,7 @@ class ProduceSILC():
                         scale=scale,
                         realisation=int(realisation),
                         lmax=lmax,
-                        lam='2.0',
+                        lam=str(lam),
                     ),
                     map_
                 )
@@ -939,7 +938,7 @@ class ProduceSILC():
                     scale=int(sc),
                     realisation=int(realisation),
                     lmax=int(lmax),
-                    lam='2.0',
+                    lam=str(lam),
                 )
 
                 if os.path.exists(save_path):
@@ -959,7 +958,6 @@ class ProduceSILC():
                 if W2 != 2 * L2 - 1 or L2 != 2 * Lorig - 1 or L2 <= 1:
                     tm = arr  # pass-through
                 else:
-                    # Use same backend choice you’ve been using; here 'jax_cuda' to match your submit
                     _, tm = SILCTools.trim_to_original(
                         MW_Doubled_Map=arr2d,
                         scale=int(sc),
@@ -969,7 +967,7 @@ class ProduceSILC():
                         component=comp,
                         extract_comp=extract_comp,
                         lmax=int(lmax),
-                        lam='2.0',
+                        lam=str(lam),
                     )
 
                 # Ensure saved on disk (trim_to_original already saved when path_template provided,
@@ -991,7 +989,7 @@ class ProduceSILC():
              file_templates=output_templates,
              lmax=lmax,             
              N_directions=N_directions,
-             lam=2.0,
+             lam=lam,
              component=comp,
              extract_comp=extract_comp,
              frequencies=frequencies,
