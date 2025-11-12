@@ -187,7 +187,7 @@ class Pipeline:
             kwargs = dict(getattr(self, "F_kwargs", {}))
             freq_arg = kwargs.pop("frequencies", freqs)
 
-            # keep only relevant keys for the chosen source (NOTE: no 'normalize' anymore)
+            # keep only relevant keys for the chosen source
             if source == "theory":
                 # build_F_theory(beta_s, nu0, frequencies, components_order)
                 kwargs = {k: v for k, v in kwargs.items() if k in ("beta_s", "nu0")}
@@ -198,10 +198,10 @@ class Pipeline:
                 kwargs = {k: v for k, v in kwargs.items()
                           if k in ("base_dir", "file_templates", "realization", "mask_path")}
 
-            # desired column order comes from input component list; ignore extras like 'noise'
+            # desired column order comes from your input component list; ignore extras like 'noise'
             components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync")]
 
-            # build F with explicit column order (no normalization)
+            # build F with explicit column order 
             F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(
                 source=source,
                 frequencies=freq_arg,
@@ -224,6 +224,7 @@ class Pipeline:
                 realisations=realisations,
                 output_templates=output_templates,
                 L_max=self.lmax + 1,
+                lam=self.lam, 
                 N_directions=self.N_directions,
                 comp=comp_in,
                 constraint=do_constraint,
