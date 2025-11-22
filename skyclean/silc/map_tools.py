@@ -251,6 +251,7 @@ class HPTools():
             hp_map = hp_map  # No conversion for other frequencies
         return hp_map
     
+    
     @staticmethod
     def unit_convert_cib(hp_map: np.ndarray, frequency: str) -> np.ndarray:
         """
