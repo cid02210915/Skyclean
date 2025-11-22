@@ -107,6 +107,10 @@ class ProcessMaps():
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
     
         for comp in self.components:
+         
+            if comp == "cib" and frequency not in {"353", "545", "857"}:
+                continue
+
             processed_comp = "processed_" + comp
             output_path = self.file_templates[processed_comp].format(
                 frequency=frequency, realisation=realisation, lmax=desired_lmax
@@ -141,10 +145,12 @@ class ProcessMaps():
                     )
     
                 hp_map = hp.read_map(filepath)
-                if comp != "cmb":
-                    hp_map = HPTools.unit_convert(hp_map, frequency)
-                    print('1')
 
+                if comp == "cib":
+                    hp_map = HPTools.unit_convert_cib(hp_map, frequency)
+                elif comp != "cmb":
+                    hp_map = HPTools.unit_convert(hp_map, frequency)
+                
                 if comp == "noise":
                     beam_path = None
                     if frequency not in {"030","044","070"}:
@@ -154,12 +160,18 @@ class ProcessMaps():
                         hp_map, lmax=desired_lmax, nside=nside, frequency=frequency,
                         standard_fwhm_rad=standard_fwhm_rad, beam_path=beam_path
                     )
-                    print('2')
+                elif comp == "cib":
+                    # CIB GNILC already has 5' arcmin beam:
+                    # (https://irsa.ipac.caltech.edu/data/Planck/release_2/all-sky-maps/previews/COM_CompMap_CIB-GNILC-F353_2048_R2.00/header.txt)
+                    # just remove pixel window and reduce NSIDE
+                    hp_map_noP = HPTools.pixwin_deconvolve(hp_map, lmax=desired_lmax)
+                    hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
+                        hp_map_noP, lmax=desired_lmax, nside=nside
+                    )
                 else:
                     hp_map_reduced = HPTools.convolve_and_reduce(
                         hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
                     )
-                    print('3')
 
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
@@ -276,7 +288,8 @@ class ProcessMaps():
         filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation, lmax=lmax, lam = lam) # input path
         wavelet_coeffs_path = self.file_templates["wavelet_coeffs"]
         scaling_coeffs_path = self.file_templates["scaling_coeffs"]
-        if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, realisation=realisation, lmax=lmax, lam = lam)) and self.overwrite == False:
+        if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, 
+                                                     realisation=realisation, lmax=lmax, lam = lam)) and self.overwrite == False:
             # test if scale 0 exists; this means the transform has already been created
             print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation} already exist. Skipping generation.")
             return None
@@ -285,7 +298,8 @@ class ProcessMaps():
         mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method = method)
         MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)
         wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=N_directions, lam=lam)
-        MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, realisation, lmax, lam, wavelet_coeffs_path, scaling_coeffs_path)
+        MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, 
+                                            realisation, lmax, lam, wavelet_coeffs_path, scaling_coeffs_path)
         return wavelet_coeffs, scaling_coeffs
     
 
