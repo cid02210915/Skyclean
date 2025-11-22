@@ -2,10 +2,8 @@ import os, glob, re
 import numpy as np
 import healpy as hp
 
-from .utils import _norm
 # mixing_matrix_constraint.py
 # Minimal, direct fixes:
-# - NO normalization anywhere (F and reference_vectors are raw).
 # - Column order of F is FLEXIBLE and follows the user-provided components_order.
 # - f is built ROBUSTLY to match the actual column order of F (order-agnostic).
 # - helper find_f_from_names() provided for direct name->column mapping.
@@ -46,10 +44,10 @@ class SpectralVector:
     Build F (N_freq x N_comp) and reference_vectors (raw, no normalization).
 
     Flexible column order:
-      - Pass components_order = ["cmb","tsz","sync"] (or any order/subset).
+      - Pass components_order = ["cmb","tsz","sync","cib"] (or any order/subset).
       - Unknown names (e.g. 'noise') are ignored by the theory builder;
         empirical builder also requires presence in file_templates.
-    Supported theory keys: 'cmb', 'tsz', 'sync'
+    Supported theory keys: 'cmb', 'tsz', 'sync', 'cib'
     """
 
     @staticmethod
@@ -58,6 +56,8 @@ class SpectralVector:
         nu0: float = 30e9,
         frequencies: list[str] | None = None,
         components_order: list[str] | None = None,  # desired column order
+        beta_cib: float = 1.532,     # CIB emissivity index (WITH 217 GHz, best-fit)
+        T_cib: float = 12.243,       # CIB effective temperature [K]
     ):
         """
         Returns:
@@ -69,33 +69,46 @@ class SpectralVector:
         # channels
         if frequencies is None:
             frequencies = ['030','044','070','100','143','217','353','545','857']
-        nu = np.array([float(f) for f in frequencies]) * 1e9
+        nu = np.array([float(f) for f in frequencies]) * 1e9  # Hz
 
         # thermodynamic K_CMB conversions
         h = 6.62607015e-34
         k = 1.380649e-23
-        T = 2.7255
-        x = h * nu / (k * T)
-        g_nu = (x**2 * np.exp(x)) / (np.exp(x) - 1.0)**2
+        Tcmb = 2.7255  # CMB temperature
+        x = h * nu / (k * Tcmb)
+        g_nu = (x**2 * np.exp(x)) / (np.exp(x) - 1.0)**2  # dB_nu/dT at T_CMB
 
-        # RAW spectral response vectors (no normalization)
+        # ---- CIB modified blackbody SED in K_CMB ----
+        x_cib = h * nu / (k * T_cib)
+        Bnu_cib = (nu**3) / (np.exp(x_cib) - 1.0)   # Planck shape; overall constants cancel
+        cib = (nu ** float(beta_cib)) * Bnu_cib / g_nu
+
+        # *** minimal fix: normalise CIB to 1 at 353 GHz ***
+        if "353" in frequencies:
+            idx_353 = frequencies.index("353")   # frequencies is list[str], e.g. '353'
+            cib = cib / cib[idx_353]
+        # *************************************************
+
+        # RAW spectral response vectors (all in K_CMB)
         vecs = {
             "cmb":  np.ones_like(nu),
             "tsz":  x * ((np.exp(x) + 1.0) / (np.exp(x) - 1.0)) - 4.0,
             "sync": (nu / float(nu0)) ** float(beta_s) / g_nu,
+            "cib":  cib,
         }
 
         # Decide column order: keep ONLY supported names, IN THE GIVEN ORDER
         if components_order is None:
-            F_cols = ["cmb", "tsz", "sync"]
+            F_cols = ["cmb", "tsz", "sync", "cib"]
         else:
             wanted = [str(c).lower() for c in components_order]
             F_cols = [c for c in wanted if c in vecs]
 
         reference_vectors = {c: vecs[c] for c in F_cols}  # RAW
         F = np.column_stack([reference_vectors[c] for c in F_cols]) if F_cols else np.zeros((len(nu), 0))
-        print ('F_theory:', F)
+        print('F_theory:', F)
         return F, F_cols, reference_vectors, list(frequencies)
+
 
     @staticmethod
     def build_F_empirical(
@@ -107,7 +120,7 @@ class SpectralVector:
         components_order: list[str] | None = None,  # desired column order
     ):
         """
-        Empirical F: per-component, per-frequency masked means (RAW, no normalization).
+        Empirical F: per-component, per-frequency masked means.
         Requires file_templates entries for the chosen components (e.g. 'cmb','tsz','sync').
 
         Returns:
@@ -128,7 +141,7 @@ class SpectralVector:
         mask = hp.read_map(mask_path, verbose=False) if mask_path else None
 
         # Decide order (keep only components present in file_templates), input order preserved
-        default = ["cmb", "tsz", "sync"]
+        default = ["cmb", "tsz", "sync", "cib"]
         wanted = [str(c).lower() for c in (components_order or default)]
         F_cols = [c for c in wanted if c in file_templates and file_templates[c] is not None]
         if not F_cols:
@@ -142,7 +155,7 @@ class SpectralVector:
                 path = os.path.join(base_dir, tmpl.format(frequency=f, realisation=realization))
                 if os.path.exists(path):
                     v[i] = _mean(path, mask)
-            reference_vectors[comp] = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)  # RAW
+            reference_vectors[comp] = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0) 
 
         F = np.column_stack([reference_vectors[c] for c in F_cols]) if F_cols else np.zeros((len(frequencies), 0))
         print ('F_empirical:', F)
@@ -177,7 +190,6 @@ class ILCConstraints:
         Returns:
             f (np.ndarray): length = F.shape[1], with 1s for selected targets.
         """
-        # normalize to list
         if isinstance(extract_comp_or_comps, (str, bytes)):
             names = [extract_comp_or_comps]
         else:
