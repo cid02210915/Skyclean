@@ -12,7 +12,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", False) 
 
 class CMBFreeILC(): 
-    def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
+    def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
                  batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.2], directory: str = "data/", ):
         """
         Parameters:
@@ -35,13 +35,17 @@ class CMBFreeILC():
         self.shuffle = shuffle
         self.split = split
         self.directory = directory
+        self.component = component
+        self.extract_comp = extract_comp
 
         self.a = 1E-5
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
         # retrieve shapes
-        ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(realisation=0, lmax=self.lmax, lam = self.lam))
+        ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(
+            extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
+            realisation=0, lmax=self.lmax, lam = self.lam))
         self.H = ilc_map_temp.shape[0]+1
         self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
         self.produce_residuals()  # Create residual maps for all realisations
@@ -68,10 +72,14 @@ class CMBFreeILC():
         else:
             print(f"Creating residual maps for realisation {realisation}...")
             # load ilc (already in MW sampling)
-            ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(realisation=realisation, lmax=lmax, lam=lam))
+            ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(
+            extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
+            realisation=realisation, lmax=self.lmax, lam = self.lam))
+            #ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(realisation=realisation, lmax=lmax, lam=lam))
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
-            cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
+            #cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
+            cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation), dtype=np.float32)
             cmb_map_mw = SamplingConverters.hp_map_2_mw_map(cmb_map_hp, lmax) # highly expensive? involves s2fft.forwards.
             cmb_map_mwss = SamplingConverters.mw_map_2_mwss_map(cmb_map_mw, L=L)
             # load cfn maps across frequencies and convert to MW sampling
@@ -230,5 +238,3 @@ class CMBFreeILC():
         signed_log_R_std = R_std_sum / self.realisations
 
         return signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std
-
-

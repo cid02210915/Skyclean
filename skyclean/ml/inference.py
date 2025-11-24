@@ -20,7 +20,7 @@ from skyclean.silc import SamplingConverters
 class Inference:
     """Class for CMB prediction inference using trained models."""
     
-    def __init__(self, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None):
+    def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None):
         """Initialize the CMB inference system.
         
         Parameters:
@@ -43,6 +43,8 @@ class Inference:
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
+        self.extract_comp = extract_comp
+        self.component = component
         
         # Initialize file templates
         self.file_templates = FileTemplates(directory)
@@ -51,6 +53,8 @@ class Inference:
         self.model = None
         self.config = None
         self.data_handler = CMBFreeILC(
+                extract_comp=self.extract_comp,
+                component=self.component,
                 frequencies=self.frequencies,
                 realisations=self.realisations,
                 lmax=self.lmax,
@@ -60,6 +64,7 @@ class Inference:
                 directory=self.directory
             )
 
+    
     
     def load_model(self, force_load=False):
         """Load model weights for inference using fresh start approach.
@@ -174,7 +179,7 @@ class Inference:
         return result
     
     
-    def predict_cmb(self, realisation, save_result=True):
+    def predict_cmb(self, realisation, save_result=True, masked=False):
         """Predict CMB for a specific realisation.
         
         Parameters:

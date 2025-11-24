@@ -7,10 +7,14 @@ import os
 import sys
 
 # GPU configuration
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
+# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.9"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import jax
 jax.config.update("jax_enable_x64", False)  # Use 32-bit
+gpu = jax.devices()[0]
+info = gpu.memory_stats()
+print('Initial GPU usage for device 0:', info["bytes_limit"] / 1024**3, "GiB")
 
 import numpy as np
 import jax.numpy as jnp
@@ -21,6 +25,8 @@ import matplotlib.pyplot as plt
 import s2fft
 import functools
 import orbax.checkpoint as ocp
+import atexit
+import re
 
 from .model import S2_UNET
 from .data import CMBFreeILC
@@ -58,10 +64,11 @@ def print_gpu_usage(stage_name):
 
 
 class Train: 
-    def __init__(self, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
+    def __init__(self,  extract_comp: str, component: str, frequencies: list, realisations: int, 
+                 lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0), 
-                 directory: str = "data/", resume_training: bool = False):
+                 directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = None):
         """
         Parameters:
             frequencies (list): List of frequencies for the maps.
@@ -79,7 +86,10 @@ class Train:
             rngs (nnx.Rngs): Random number generators for the model.
             directory (str): Directory where data is stored / saved to.
             resume_training (bool): Whether to resume training from the last checkpoint.
+            run_tag (str | None): Optional tag to identify the use of loss function.
         """ 
+        self.component = component
+        self.extract_comp = extract_comp
         self.frequencies = frequencies
         self.realisations = realisations
         self.lmax = lmax
@@ -95,8 +105,9 @@ class Train:
         self.rngs = rngs
         self.directory = directory
         self.resume_training = resume_training
+        self.loss_tag = loss_tag
 
-        self.dataset = CMBFreeILC(frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory)
+        self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory)
         
         # Create model directory for checkpoints
         files = FileTemplates(directory)  # Pass directory to FileTemplates
@@ -110,6 +121,10 @@ class Train:
         
         # Initialize Orbax checkpoint manager
         self.checkpointer = ocp.StandardCheckpointer()
+
+        # ensure checkpoints are saved before exit
+        atexit.register(lambda: getattr(self.checkpointer, "wait_until_finished", lambda: None)())
+
 
     @staticmethod
     def clear_gpu_cache():
@@ -147,6 +162,67 @@ class Train:
         except Exception as e:
             print(f"Warning: Failed to save model at epoch {epoch}: {str(e)}")
     
+
+    def load_model_for_training(self, model, optimizer):
+        """
+        Load the latest saved model checkpoint into `model`.
+
+        Returns
+        -------
+        last_epoch : int
+            Last epoch number for which a checkpoint exists.
+            Returns 0 if no checkpoint is found.
+        """
+        model_dir = os.path.abspath(self.model_dir)
+
+        if not os.path.isdir(model_dir):
+            print(f"No model directory found at {model_dir}. Starting from scratch.")
+            return 0
+
+        # Find all checkpoint_* directories
+        entries = [
+            d for d in os.listdir(model_dir)
+            if d.startswith("checkpoint_") and os.path.isdir(os.path.join(model_dir, d))
+        ]
+
+        if not entries:
+            print("No checkpoints found. Starting from scratch.")
+            return 0
+
+        # Extract epoch numbers from "checkpoint_{epoch}"
+        epochs = []
+        for name in entries:
+            m = re.match(r"checkpoint_(\d+)", name)
+            if m:
+                epochs.append(int(m.group(1)))
+
+        if not epochs:
+            print("No valid checkpoint names found. Starting from scratch.")
+            return 0
+
+        last_epoch = max(epochs)
+        checkpoint_path = os.path.join(model_dir, f"checkpoint_{last_epoch}")
+
+        print(f"Loading model checkpoint from: {checkpoint_path}")
+
+        try:
+            # Build abstract state from current model structure
+            _, abstract_state = nnx.split(model)
+
+            checkpointer = ocp.StandardCheckpointer()
+            restored_state = checkpointer.restore(checkpoint_path, abstract_state)
+
+            # Update the live model in-place
+            nnx.update(model, restored_state)
+
+            print(f"Successfully loaded model from epoch {last_epoch}")
+            return last_epoch
+
+        except Exception as e:
+            print(f"Warning: Failed to load checkpoint from {checkpoint_path}: {e}")
+            print("Starting from scratch instead.")
+            return 0
+
     
     def loss_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray,):
         """Weighted MAE on the sphere loss function.
@@ -213,8 +289,35 @@ class Train:
             jnp.ones_like(errors),
             jnp.zeros_like(errors),
         )
-        return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True)/ residuals.shape[0])
+        # what fraction of sky is correctly predicted within 10% relative pixel value error
+        per_batch_acc = jnp.einsum("btpc,t->b", errors, norm_quad_weights, optimize=True,)
+        return jnp.mean(per_batch_acc) # average over batch
+        #return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True)/ residuals.shape[0])
 
+    @staticmethod
+    def loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights,):
+        errors = jnp.abs(residuals-pred_residuals) 
+        return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True,)
+                    / (residuals.shape[0]))  # Average over batch
+    @staticmethod
+    def acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, threshold = 1.1,):
+        errors = jnp.maximum(residuals / (pred_residuals + 1e-24), pred_residuals / (residuals + 1e-24))
+        errors = jnp.where(
+            errors < jnp.ones_like(errors) * threshold,
+            jnp.ones_like(errors),
+            jnp.zeros_like(errors),
+        )
+        # what fraction of sky is correctly predicted within 10% relative pixel value error
+        per_batch_acc = jnp.einsum("btpc,t->b", errors, norm_quad_weights, optimize=True,)
+        return jnp.mean(per_batch_acc)
+
+    @staticmethod
+    def loss_and_acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray):
+        # Single forward pass
+        pred_residuals = model(images)
+        loss = Train.loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights)
+        accuracy = Train.acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights)
+        return loss, accuracy # Return loss as main value, accuracy as aux
 
     @jax.jit
     def train_step(graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
@@ -233,9 +336,15 @@ class Train:
         """
         model, optimizer, metrics = nnx.merge(graphdef, state)
         model.train()
-        loss, grads = nnx.value_and_grad(Train.loss_fn_harmonic)(model, images, residuals, norm_quad_weights)
+
+        # value_and_grad will see: (loss, accuracy)
+        # loss is used for grads; accuracy is treated as "auxiliary" data
+        (loss, accuracy), grads = nnx.value_and_grad(Train.loss_and_acc_fn, 
+                                                     has_aux=True)(model, images, residuals, norm_quad_weights)
+
+        #loss, grads = nnx.value_and_grad(Train.loss_fn_harmonic)(model, images, residuals, norm_quad_weights)
         optimizer.update(grads)
-        accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
+        #accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
         metrics.update(loss=loss, accuracy=accuracy)
         _, state = nnx.split((model, optimizer, metrics))
         return state
@@ -257,7 +366,8 @@ class Train:
         """
         model, optimizer, metrics = nnx.merge(graphdef, state)
         model.eval()
-        loss = Train.loss_fn_harmonic(model, images, residuals, norm_quad_weights)
+        #loss = Train.loss_fn_harmonic(model, images, residuals, norm_quad_weights)
+        loss = Train.loss_fn(model, images, residuals, norm_quad_weights)
         accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
         metrics.update(loss=loss, accuracy=accuracy)
         _, state = nnx.split((model, optimizer, metrics))
@@ -352,7 +462,7 @@ class Train:
             metrics.reset()
 
             print(
-                "[Train/Test] epoch = {:03d}: train_loss = {:.3f}, eval_loss = {:.3f}, train_acc(1.1) = {:.3f}, eval_ac(1.1) = {:.3f}".format(
+                "[Train/Test] epoch = {:06d}: train_loss = {:.06f}, eval_loss = {:.3f}, train_acc(1.1) = {:.3f}, eval_ac(1.1) = {:.3f}".format(
                     epoch,
                     metrics_history["train_loss"][-1],
                     metrics_history["eval_loss"][-1],
@@ -360,16 +470,22 @@ class Train:
                     metrics_history["eval_accuracy"][-1],
                 )
             )
-            
+            _ = jnp.asarray(metrics_history["eval_loss"][-1]).block_until_ready() # force sync by touching a device value
+            print_gpu_usage(f"After epoch {epoch}")
+
             # Save model checkpoint after each epoch (overwrites previous)
             self.save_model(model, epoch)
             
             np.save(self.save_dir + "training_log.npy", metrics_history)
             
-            # Plot training metrics and examples
-            # on last epoch, plot metrics and examples
-            self.plot_training_metrics(metrics_history, epoch)
-            self.plot_examples(model, test_batch, epoch=epoch, n_examples=5)
+        # Plot training metrics and examples
+        # on last epoch, plot metrics and examples
+        self.plot_training_metrics(metrics_history, epoch)
+        self.plot_examples(model, test_batch, epoch=epoch, n_examples=1)
+
+        # make sure all async ops are done before exiting
+        if hasattr(self, "checkpointer") and hasattr(self.checkpointer, "wait_until_finished"):
+            self.checkpointer.wait_until_finished()
 
     def plot_training_metrics(self, metrics_history, current_epoch):
         """Plot and save training metrics.
@@ -413,8 +529,8 @@ class Train:
         ax4.legend()
         
         plt.tight_layout()
-        plt.savefig(f'training_metrics.png', bbox_inches='tight', dpi=150)
-        plt.close()  # Close to save memory
+        #plt.savefig(f'training_metrics.png', bbox_inches='tight', dpi=150)
+        plt.show()  # Close to save memory
     
     def plot_examples(self, model, test_batch, epoch: int, n_examples: int = 1):
         """Plot input, output, model prediction and residuals for sample examples.
@@ -476,7 +592,7 @@ class Train:
         
         plt.tight_layout()
         fig.suptitle(f"Epoch {epoch}", fontsize=16)
-        plt.savefig(f'prediction.png', bbox_inches='tight', dpi=150)
+        #plt.savefig(f'prediction.png', bbox_inches='tight', dpi=150)
         plt.show()
 
 
