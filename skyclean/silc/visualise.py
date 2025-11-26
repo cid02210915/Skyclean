@@ -6,9 +6,10 @@ from .map_tools import *
 from .utils import *
 from .file_templates import *
 from .power_spec import *
+from ..ml.inference import Inference
 
 class Visualise(): 
-    def __init__(self, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
+    def __init__(self, inference: Inference, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, 
                  ):
@@ -20,6 +21,7 @@ class Visualise():
             lam_list (list): List of lambda values for the ILC. 
             directory (str): Directory where data is stored / saved to.
         """
+        self.inference = inference
         self.frequencies = frequencies
         self.realisation = realisation
         self.lmax = lmax
@@ -260,7 +262,7 @@ class Visualise():
                 spectrum_path = self.file_templates[spectrum_template_key].format(
                     realisation=self.realisation, 
                     lmax=self.lmax, 
-                    lam=lam
+                    lam=lam,
                 )
         else:
             if component == 'ilc_improved':
@@ -1116,6 +1118,103 @@ class Visualise():
 
         plt.show()
 
+
+    def visualise_mse_scatter(self, n_realisations: int, split=(0.8, 0.2)):
+        """
+        Plot MSE(NN) vs MSE(ILC) for an arbitrary number of realisations,
+        with a train/validation split.
+
+        Parameters
+        ----------
+        n_realisations : int
+            Total number of realisations to evaluate (0..n_realisations-1).
+        split : float or tuple/list
+            Train/validation split fraction.
+            - If float, interpreted as train fraction (e.g. 0.8).
+            - If tuple/list, uses split[0] as train fraction.
+              Example: split=(0.8, 0.2).
+        """
+
+        # --- interpret split argument ---
+        if isinstance(split, (list, tuple, np.ndarray)):
+            train_frac = float(split[0])
+        else:
+            train_frac = float(split)
+
+        train_frac = max(0.0, min(1.0, train_frac))  # clamp to [0,1]
+
+        # --- build index arrays ---
+        idx = np.arange(n_realisations)
+        cut = int(train_frac * n_realisations)
+        train_idx = idx[:cut]
+        val_idx = idx[cut:]
+
+        print(f"Using {len(train_idx)} train and {len(val_idx)} validation realisations.")
+
+        # --- compute MSE(ILC) and MSE(NN) for all realisations ---
+        mse_ilc = np.empty(n_realisations, dtype=float)
+        mse_nn  = np.empty(n_realisations, dtype=float)
+
+        for r in idx:
+            mse_ilc[r] = self.inference.compute_mse("ilc", r) * 1E12
+            mse_nn[r]  = self.inference.compute_mse("nn",  r) * 1E12 
+
+        # --- prepare scatter plot ---
+        fig, ax = plt.subplots(figsize=(7, 6))
+
+        # train points
+        if len(train_idx) > 0:
+            ax.loglog(
+                mse_ilc[train_idx],
+                mse_nn[train_idx],
+                'o',
+                color='blue',
+                alpha=0.6,
+                label="train",
+            )
+
+        # validation points
+        if len(val_idx) > 0:
+            ax.loglog(
+                mse_ilc[val_idx],
+                mse_nn[val_idx],
+                's',
+                color='red',
+                alpha=0.8,
+                label="validation",
+            )
+
+        # y = x line
+        #xmin = mse_ilc.min()
+        #xmax = mse_ilc.max()
+        #ymin = mse_nn.min()
+        #ymax = mse_nn.max()
+        #lo = min(xmin, ymin)
+        #hi = max(xmax, ymax)
+        lo = 5E1
+        hi = 0.5E4
+
+        xline = np.logspace(np.log10(lo), np.log10(hi), 100)
+        ax.loglog(xline, xline, 'k--', linewidth=1.0, label=r"$y=x$")
+
+        ax.set_xlabel(r"MSE(ILC) $[\mu K^2]$", fontsize=14)
+        ax.set_ylabel(r"MSE(NN) $[\mu K^2]$", fontsize=14)
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(lo, hi)
+        try:
+            title_lam = self.lam
+        except AttributeError:
+            title_lam = None
+
+        if title_lam is not None:
+            ax.set_title(f"MSE(NN) vs MSE(ILC) (lam={title_lam})", fontsize=14)
+        else:
+            ax.set_title("MSE(NN) vs MSE(ILC)", fontsize=14)
+
+        ax.grid(True, which="both", linestyle=":", linewidth=0.5)
+        ax.legend(fontsize=14)
+        fig.tight_layout()
+        plt.show()
         
 
 # frequencies = ["030"]
