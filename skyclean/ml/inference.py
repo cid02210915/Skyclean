@@ -20,7 +20,8 @@ from skyclean.silc import SamplingConverters
 class Inference:
     """Class for CMB prediction inference using trained models."""
     
-    def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None):
+    def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None,
+                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3, momentum: float = 0.9, ):
         """Initialize the CMB inference system.
         
         Parameters:
@@ -34,6 +35,8 @@ class Inference:
             seed (int): Random seed for model initialization.
             model_path (str, optional): Specific path to model checkpoint. If None, loads the latest model.
         """
+        self.extract_comp = extract_comp
+        self.component = component
         self.frequencies = frequencies
         self.realisations = realisations
         self.lmax = lmax
@@ -43,8 +46,11 @@ class Inference:
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
-        self.extract_comp = extract_comp
-        self.component = component
+        self.rn = rn
+        self.batch = batch_size
+        self.epochs = epochs
+        self.lr = learning_rate 
+        self.momentum = momentum 
         
         # Initialize file templates
         self.file_templates = FileTemplates(directory)
@@ -65,7 +71,7 @@ class Inference:
             )
 
     
-    
+    '''
     def load_model(self, force_load=False):
         """Load model weights for inference using fresh start approach.
         
@@ -127,7 +133,56 @@ class Inference:
 
         model = nnx.merge(graphdef, state_restored)
         return model
-    
+    '''
+
+    def load_model(self, force_load: bool = False):
+        """Load and return a trained nnx.Module; also sets self.model."""
+        # 1) Compatibility gate
+        if not force_load:
+            compatibility = self.check_model_compatibility()
+            if not compatibility.get('compatible', False):
+                raise RuntimeError(
+                    f"Model compatibility check failed: {compatibility.get('message','')}. "
+                    f"Pass force_load=True to bypass."
+                )
+
+        # 2) Resolve checkpoint path
+        if getattr(self, "model_path", None):
+            checkpoint_path = os.path.abspath(self.model_path)
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"Specified model path does not exist: {checkpoint_path}")
+            print(f"Loading user-specified model from: {checkpoint_path}")
+        else:
+            model_dir = self.file_templates.output_directories["ml_models"]
+            if not os.path.isdir(model_dir):
+                raise FileNotFoundError(f"Model directory not found: {model_dir}")
+            ckpts = [f for f in os.listdir(model_dir) if f.startswith("checkpoint_")]
+            if not ckpts:
+                raise FileNotFoundError(f"No checkpoints found in {model_dir}")
+            latest = max(ckpts, key=lambda x: int(x.split("_")[1]))
+            checkpoint_path = os.path.abspath(os.path.join(model_dir, latest))
+            print(f"Loading checkpoint from: {checkpoint_path}")
+
+        # 3) Rebuild *exact same* architecture used at train time
+        L = self.lmax + 1
+        ch_in = len(self.frequencies)
+        model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(getattr(self, "seed", 0)))
+
+        # 4) Split to get graphdef and expected state structure and restore
+        graphdef, _ = nnx.split(model)
+        ckpt = ocp.StandardCheckpointer().restore(checkpoint_path)
+        # tolerate both layouts (either {'params': ...} or just params)
+        params = ckpt['params'] if isinstance(ckpt, dict) and 'params' in ckpt else ckpt
+        import jax
+        params = jax.tree.map(jax.device_put, params) # put the whole tree on device in one go (avoid many tiny transfers)
+
+
+        # 5) Merge (single object return in your NNX)
+        model = nnx.merge(graphdef, {'params': params})
+
+        self.model = model
+        return model
+
     def check_model_compatibility(self):
         """Check if the model path is compatible with initialized variables.
         
@@ -216,12 +271,18 @@ class Inference:
         cmb_pred = ilc_mwss - R_pred
         
         # Convert to MW sampling
-        print("Converting prediction to MW sampling...")
+        #print("Converting prediction to MW sampling...")
         cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred, L=self.lmax + 1)
+
         
         # Save result if requested
         if save_result:
-            self._save_cmb_prediction(cmb_mw, realisation)
+            if masked:
+                mask_mw = self.data_handler.load_mask_mw()
+                cmb_mw *= mask_mw
+                self._save_masked_cmb_prediction(cmb_mw, realisation, masked)
+            else:
+                self._save_cmb_prediction(cmb_mw, realisation)
         
         print(f"CMB prediction completed for realisation {realisation}")
         print(f"Prediction shape: {cmb_mw.shape}")
@@ -240,22 +301,46 @@ class Inference:
         """
         try:
             # Create a model configuration string for the filename
-            model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}"
-            
+            #model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}"
+            chs = "_".join(str(n) for n in self.chs)
+            model_config = f"r{realisation}_lmax{self.lmax}_lam{self.lam}_rn{self.rn}_batch{self.batch}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
+
             # Use FileTemplates to get the save path
             save_path = self.file_templates.file_templates["ilc_improved_map"].format(
                 realisation=realisation,
                 lmax=self.lmax,
                 lam=self.lam,
+                rn=self.rn,
+                batch=self.batch,
+                epochs=self.epochs,
+                lr=self.lr,
+                momentum=self.momentum,
+                chs=chs,
                 model_config=model_config
             )
             
             # Save the prediction
             np.save(save_path, cmb_prediction)
+
             print(f"Saved CMB prediction to: {save_path}")
             
         except Exception as e:
             print(f"Warning: Failed to save CMB prediction: {str(e)}")
+    
+    def _save_masked_cmb_prediction(self, cmb_prediction, realisation, mask):
+        try:
+            model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}"
+            save_path = self.file_templates.file_templates["ilc_improved_masked_map"].format(
+                realisation=realisation,
+                lmax=self.lmax,
+                lam=self.lam,
+                model_config=model_config
+            )
+            masked_cmb_prediction = cmb_prediction * mask
+            np.save(save_path, masked_cmb_prediction)
+            print(f"Saved masked CMB prediction to: {save_path}")
+        except Exception as e:
+            print(f"Warning: Failed to save maked CMB prediction: {str(e)}")
     
     def get_model_info(self):
         """Get information about the loaded model.
@@ -292,6 +377,7 @@ class Inference:
             })
         
         return info
+    
 
 # Example inference.
 if __name__ == "__main__":
