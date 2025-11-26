@@ -223,7 +223,7 @@ class Train:
             print("Starting from scratch instead.")
             return 0
 
-    
+    '''
     def loss_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray,):
         """Weighted MAE on the sphere loss function.
         
@@ -237,15 +237,22 @@ class Train:
             jnp.ndarray: Computed loss value.
         """
         pred_residuals = model(images)
-        errors = jnp.abs(residuals-pred_residuals) #L2 loss to penalise bigger errors
+        # errors = jnp.abs(residuals-pred_residuals) #L1 loss to penalise bigger errors
+        diff = pred_residuals - residuals # (b, t, p, c=1)
+        weighted_sum = jnp.einsum("btpc,t->", (diff **2), norm_quad_weights, optimize=True) # Weighted sum over (t, p, c), using norm_quad_weights[t]
+        return weighted_sum / residuals.shape[0] # Average over batch
+    
         # mask = jnp.ones_like(errors)  # Create a mask of ones
         # sin = jnp.sin(jnp.linspace(0, jnp.pi, errors.shape[1]))**5
         # mask = mask * sin[None, :, None, None] 
         # errors = jnp.abs(errors*mask).astype(pred_residuals.dtype)  # Apply the mask to the errors
         #integrate error over theta using quadrature weights.  
-        return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True,)
-                / (residuals.shape[0]))  # Average over batch
+        #return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True,)
+        #        / (residuals.shape[0]))  # Average over batch
         
+        
+        #return weighted_sum / residuals.shape[0] # Average over batch
+    
     @staticmethod
     def loss_fn_harmonic(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray):
         L = 512
@@ -263,7 +270,7 @@ class Train:
         pred_spec = jnp.abs(forward_batch(pred_maps))     # shape (batch, l, m)
         target_spec = jnp.abs(forward_batch(target_maps)) # same shape
 
-        losses = optax.l2_loss(target_spec, pred_spec)
+        losses = optax.l2_loss(target_spec, pred_spec) # squared
 
         return jnp.mean(losses)
 
@@ -293,15 +300,47 @@ class Train:
         per_batch_acc = jnp.einsum("btpc,t->b", errors, norm_quad_weights, optimize=True,)
         return jnp.mean(per_batch_acc) # average over batch
         #return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True)/ residuals.shape[0])
+    '''
 
     @staticmethod
     def loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights,):
-        errors = jnp.abs(residuals-pred_residuals) 
-        return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True,)
-                    / (residuals.shape[0]))  # Average over batch
+        """
+        Train to predict the ILC residual ΔT_ILC, as in McCarthy+:
+            L = Σ_p (ΔT̂_ILC(p) - ΔT_ILC(p))^2
+        with quadrature weighting over t and averaging over batch.
+        """
+        diff = pred_residuals - residuals                  # (b, t, p, c=1)
+        # Weighted sum over (t, p, c), using norm_quad_weights[t]
+        weighted_sum = jnp.einsum("btpc,t->", (diff **2), norm_quad_weights, optimize=True)
+        return weighted_sum / residuals.shape[0] # Average over batch
+
     @staticmethod
-    def acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, threshold = 1.1,):
-        errors = jnp.maximum(residuals / (pred_residuals + 1e-24), pred_residuals / (residuals + 1e-24))
+    def acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights):
+        """
+        Accuracy in the McCarthy+ sense:
+            acc = 1 - MSE_clean / MSE_ILC
+
+        where:
+            MSE_ILC   = ⟨ (ΔT_ILC)^2 ⟩
+            MSE_clean = ⟨ (ΔT_ILC - ΔT̂_ILC)^2 ⟩
+        we expect a smaller MSE_clean, 
+        """
+        delta_ilc = residuals
+        pred_delta_ilc = pred_residuals
+        # (a) MSE of original ILC residual (baseline)
+        mse_ilc = jnp.einsum("btpc,t->", (delta_ilc**2), norm_quad_weights, optimize=True)
+        mse_ilc = mse_ilc / residuals.shape[0] # average over batch 
+        mse_ilc = jnp.maximum(mse_ilc, 1e-24) # Avoid division by zero if mse_ilc is extremely tiny
+        # (b) MSE of cleaned residual: (ΔT_ILC - ΔT̂_ILC)
+        diff = delta_ilc - pred_delta_ilc
+        mse_clean = jnp.einsum("btpc,t->", (diff**2), norm_quad_weights, optimize=True)
+        mse_clean = mse_clean / residuals.shape[0] # average over batch 
+
+        acc = 1.0 - mse_clean / mse_ilc # Fractional improvement
+        return acc
+
+        
+        '''errors = jnp.maximum(residuals / (pred_residuals + 1e-24), pred_residuals / (residuals + 1e-24))
         errors = jnp.where(
             errors < jnp.ones_like(errors) * threshold,
             jnp.ones_like(errors),
@@ -309,10 +348,17 @@ class Train:
         )
         # what fraction of sky is correctly predicted within 10% relative pixel value error
         per_batch_acc = jnp.einsum("btpc,t->b", errors, norm_quad_weights, optimize=True,)
-        return jnp.mean(per_batch_acc)
+        return jnp.mean(per_batch_acc)'''
+
+ 
 
     @staticmethod
     def loss_and_acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray):
+        """
+        Forward pass returning:
+            - loss: MSE on ΔT_ILC (for gradients)
+            - acc : fractional improvement over ILC (for logging)
+        """
         # Single forward pass
         pred_residuals = model(images)
         loss = Train.loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights)
@@ -330,7 +376,7 @@ class Train:
             images (jnp.ndarray): Input images.
             residuals (jnp.ndarray): Target residuals.
             norm_quad_weights (jnp.ndarray): Normalized quadrature weights.
-        
+
         Returns:
             nnx.State: Updated state after the training step.
         """
@@ -340,9 +386,9 @@ class Train:
         # value_and_grad will see: (loss, accuracy)
         # loss is used for grads; accuracy is treated as "auxiliary" data
         (loss, accuracy), grads = nnx.value_and_grad(Train.loss_and_acc_fn, 
-                                                     has_aux=True)(model, images, residuals, norm_quad_weights)
+                                                    has_aux=True)(model, images, residuals, norm_quad_weights)
 
-        #loss, grads = nnx.value_and_grad(Train.loss_fn_harmonic)(model, images, residuals, norm_quad_weights)
+        #loss, grads = nnx.value_and_grad(Train.loss_fn)(model, images, residuals, norm_quad_weights)
         optimizer.update(grads)
         #accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
         metrics.update(loss=loss, accuracy=accuracy)
@@ -367,8 +413,11 @@ class Train:
         model, optimizer, metrics = nnx.merge(graphdef, state)
         model.eval()
         #loss = Train.loss_fn_harmonic(model, images, residuals, norm_quad_weights)
-        loss = Train.loss_fn(model, images, residuals, norm_quad_weights)
-        accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
+        #loss = Train.loss_fn(model, images, residuals, norm_quad_weights)
+        #accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
+        #loss, accuracy = Train.loss_and_acc_fn(model, images, residuals, norm_quad_weights)
+        (loss, accuracy), grads = nnx.value_and_grad(Train.loss_and_acc_fn, 
+                                                    has_aux=True)(model, images, residuals, norm_quad_weights)
         metrics.update(loss=loss, accuracy=accuracy)
         _, state = nnx.split((model, optimizer, metrics))
         return state
