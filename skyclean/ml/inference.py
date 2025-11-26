@@ -287,9 +287,69 @@ class Inference:
         print(f"CMB prediction completed for realisation {realisation}")
         print(f"Prediction shape: {cmb_mw.shape}")
         print(f"Value range: [{cmb_mw.min():.3e}, {cmb_mw.max():.3e}]")
-        
+
         return cmb_mw
         
+
+    def compute_mse(self, comp, realisation, save_result=True, masked=False):
+        """
+        Compute pixel-space MSE for a single realisation.
+
+        Parameters
+        ----------
+        comp : str e.g. {"ilc", "nn"}
+            - "ilc": MSE of the raw ILC map vs true CMB.
+            - "nn" : MSE of the NN-predicted CMB map vs true CMB
+                     (using the trained network).
+        realisation : int
+            Realisation index.
+
+        Returns
+        -------
+        float
+            Mean squared error for this realisation.
+        """
+        comp = comp.lower()
+        if comp not in ("ilc", "nn"):
+            raise ValueError("comp must be 'ilc' or 'nn'")
+        
+        # Get the data for this realisation
+        F, R, _ = self.data_handler.create_residual_mwss_maps(realisation)
+        # R has shape (H, W, 1); squeeze to (H, W)
+        R = np.asarray(R)
+        if R.ndim == 3 and R.shape[-1] == 1:
+            R = R[..., 0]          # shape (H, W)
+        elif R.ndim == 2:
+            R = R                  # already (H, W)
+        else:
+            raise ValueError(f"Unexpected shape for R: {R.shape}")
+        if comp == "ilc":
+            print(f"Calculating MSE(ILC) for realisation {realisation}...")
+            mse = float(np.mean(R ** 2)) # in K
+            return mse
+
+        # comp == "nn":
+        print(f"Calculating MSE(NN) for realisation {realisation}...")
+        # Ensure model is loaded
+        if self.model is None:
+            print("Loading model...")
+            self.model = self.load_model()  
+            print("Loaded model.")
+
+        # Prepare network input (same pipeline as in predict_cmb)
+        F = self.data_handler.transform(F).astype(np.float32)
+        F = jnp.expand_dims(F, axis=0)  # Add batch dimension
+            
+        # Predict normalised residual and inverse-transform
+        R_pred_norm = self.model(F)
+        R_pred = self.data_handler.inverse_transform(R_pred_norm) # shape: ()
+        R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
+        
+        # MSE(NN) = <(R_pred - R_true)^2>
+        diff = R - np.asarray(R_pred)
+        mse = float(np.mean(diff ** 2))
+        print(mse)
+        return mse
 
     
     def _save_cmb_prediction(self, cmb_prediction, realisation):
