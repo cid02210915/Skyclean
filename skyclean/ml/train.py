@@ -303,57 +303,88 @@ class Train:
     '''
 
     @staticmethod
-    def loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights,):
+    def pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss):
         """
-        Train to predict the ILC residual ΔT_ILC, as in McCarthy+:
-            L = Σ_p (ΔT̂_ILC(p) - ΔT_ILC(p))^2
+        Pixel 
+        Train to predict the ILC residual ΔT_ILC, as in McCarthy+: L = Σ_p (ΔT̂_ILC(p) - ΔT_ILC(p))^2
         with quadrature weighting over t and averaging over batch.
+
+        Updated: 
+            Masked, quadrature-weighted MAE.
+
+        pred_residuals, residuals: (B, T, P, C)
+        norm_quad_weights: (T,)
+        mask_mwss: (T, P) or (T, P, 1)
         """
-        diff = pred_residuals - residuals                  # (b, t, p, c=1)
-        # Weighted sum over (t, p, c), using norm_quad_weights[t]
-        weighted_sum = jnp.einsum("btpc,t->", (diff **2), norm_quad_weights, optimize=True)
-        return weighted_sum / residuals.shape[0] # Average over batch
+        diff_sq = (pred_residuals - residuals)**2                  # (b, t, p, c=1)
+        
+        mask = jnp.asarray(mask_mwss)
+        if mask.ndim == 2:
+            mask = mask[None, :, :, None]    # (1, T, P, 1)
+        elif mask.ndim == 3 and mask.shape[-1] == 1:
+            mask = mask[None, :, :, :]       # (1, T, P, 1)
+        else:
+            raise ValueError(f"Unexpected mask_mwss shape: {mask.shape}")
+        
+        # --- build weight map w(T,P) = w_quad(T) * mask(T,P) ---
+        w_t = jnp.asarray(norm_quad_weights)[None, :, None, None]  # (1, T, 1, 1)
+        weights = w_t * mask                 # (1, T, P, 1), broadcasts over batch
+        # (Masked) weighted sum over (t, p, c), using norm_quad_weights[t]
+        #weighted_sum = jnp.einsum("btpc,t->", diff_sq, weights, optimize=True)
+        #return weighted_sum / residuals.shape[0] # Average over batch
+        num = jnp.sum(diff_sq * weights)             # Σ_{b,t,p,c} w_t M_{tp} diff^2
+        den = jnp.sum(weights) + 1e-12               # Σ_{b,t,p,c} w_t M_{tp}
+        loss = num / den
+        return loss
 
     @staticmethod
-    def acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights):
-        """
+    def pix_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss):
+        """ Pixel
         Accuracy in the McCarthy+ sense:
             acc = 1 - MSE_clean / MSE_ILC
 
         where:
             MSE_ILC   = ⟨ (ΔT_ILC)^2 ⟩
             MSE_clean = ⟨ (ΔT_ILC - ΔT̂_ILC)^2 ⟩
-        we expect a smaller MSE_clean, 
+        we expect a smaller MSE_clean than MSE_ILC. 
+
+        pred_residuals, residuals: (B, T, P, C)
+        norm_quad_weights: (T,)
+        mask_mwss: (T, P) or (T, P, 1)
         """
         delta_ilc = residuals
         pred_delta_ilc = pred_residuals
-        # (a) MSE of original ILC residual (baseline)
-        mse_ilc = jnp.einsum("btpc,t->", (delta_ilc**2), norm_quad_weights, optimize=True)
-        mse_ilc = mse_ilc / residuals.shape[0] # average over batch 
-        mse_ilc = jnp.maximum(mse_ilc, 1e-24) # Avoid division by zero if mse_ilc is extremely tiny
-        # (b) MSE of cleaned residual: (ΔT_ILC - ΔT̂_ILC)
-        diff = delta_ilc - pred_delta_ilc
-        mse_clean = jnp.einsum("btpc,t->", (diff**2), norm_quad_weights, optimize=True)
-        mse_clean = mse_clean / residuals.shape[0] # average over batch 
+        # broadcast mask to (1, T, P, 1)
+        mask = jnp.asarray(mask_mwss)
+        if mask.ndim == 2:
+            mask = mask[None, :, :, None]
+        elif mask.ndim == 3 and mask.shape[-1] == 1:
+            mask = mask[None, :, :, :]
+        else:
+            raise ValueError(f"Unexpected mask_mwss shape: {mask.shape}")
+
+        # w_t: (1, T, 1, 1)
+        w_t = jnp.asarray(norm_quad_weights)[None, :, None, None]
+
+        weights = w_t * mask   # (1, T, P, 1), broadcasts over batch
+
+        # MSE_ILC = < (ΔT_ILC)^2 >
+        diff_ilc_sq = delta_ilc**2
+        num_ilc = jnp.sum(diff_ilc_sq * weights)
+        den = jnp.sum(weights) + 1e-24
+        mse_ilc = num_ilc / den
+
+        # MSE_clean = < (ΔT_ILC - ΔT̂_ILC)^2 >
+        diff_clean_sq = (delta_ilc - pred_delta_ilc)**2
+        num_clean = jnp.sum(diff_clean_sq * weights)
+        mse_clean = num_clean / den
 
         acc = 1.0 - mse_clean / mse_ilc # Fractional improvement
         return acc
-
-        
-        '''errors = jnp.maximum(residuals / (pred_residuals + 1e-24), pred_residuals / (residuals + 1e-24))
-        errors = jnp.where(
-            errors < jnp.ones_like(errors) * threshold,
-            jnp.ones_like(errors),
-            jnp.zeros_like(errors),
-        )
-        # what fraction of sky is correctly predicted within 10% relative pixel value error
-        per_batch_acc = jnp.einsum("btpc,t->b", errors, norm_quad_weights, optimize=True,)
-        return jnp.mean(per_batch_acc)'''
-
  
 
     @staticmethod
-    def loss_and_acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray):
+    def loss_and_acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
         """
         Forward pass returning:
             - loss: MSE on ΔT_ILC (for gradients)
@@ -361,13 +392,13 @@ class Train:
         """
         # Single forward pass
         pred_residuals = model(images)
-        loss = Train.loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights)
-        accuracy = Train.acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights)
+        loss = Train.pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+        accuracy = Train.pix_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
         return loss, accuracy # Return loss as main value, accuracy as aux
 
     @jax.jit
     def train_step(graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
-                   norm_quad_weights: jnp.ndarray,):
+                   norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
         """Perform a single training step on a batch of data.
 
         Parameters:
@@ -386,7 +417,7 @@ class Train:
         # value_and_grad will see: (loss, accuracy)
         # loss is used for grads; accuracy is treated as "auxiliary" data
         (loss, accuracy), grads = nnx.value_and_grad(Train.loss_and_acc_fn, 
-                                                    has_aux=True)(model, images, residuals, norm_quad_weights)
+                                                    has_aux=True)(model, images, residuals, norm_quad_weights, mask_mwss)
 
         #loss, grads = nnx.value_and_grad(Train.loss_fn)(model, images, residuals, norm_quad_weights)
         optimizer.update(grads)
@@ -397,7 +428,7 @@ class Train:
 
 
     def eval_step(graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
-                  norm_quad_weights: jnp.ndarray,):
+                  norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
         """Evaluate the model on a batch of data.
 
         Parameters:
@@ -415,16 +446,20 @@ class Train:
         #loss = Train.loss_fn_harmonic(model, images, residuals, norm_quad_weights)
         #loss = Train.loss_fn(model, images, residuals, norm_quad_weights)
         #accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
-        #loss, accuracy = Train.loss_and_acc_fn(model, images, residuals, norm_quad_weights)
-        (loss, accuracy), grads = nnx.value_and_grad(Train.loss_and_acc_fn, 
-                                                    has_aux=True)(model, images, residuals, norm_quad_weights)
+        loss, accuracy = Train.loss_and_acc_fn(
+        model, images, residuals, norm_quad_weights, mask_mwss)
         metrics.update(loss=loss, accuracy=accuracy)
         _, state = nnx.split((model, optimizer, metrics))
         return state
 
 
-    def execute_training_procedure(self):
+    def execute_training_procedure(self, masked: bool = False, fsky: float = 0.7):
         """Execute the training procedure for the CMB-Free ILC model.
+
+        Parameters:
+            masked : bool
+                If True, use the apodised MWSS mask to weight the loss/accuracy.
+                If False, use an all-ones mask with the same shape (no masking).
         """
         Train.clear_gpu_cache()
         learning_rate = self.learning_rate
@@ -478,6 +513,17 @@ class Train:
 
         # Split prior to training loop
         graphdef, state = nnx.split((model, optimizer, metrics))
+        print('Loading the mask...')
+        mask_mwss = self.dataset.mask_mwss(fsky=fsky)   # (T, P, 1)
+        mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
+
+        if not masked:
+            # same shape, all ones → effectively no masking
+            mask_mwss = jnp.ones_like(mask_mwss)
+            print("Training WITHOUT mask (mask_mwss = 1 everywhere).")
+        else:
+            print("Training WITH MWSS mask (mask-weighted loss & accuracy).")
+        
         print_gpu_usage("Before training.")
         print("Starting training")
         for epoch in range(start_epoch, epochs + 1):
@@ -486,7 +532,8 @@ class Train:
                 batch_x, batch_y = next(train_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
-                state = Train.train_step(graphdef, state, images, residuals, norm_quad_weights)
+                state = Train.train_step(graphdef, state, images, residuals, 
+                                         norm_quad_weights, mask_mwss)
                 # Print GPU usage for first batch of first epoch
                 if epoch == 1 and _ == 0:
                     print_gpu_usage("After first training step")
@@ -503,7 +550,8 @@ class Train:
                 batch_x, batch_y = next(test_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
-                state = Train.eval_step(graphdef, state, images, residuals, norm_quad_weights)
+                state = Train.eval_step(graphdef, state, images, residuals, 
+                                        norm_quad_weights, mask_mwss)
             nnx.update((model, optimizer, metrics), state)  # Only updates metrics
             test_iter = iter(tfds.as_numpy(test_ds))
             for metric, value in metrics.compute().items():
@@ -511,7 +559,7 @@ class Train:
             metrics.reset()
 
             print(
-                "[Train/Test] epoch = {:06d}: train_loss = {:.06f}, eval_loss = {:.3f}, train_acc(1.1) = {:.3f}, eval_ac(1.1) = {:.3f}".format(
+                "[Train/Test] epoch = {:03d}: train_loss = {:.03f}, eval_loss = {:.3f}, train_acc(1.1) = {:.3f}, eval_ac(1.1) = {:.3f}".format(
                     epoch,
                     metrics_history["train_loss"][-1],
                     metrics_history["eval_loss"][-1],
@@ -543,10 +591,12 @@ class Train:
             metrics_history (dict): Dictionary containing training and evaluation metrics history.
             current_epoch (int): The current epoch number.
         """
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
+        # fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
+        fig, ((ax1), (ax3)) = plt.subplots(1, 2, figsize=(10, 4))
         
         epochs = range(1, current_epoch + 1)
         
+        '''
         # Loss plots
         ax1.plot(epochs, metrics_history["train_loss"], 'b-', label='Training Loss', linewidth=2)
         ax1.set_title('Training Loss')
@@ -576,11 +626,30 @@ class Train:
         ax4.set_ylabel('Accuracy')
         ax4.grid(True, alpha=0.3)
         ax4.legend()
+        '''
+        ax1.plot(epochs, metrics_history["train_loss"], 'b-', label='Training', linewidth=2)
+        ax1.plot(epochs, metrics_history["eval_loss"], 'r-', label='Validation', linewidth=2)
+        ax1.set_title('Training Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+
+        ax3.plot(epochs, metrics_history["train_accuracy"], 'b-', label='Training', linewidth=2)
+        ax3.plot(epochs, metrics_history["eval_accuracy"], 'r-', label='Validation', linewidth=2)
+        ax3.set_title('Training Accuracy')
+        ax3.set_xlabel('Epoch')
+        ax3.set_ylabel('Accuracy')
+        ax3.grid(True, alpha=0.3)
+        ax3.legend()
         
+        title = f"lmax={self.lmax}, Realisations={self.realisations}, Batch Size={self.batch_size}, lr={self.learning_rate}, Momentum={self.momentum}, Lam={self.lam}, chs={self.chs}, loss_fc={self.loss_tag}"        
+        fig.suptitle(f"Epoch {epochs[-2]}\n{title}", fontsize=11, y=1.02)
         plt.tight_layout()
-        #plt.savefig(f'training_metrics.png', bbox_inches='tight', dpi=150)
-        plt.show()  # Close to save memory
-    
+        #plt.savefig(f'data/ML/models/checkpoint_{epochs[-1]}/training_metrics.png', bbox_inches='tight', dpi=150)
+        plt.show()
+        # plt.close()  # Close to save memory
+
     def plot_examples(self, model, test_batch, epoch: int, n_examples: int = 1):
         """Plot input, output, model prediction and residuals for sample examples.
         Parameters:

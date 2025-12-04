@@ -41,6 +41,8 @@ class FileTemplates():
             if not os.path.exists(value):
                 print(f"Creating directory: {value}")
                 os.makedirs(value)
+
+        mask_file = os.path.join(directory, "HFI_Mask_GalPlane-apo0_2048_R2.00.fits")
         
         self.download_templates = {
             "sync": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
@@ -157,6 +159,9 @@ class FileTemplates():
         "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
+
+        # ---------------- mask for ML ----------------
+        "mask": mask_file,
 
         }
 

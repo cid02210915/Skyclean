@@ -238,3 +238,80 @@ class CMBFreeILC():
         signed_log_R_std = R_std_sum / self.realisations
 
         return signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std
+    
+
+    def mask_hp(self,fsky=0.7) -> np.ndarray:
+            """
+            Load a mask in HEALPix FITS, given the desired f_sky value.
+            """
+
+            # Choose a column by index:
+            # 0: GAL020, 1: GAL040, 2: GAL060, 3: GAL070,
+            # 4: GAL080, 5: GAL090, 6: GAL097, 7: GAL099
+            # e.g. GAL070 = 70% sky retained
+            get_index = {0.2: 0,
+                         0.4: 1,
+                         0.6: 2,
+                         0.7: 3,
+                         0.8: 4,
+                         0.9: 5,
+                         0.97: 6,
+                         0.99: 7}
+            if fsky not in get_index:
+                raise ValueError(f"Unsupported f_sky={fsky}. Allowed values: {sorted(get_index.keys())}")
+            field_index = get_index[fsky]
+
+            # Use the template-managed path
+            mask_path = self.file_templates["mask"]
+            mask = hp.read_map(mask_path, field=field_index)
+            print(f"Mask with f_sky={fsky} loaded from {mask_path}.")
+            return mask
+    
+    def mask_mwss(self,fsky=0.7) -> np.ndarray:
+        '''
+        Convert a healpix mask to mwss format.
+        '''
+        lmax = self.lmax
+        mask_path = self.file_templates["mask"]
+        mask_hp = self.mask_hp(fsky=fsky)
+        mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp, lmax)
+        L = lmax + 1
+        mask_mwss = SamplingConverters.mw_map_2_mwss_map(mask_mw, L=L).astype(np.float32)
+        print('Unbeamed mask MWSS shape: ', mask_mwss.shape)
+        return mask_mwss
+
+
+    
+    def mask_mwss_beamed(self, fsky=0.7) -> np.ndarray:
+        """
+        Proceed the mask by convolving and reducing, then converting to MWSS sampling.
+        Return a mask in MWSS with shape (H, W, 1).
+        """
+        lmax = self.lmax
+        nside = HPTools.get_nside_from_lmax(lmax)
+        standard_fwhm_rad = np.radians(5/60)
+        mask_path = self.file_templates["mask"]
+        mask_hp = self.mask_hp(fsky = fsky)
+        mask_hp_reduced = HPTools.convolve_and_reduce(
+                mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+            )
+        L = lmax + 1
+        mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp_reduced, lmax)
+        mask_mwss = SamplingConverters.mw_map_2_mwss_map(mask_mw, L=L).astype(np.float32)
+        # Ensure (H,W,1)
+        mask_mwss = mask_mwss[..., None]
+        print('Beamed mask MWSS shape: ', mask_mwss.shape)
+        return mask_mwss
+
+    
+    def mask_mw_beamed(self, fsky=0.7) -> np.ndarray:
+        lmax = self.lmax
+        nside = HPTools.get_nside_from_lmax(lmax)
+        standard_fwhm_rad = np.radians(5/60)
+        mask_path = self.file_templates["mask"]
+        mask_hp = self.mask_hp(fsky)
+        mask_hp_reduced = HPTools.convolve_and_reduce(
+            mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+        )
+        mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp_reduced, lmax)
+        return mask_mw
