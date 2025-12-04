@@ -30,7 +30,7 @@ class HPTools():
         Returns:
             numpy.ndarray: Processed map data.
         """
-        hp_alm = hp.map2alm(hp_map, lmax=lmax)
+        hp_alm = hp.map2alm(hp_map, lmax=lmax )
         processed_map = hp.alm2map(hp_alm, nside=nside)
         return processed_map, hp_alm
     
@@ -48,11 +48,11 @@ class HPTools():
             numpy.ndarray: Reconstructed healpix map after pixel-window deconvolution.
         """
         nside = hp.get_nside(hp_map)
-        alm = hp.map2alm(hp_map, lmax=lmax)
+        alm = hp.map2alm(hp_map, lmax=lmax )
         # Pixel window function
         pixwin = hp.sphtfunc.pixwin(nside, lmax=lmax, pol=False)
         # Divide out pixel window function
-        alm_deconv = hp.almxfl(alm, 1/pixwin)
+        alm_deconv = hp.almxfl(alm, (1/pixwin))
         # Convert back to map
         hp_map_deconv = hp.alm2map(alm_deconv, nside=nside)
         return hp_map_deconv
@@ -77,7 +77,7 @@ class HPTools():
     
         # Convert map → alm
         nside = hp.get_nside(hp_map)
-        alm = hp.map2alm(hp_map, lmax=lmax)
+        alm = hp.map2alm(hp_map, lmax=lmax )
     
         # LFI: Gaussian beam
         if frequency in {"030", "044", "070"}:
@@ -95,6 +95,9 @@ class HPTools():
                 )
             hfi = fits.open(beam_path)
             bl = hfi[1].data["TEMPERATURE"]
+
+        # --- Planck-style threshold: B_ell^c = max(B_ell^c, 0.001) ---
+        bl = np.maximum(bl, 1e-3)
     
         # Apply the deconvolution
         alm_deconv = hp.almxfl(alm, 1.0 / bl)
@@ -110,31 +113,124 @@ class HPTools():
     
         return hp_map_conv
     
-    
-    
-    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float):
+
+    def fermi_taper(L, ell_taper, ell_max=None):
         """
-        Converts healpix map to alm space, applies a standard beam,
+        Fermi (logistic) taper in multipole l.
+
+        w(l) = 1                       for l ≤ l_taper
+             = 1 / (1 + exp((l-l0)/Δℓ)) for l_taper < l < l_max
+             = 0                       for l ≥ l_max
+
+        with l0 = (l_taper + l_max)/2 and Δℓ = (l_max - l_taper)/4.
+        """
+        if ell_max is None:
+            ell_max = L - 1
+
+        ells = np.arange(L, dtype=float)
+        w = np.ones(L, dtype=float)
+
+        ell0 = 0.5 * (ell_taper + ell_max)
+        delta = (ell_max - ell_taper) / 4.0
+
+        mid = (ells > ell_taper) & (ells < ell_max)
+
+        w[ells >= ell_max] = 0.0
+        w[mid] = 1.0 / (1.0 + np.exp((ells[mid] - ell0) / delta))
+        w[ells <= ell_taper] = 1.0
+
+        return w
+
+
+    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float, ell_taper_frac: float = 0.94):
+        """
+        Converts healpix map to alm space, applies a tapered standard beam,
         and converts back to map space.
-    
-        Parameters:
-            hp_map (numpy.ndarray): Input healpix map.
-            lmax (int): Maximum multipole moment for spherical harmonics.
-            standard_fwhm_rad (float): Standard beam FWHM in radians.   
-    
-        Returns:
-            numpy.ndarray: Reconstructed healpix map after beam convolution.
+
+        Beam = Gaussian(FWHM=standard_fwhm_rad) * Fermi taper in l,
+        where taper starts at ell_taper_frac * lmax and goes to 0 at lmax.
         """
         nside = hp.get_nside(hp_map)
-        alm = hp.map2alm(hp_map, lmax=lmax)
-        # Standard beam for the desired FWHM
-        Standard_bl = hp.sphtfunc.gauss_beam(standard_fwhm_rad, lmax=lmax, pol=False)
-        # Apply standard beam
-        alm_conv = hp.almxfl(alm, Standard_bl)
-        # Convert back to map
+
+        # Map -> alm
+        alm = hp.map2alm(hp_map, lmax=lmax )
+
+        # Gaussian beam
+        bl = hp.sphtfunc.gauss_beam(standard_fwhm_rad, lmax=lmax, pol=False)
+
+        # Fermi taper in ℓ
+        ell_taper = int(ell_taper_frac * lmax)
+        taper = HPTools.fermi_taper(lmax + 1, ell_taper, ell_max=lmax)
+
+        # Tapered effective beam
+        # bl *= taper
+
+        # Apply tapered beam
+        alm_conv = hp.almxfl(alm, bl)
+
+        # alm -> map
         hp_map_conv = hp.alm2map(alm_conv, nside=nside)
+
         return hp_map_conv
+
     
+    def fermi_taper(L, ell_taper, ell_max=None):
+        """
+        Fermi (logistic) taper in multipole l.
+
+        Define the window w(l) by
+            w(l) = 1
+                for  l ≤ l_taper
+
+            w(l) = 1 / [ 1 + exp( (l - l0) / Δl ) ]
+                for  l_taper < l < l_max
+
+            w(l) = 0
+                for  l ≥ l_max
+
+        where
+            l0  = (l_taper + l_max) / 2
+            Δl  = (l_max - l_taper) / 4
+
+        so that the transition from 1 → 0 is smooth between l_taper and l_max,
+        with midpoint at l0 and a width of order (l_max - l_taper)/4.
+
+        Parameters
+        ----------
+        L : int
+            Band-limit (l runs from 0 to L-1).
+        ell_taper : int
+            Multipole at which tapering starts.
+        ell_max : int, optional
+            Multipole at which the window reaches zero. Defaults to L-1.
+
+        Returns
+        -------
+        w : ndarray, shape (L,)
+            Taper window w(l).
+        """
+
+        if ell_max is None:
+            ell_max = L - 1
+
+        ells = np.arange(L, dtype=float)
+        w = np.ones(L, dtype=float)
+
+        # Fermi parameters
+        ell0 = 0.5 * (ell_taper + ell_max)
+        delta = (ell_max - ell_taper) / 4.0
+
+        mid = (ells > ell_taper) & (ells < ell_max)
+
+        # Hard 0 above ell_max
+        w[ells >= ell_max] = 0.0
+        # Smooth transition in (ell_taper, ell_max)
+        w[mid] = 1.0 / (1.0 + np.exp((ells[mid] - ell0) / delta))
+        # Explicitly enforce w=1 below/at ell_taper
+        w[ells <= ell_taper] = 1.0
+
+        return w
+
         
     @staticmethod
     def unit_convert(hp_map: np.ndarray, frequency: str):
@@ -143,7 +239,7 @@ class HPTools():
 
         Parameters:
             hp_map (numpy.ndarray): The input healpix map.
-            frequency (str): The frequency of the map, used to determine the unit conversion.   
+            frequency (str): The frequency of the map, used to determine the unit conversion. 
 
         Returns:
             numpy.ndarray: The healpix map with converted units.    
@@ -158,6 +254,22 @@ class HPTools():
             hp_map = hp_map  # No conversion for other frequencies
         return hp_map
     
+    
+    @staticmethod
+    def unit_convert_cib(hp_map: np.ndarray, frequency: str) -> np.ndarray:
+        """
+        Convert CIB GNILC maps from MJy/sr to K_CMB for 353, 545, 857 GHz.
+        NRAS 466, 286-319 (2017)  
+        """
+        factors = {
+            "353": 287.45,   # MJy/sr per K_CMB at 353 GHz
+            "545": 58.0356,  # MJy/sr per K_CMB at 545 GHz
+            "857": 2.2681,   # MJy/sr per K_CMB at 857 GHz
+        }
+        if frequency in factors:
+            hp_map = hp_map / factors[frequency]
+        return hp_map
+
 
     # For synch/dust/tSZ (have pixel window): coonv standard beam -> deconv Pℓ -> reduce
     @staticmethod
@@ -168,8 +280,8 @@ class HPTools():
         """
         
         hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
-        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
-        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
+        # hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
         return hp_map_reduced
     
     @staticmethod
@@ -201,16 +313,16 @@ class HPTools():
         )
 
         # Step 2: pixel-window deconvolution
-        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        # hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
 
         # Step 3: reduce to target NSIDE for CFN accumulation
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
-            hp_map_noP,
+            hp_map_beamed,
             lmax=lmax,
             nside=nside
         )
-
         return hp_map_reduced
+    
 
     # For CMB synfast (no pixel window): beam -> reduce
     @staticmethod
@@ -244,9 +356,10 @@ class HPTools():
 
 class MWTools():
     """Tools to process maps in MW (McEwen & Wiaux) sampling"""
-    
+
+
     @staticmethod
-    def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0,):
+    def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float):
         """
         Performs a wavelet transform on MW map using the S2WAV library.   
 
@@ -261,10 +374,10 @@ class MWTools():
         """
 
         # default JAX path
-        j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-        #print ('shape:', j_filter[0].shape) 
-        #print ('shape:', j_filter[1].shape) 
-        #print ('shape:', j_filter[2].shape) 
+        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
+        #j_filter = build_axisym_filter_bank(L, lam=lam)
+        j_filter = build_axisym_filter_bank(L, J0=0)
+
         
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
             mw_map,
@@ -277,7 +390,8 @@ class MWTools():
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs  
- 
+
+
 
     ''' 
     @staticmethod
@@ -311,7 +425,7 @@ class MWTools():
 
 
     @staticmethod
-    def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
+    def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float):
         """
         Performs a wavelet transform on MW alm using the S2WAV library.
 
@@ -324,7 +438,8 @@ class MWTools():
         Returns:
             tuple: A tuple containing the wavelet coefficients and scaling coefficients.
         """
-        j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
+        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
+        j_filter = build_axisym_filter_bank(L, lam=lam)
 
         wavelet_coeffs, scaling_coeffs = s2wav.flm_to_analysis(
             mw_alm,
@@ -345,7 +460,7 @@ class MWTools():
         wavelet_coeffs,
         L: int,
         N_directions: int,
-        lam: float = 2.0,
+        lam: float,
         reality: bool = False,
         band_index: int | None = None,
     ):
@@ -355,7 +470,8 @@ class MWTools():
         """
         
         # 1) Build filter bank
-        j_filter = filters.filters_directional_vectorised(L, N_directions, J_min=0, lam=float(lam))
+        #j_filter = filters.filters_directional_vectorised(L, N_directions, J_min=0, lam=float(lam))
+        j_filter = build_axisym_filter_bank(L, lam=lam)
         J = len(j_filter[0])  # number of expected wavelet bands
         #print ("number of wavelet bands J:", J)
 
@@ -460,7 +576,7 @@ class MWTools():
             )
 
     @staticmethod
-    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, N_directions: int = 1, lam: float = 2.0,):
+    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, lam: float, N_directions: int = 1):
         """
         Performs an inverse wavelet transform on the given wavelet coefficients (assuming scaling coefficients are included at the first index).
 
@@ -473,8 +589,8 @@ class MWTools():
         Returns:
             jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
         """
-        j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
-        #j_filter = build_axisym_filter_bank(L, lam)
+        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+        j_filter = build_axisym_filter_bank(L, J0=0)
         #print(wavelet_coeffs[0].shape)
         f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
         wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from
@@ -555,7 +671,7 @@ class MWTools():
         plt.savefig(f'{title}.png')
         plt.show()
 
-    
+    '''
     @staticmethod
     def visualise_axisym_wavelets(L: int, lam: float = 2.0):
         """
@@ -566,7 +682,8 @@ class MWTools():
             L (int): Maximum multipole moment for the wavelet transform; lmax+1
             lam (float): Wavelet parameter, default is 2.0. 
         """
-        j_filter = filters.filters_directional_vectorised(L=L, N=1, lam=lam)[0]
+        #j_filter = filters.filters_directional_vectorised(L=L, N=1, lam=lam)[0]
+        j_filter = build_axisym_filter_bank(L=L, lam=lam)[0]
         shape = j_filter.shape
         #print ('shape:', j_filter[0].shape) 
         #print ('shape:', j_filter[8].shape) 
@@ -578,10 +695,112 @@ class MWTools():
             plt.xlabel("l", fontsize=16)
             plt.ylabel("Real part of wavelet filter", fontsize=16)
             plt.title(f"lambda = {lam}, axisym")
-            plt.xscale('log')
+            #plt.xscale('log')
             plt.legend()
+            #plt.xlim(0,2)            #check the removal of monopole and dipole
             plt.grid(ls=':')
         plt.show()
+    '''
+    @staticmethod
+    def visualise_axisym_wavelets(L: int, rel_thresholds=(0.0, 1e-3, 1e-4)):
+        """
+        Plots the axisymmetric wavelet filters and the scaling function,
+        then prints band tables for multiple relative thresholds.
+
+        rel_thresholds : iterable of floats
+            Each value is a fraction of the maximum amplitude used to
+            decide support:
+                support = {ℓ : |w(ℓ)| > thr * max_ℓ |w(ℓ)|}
+        """
+        psi, phi_l = build_axisym_filter_bank(L=L)
+
+        j_filter = psi
+        J = j_filter.shape[0]
+        shape = j_filter.shape
+        ells = np.arange(L)
+        middle_m = L - 1  # m = 0 column
+
+        # --------- plot (independent of threshold) ----------
+        plt.figure(figsize=(7, 4))
+        base = plt.get_cmap("tab20")
+
+        scal_color = base(0)
+        wavelet_colors = [base(i + 1) for i in range(J)]
+
+        # scaling function
+        w_scal = np.real(phi_l)
+        if w_scal.max() != 0:
+            w_scal_plot = w_scal / w_scal.max()
+        else:
+            w_scal_plot = w_scal
+
+        plt.plot(ells, w_scal_plot, "--", color=scal_color, label="Scal.")
+
+        # wavelets
+        for j in range(shape[0]):
+            wj = np.real(j_filter[j][:, middle_m])
+            if wj.max() != 0:
+                wj_plot = wj / wj.max()
+            else:
+                wj_plot = wj
+            plt.plot(ells, wj_plot, color=wavelet_colors[j], label=fr"$j = {j}$")
+
+        plt.xlabel(r"$\ell$", fontsize=16)
+        plt.ylabel("Normalised harmonic response", fontsize=16)
+        plt.title("Axisym wavelets")
+        plt.grid(ls=':')
+
+        plt.legend(bbox_to_anchor=(1.02, 1.0),
+                   loc="upper left",
+                   borderaxespad=0.)
+        plt.tight_layout()
+        plt.show()
+
+        # --------- band tables for each threshold ----------
+        for thr in rel_thresholds:
+            bands = []
+
+            # ----- scaling -----
+            w_abs = np.abs(w_scal)
+            if w_abs.max() != 0:
+                cutoff = thr * w_abs.max()
+                support = np.where(w_abs > cutoff)[0]
+            else:
+                support = np.array([], dtype=int)
+
+            if support.size > 0:
+                ell_min  = int(support[0])
+                ell_max  = int(support[-1])
+                ell_peak = int(ells[np.argmax(w_abs)])
+                bands.append(("Scal.", ell_min, ell_peak, ell_max))
+
+            # ----- wavelets -----
+            for j in range(shape[0]):
+                wj = np.real(j_filter[j][:, middle_m])
+                w_abs = np.abs(wj)
+
+                if w_abs.max() == 0:
+                    continue
+
+                cutoff = thr * w_abs.max()
+                support = np.where(w_abs > cutoff)[0]
+                if support.size == 0:
+                    continue
+
+                ell_min  = int(support[0])
+                ell_max  = int(support[-1])
+                ell_peak = int(ells[np.argmax(w_abs)])
+                bands.append((j, ell_min, ell_peak, ell_max))
+
+            # ----- print table for this threshold -----
+            print(f"\nBand table (relative threshold = {thr:g})")
+            print("Wavelet scale j   ell_min^j   ell_peak^j   ell_max^j")
+            for label, ell_min, ell_peak, ell_max in bands:
+                if isinstance(label, str):   # scaling row
+                    lab_str = f"{label:>13s}"
+                else:                        # integer j
+                    lab_str = f"{label:14d}"
+                print(f"{lab_str}   {ell_min:9d}   {ell_peak:11d}   {ell_max:9d}")
 
 
 class SamplingConverters():
@@ -662,7 +881,7 @@ class SamplingConverters():
             mw_map (numpy.ndarray): The converted MW map in spherical harmonics representation.
         """
         L = lmax + 1
-        hp_alm = hp.map2alm(hp_map, lmax=lmax)
+        hp_alm = hp.map2alm(hp_map, lmax=lmax )
         mw_alm = SamplingConverters.hp_alm_2_mw_alm(hp_alm, lmax)
         mw_map = s2fft.inverse(mw_alm, L=L, method=method, reality = True)
         return mw_map
@@ -670,7 +889,8 @@ class SamplingConverters():
     @staticmethod
     def mw_map_2_hp_map(mw_map: np.ndarray, lmax: int, method = "jax_cuda"):
         """
-        Converts a MW map to a Healpix map by transforming the map to spherical harmonics and then converting the alm to Healpix sampling.
+        Converts a MW map to a Healpix map by transforming the map to spherical harmonics 
+        and then converting the alm to Healpix sampling.
 
         Parameters:
             mw_map (numpy.ndarray): The input MW map in spherical harmonics representation.
@@ -714,4 +934,3 @@ class SamplingConverters():
             """
             mw_alm = s2fft.forward(mwss_map, L=L, sampling = "mwss", reality = True)
             return s2fft.inverse(mw_alm, L=L, sampling = "mw", reality = True)
-    
