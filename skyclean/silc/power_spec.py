@@ -11,51 +11,52 @@ class MapAlmConverter:
     def __init__(self, file_templates: Dict[str, str]):
         self.file_templates = file_templates
 
+    # ---------- public ----------
     def to_alm(
         self,
         component: str,
         *,
-        source: str = "downloaded",   # "downloaded" | "processed" | "ilc_synth"
+        source: str = "downloaded",         # "downloaded" | "processed" | "ilc_synth"
+        processed: Optional[bool] = None,
         frequency: Optional[Union[int, str]] = None,
         realisation: Optional[int] = None,
         lmax: Optional[int] = None,
         field: int = 0,
+        # ilc_synth-only args:
         extract_comp: Optional[str] = None,
         frequencies: Optional[Union[str, int, Iterable[int]]] = None,
         lam: Optional[Union[int, float, str]] = None,
+        nsamp: float | None = None, 
     ) -> Dict[str, Any]:
 
-        # --- hard guard the source; do NOT override it ---
-        if source not in ("downloaded", "processed", "ilc_synth"):
-            raise ValueError(f"source must be 'downloaded', 'processed', or 'ilc_synth', got {source!r}")
-
-        # if processed is not None:
-        #     source = "processed" if processed else "downloaded"   # ← DELETE THIS OVERRIDE
+        if processed is not None:
+            source = "processed" if processed else "downloaded"
 
         path = self._format_path(
             component=component, source=source,
             frequency=frequency, realisation=realisation, lmax=lmax,
-            extract_comp=extract_comp, frequencies=frequencies, lam=lam,
+            extract_comp=extract_comp, frequencies=frequencies, lam=lam, nsamp=nsamp,
         )
 
-        # Load the map
+        # 2) Load the map from disk
         arr = self._load_map(path, field=field)
-
-        # Decide sampling by extension, fallback to shape
+    
+        # 3) Decide sampling by file extension first; fallback to shape
         pl = path.lower()
         if pl.endswith((".fits", ".fit")):
             sampling = "healpix"
         else:
-            sampling, _ = self._detect_sampling(arr)
+            sampling, _ = self._detect_sampling(arr)  # returns ("healpix"/"mw", info)
 
-        # Transform to alm
+        # 4) Transform to alm
         if sampling == "healpix":
             if lmax is None:
                 raise ValueError("HEALPix input: please pass lmax explicitly.")
             lmax_used = int(lmax)
             alm_hp = hp.map2alm(arr, lmax=lmax_used, pol=False, iter=0).astype(np.complex128, copy=False)
             return {"alm": alm_hp, "format": "healpy", "lmax": lmax_used, "path": path}
-
+    
+        # sampling == 'mw'
         L = arr.shape[0]
         lmax_used = L - 1
         arr = np.asarray(np.real(np.squeeze(arr)), dtype=np.float64, order="C")
@@ -79,6 +80,7 @@ class MapAlmConverter:
         extract_comp: Optional[str],
         frequencies: Optional[Union[str, int, Iterable[int]]],
         lam: Optional[Union[int, float, str]],
+        nsamp: Optional[Union[int, float]],  
     ) -> str:
         
         if source == "downloaded":
@@ -124,6 +126,7 @@ class MapAlmConverter:
                 raise ValueError("ilc_synth needs extract_comp, realisation, lmax, lam, and frequencies")
 
             lam_str = lam if isinstance(lam, str) else f"{float(lam):.1f}"
+            nsamp_str = "" if nsamp is None else str(int(nsamp))
 
             kw = dict(
                 extract_comp=extract_comp,   # target, e.g. 'cmb'
@@ -132,8 +135,10 @@ class MapAlmConverter:
                 realisation=int(realisation),
                 lmax=int(lmax),
                 lam=lam_str,
+                nsamp=nsamp_str,
             )
             return fmt.format(**kw)
+
         raise ValueError("source must be 'downloaded', 'processed', or 'ilc_synth'")
     
     def _load_map(self, path: str, field: int) -> np.ndarray:
@@ -186,13 +191,12 @@ class MapAlmConverter:
                 return "healpix", {"nside": int(nside)}
             except Exception:
                 pass
-        # MW: 2D with (L, 2L-1) only 
+        # MW: 2D with (L, 2L-1) only (by your spec)
         if arr.ndim == 2:
             n0, n1 = arr.shape
             if n1 == 2 * n0 - 1:
                 return "mw", {"L": int(n0)}
         raise ValueError("Could not determine sampling (neither HEALPix nor MW).")
-    
 
 class PowerSpectrumTT:
     '''
@@ -224,7 +228,7 @@ class PowerSpectrumTT:
         cl = hp.alm2cl(alm_hp)
         return np.arange(cl.size), cl
     
-
+    
     @staticmethod
     def cl_to_Dl(ell: np.ndarray, cl: np.ndarray, input_unit: str = "K") -> np.ndarray:
         """
@@ -251,6 +255,7 @@ class PowerSpectrumTT:
           processed -> "--"
           downloaded -> "-."
         """
+    
         # normalize input to a list
         if isinstance(curves, (dict, tuple)):
             curves = [curves]
@@ -278,18 +283,19 @@ class PowerSpectrumTT:
         plt.tight_layout()
         if save_path: plt.savefig(save_path, dpi=200)
         if show: plt.show()
-        
+    
     @staticmethod
     def load_planck_Dl(directory: str):
         """Load Planck 2018 TT theory from <directory>/cmb_spectrum.txt (cols: ell, Dl[µK^2], ...)."""
-        path = os.path.join(directory, "cmb_spectrum_theory.txt")
+        path = os.path.join(directory, "cmb_spectrum.txt")
         if not os.path.exists(path):
             return None
         data = np.loadtxt(path)
         ell = data[:, 0].astype(int)
         Dl  = data[:, 1].astype(np.float64)   # already µK^2
         return ell, Dl
-
+    
+    
 class PowerSpectrumCrossTT:
     """
     Minimal cross-spectrum utilities (TT):
