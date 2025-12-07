@@ -45,8 +45,9 @@ class FileTemplates():
         self.download_templates = {
             "sync": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "dust": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermaldust-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
-            "noise": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_noise_{frequency}_full_map_mc_{realisation:05d}.fits",
-            'tsz': "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits"
+            "noise":"http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_noise_{frequency}_full_map_mc_{realisation:05d}.fits",
+            'tsz':  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "cib":  "http://pla.esac.esa.int/pla/aio/product-action?MAP.MAP_ID=COM_CompMap_CIB-GNILC-F{frequency}_2048_R2.00.fits",
         }
 
         self.file_templates = {
@@ -56,6 +57,7 @@ class FileTemplates():
         "dust":  os.path.join(self.output_directories["cmb_realisations"], "dust_f{frequency}.fits"),
         "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
         "tsz":   os.path.join(self.output_directories["cmb_realisations"], "tsz_f{frequency}.fits"),
+        "cib":   os.path.join(self.output_directories["cmb_realisations"], "cib_f{frequency}.fits"),
 
         # ---------------- processed maps ----------------
         "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
@@ -63,7 +65,8 @@ class FileTemplates():
         "processed_dust":  os.path.join(self.output_directories["processed_maps"], "processed_dust_f{frequency}_lmax{lmax}.npy"),
         "processed_noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
         "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
-        "cfn":             os.path.join(self.output_directories["cfn"],           "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
+        "processed_cib":   os.path.join(self.output_directories["processed_maps"], "processed_cib_f{frequency}_lmax{lmax}.npy"),
+        "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
         # ---------------- wavelet transforms ----------------
         "wavelet_coeffs": os.path.join(
@@ -89,56 +92,61 @@ class FileTemplates():
         # Per-frequency, per-scale doubled wavelet maps (still per input component)
         "doubled_maps": os.path.join(
             self.output_directories["doubled_maps"],
-            "doubled_{component}_f{frequency}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "doubled_{component}_f{frequency}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Covariance matrices per scale over the whole band-set (frequencies join tag, e.g. 30_44_70_...)
         "covariance_matrices": os.path.join(
             self.output_directories["covariance_matrix"],
-            "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Weights per scale; {type} is "weight_vector" (or "cilc_cmb" for constrained case)
         "weight_vector_matrices": os.path.join(
             self.output_directories["weight_vector_data"],
-            "{component}_{type}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "{component}_{type}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
         "ilc_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Legacy alias (same path)
         "ilc_doubled_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
         
         # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
         "trimmed_maps": os.path.join(
             self.output_directories["ilc_trimmed_maps"],
-            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
         
-
         # Final synthesized map — records target (extract_comp), source (component), and band-set
         "ilc_synth": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
-            "{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Optional: power spectrum
         "ilc_spectrum": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
-            "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"
+            "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
-        # ---------------- ML (left unchanged) ----------------
-        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
+        # ---------------- ML ----------------
+        "foreground_estimate": os.path.join(
+            self.output_directories["ml_maps"],
+            "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"),
+        "ilc_residual": os.path.join(
+            self.output_directories["ml_maps"],
+            "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"),
+        "ilc_mwss": os.path.join(
+            self.output_directories["ml_maps"],
+            "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"),
         }
 
     def hfi_beam_path(self, frequency: str) -> str:
