@@ -6,7 +6,9 @@ from .map_tools import *
 from .utils import *
 from .file_templates import *
 from .power_spec import *
+from ..ml.data import CMBFreeILC
 from ..ml.inference import Inference
+
 
 class Visualise(): 
     def __init__(self, inference: Inference, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
@@ -36,6 +38,9 @@ class Visualise():
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
+
+        self.data_handler = CMBFreeILC('cmb', 'cfn', frequencies, rn, lmax, 1, lam_list[0], batch_size, False, [0.8, 0.2], directory)
+
 
     def visualise_maps(self, comps: list):
         """
@@ -442,7 +447,7 @@ class Visualise():
                                     lam=lam
                                 )
                                 ilc_mw = np.load(fp)
-                                hp_ilc = SamplingConverters.mw_map_2_hp_map(ilc_mw, lmax)*1E6
+                                hp_ilc = SamplingConverters.mw_map_2_hp_map(ilc_mw, self.lmax)*1E6
                                 # Only store the map for the first lambda value for cross-correlation
                                 if j == 0:  # j is the index in the lambda loop
                                     loaded_maps[comp] = hp_ilc
@@ -556,7 +561,7 @@ class Visualise():
             plt.show()
 
 
-
+    '''
     def visualise_component_ratio_power_spectra(
         self,
         comp_a,
@@ -956,7 +961,209 @@ class Visualise():
         ax.legend(fontsize=14)
         fig.tight_layout()
         plt.show()
-    
+    '''
+    def visualise_component_ratio_power_spectra(
+        self,
+        comp_a,
+        comp_b: str,
+        include_cross_correlation: bool = False,  # currently unused in this mode
+        ratio: bool = True,
+        all_freq: bool = False,                   # this implementation is for all_freq=False
+        masked: bool = False,
+    ):
+        """
+        Visualise the ratio or residual of power spectra between components and a reference
+        component for a single frequency (all_freq=False).
+
+        Parameters
+        ----------
+        comp_a : str or list/tuple of str
+            Component(s) to compare against comp_b.
+        comp_b : str
+            Reference component to compare with. e.g. 'processed_cmb'
+        include_cross_correlation : bool
+            (Not used in this simplified mode.)
+        ratio : bool
+            If True, plot D_ell(comp_a) / D_ell(comp_b).
+            If False, plot D_ell(comp_b) - D_ell(comp_a).
+        all_freq : bool
+            Currently only all_freq=False is supported here.
+        masked : bool
+            If False → full-sky spectra (original behaviour).
+            If True  → multiply all maps by mask in HP space and work with
+                       pseudo spectra \tilde{C}_\ell.
+
+        Returns
+        -------
+        ell : np.ndarray
+            Multipole array used in the plot.
+        results : dict
+            Dictionary mapping curve label -> 1D array of values plotted.
+        """
+        if all_freq:
+            raise NotImplementedError("This version handles only all_freq=False.")
+
+        frequencies = self.frequencies
+        realisation = self.realisation
+        lmax = self.lmax
+        ell = np.arange(lmax + 1)
+        rn = self.rn
+        batch = self.batch_size
+        epochs = self.epochs
+        lr = self.lr
+        momentum = self.momentum
+        chs = "_".join(str(n) for n in self.chs)
+
+        # Normalise comp_a into a list
+        if isinstance(comp_a, str):
+            comp_list = [comp_a]
+        else:
+            comp_list = list(comp_a)
+
+        mw_components = ["ilc_synth", "ilc_improved"]
+
+        # ---------- prepare mask in HEALPix if requested ----------
+        mask_hp = None
+        f_sky = None
+        if masked:
+            mask_mw = self.data_handler.mask_mw_beamed()  # (T, P) in MW
+            mask_hp = SamplingConverters.mw_map_2_hp_map(mask_mw, lmax)
+            mask_hp = np.asarray(mask_hp, dtype=np.float32)
+
+            f_sky = float(np.mean(mask_hp))
+            print(
+                f"visualise_component_ratio_power_spectra: "
+                f"using pseudo spectra with mask (f_sky={f_sky:.4f})."
+            )
+        else:
+            print("visualise_component_ratio_power_spectra: unmasked full-sky spectra.")
+
+        # representative frequency and lambda
+        freq = frequencies[0]
+        lam0 = self.lam_list[0]
+
+        colours = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        # container for plotted data
+        results = {}
+
+        # ---------- helpers to get Cl for a single component ----------
+        def get_cl_component(component: str) -> np.ndarray:
+            """Return C_ell (or pseudo-C_ell if masked=True) for given component."""
+            # MW components
+            if component in mw_components:
+                if component == "ilc_improved":
+                    map_path = self.file_templates[component].format(
+                        rn=rn,
+                        batch=batch,
+                        epochs=epochs,
+                        lr=lr,
+                        momentum=momentum,
+                        chs=chs,
+                        lmax=lmax,
+                        realisation=realisation,
+                        lam=lam0,
+                    )
+                elif component == "ilc_synth":
+                    map_path = self.file_templates[component].format(
+                        extract_comp="cmb",
+                        component="cfn",
+                        frequencies="_".join(str(x) for x in frequencies),
+                        lmax=lmax,
+                        realisation=realisation,
+                        lam=lam0,
+                    )
+                else:
+                    raise ValueError(f"Unknown MW component '{component}'")
+
+                if masked:
+                    # MW -> HP, apply mask, compute pseudo Cl
+                    mw_map = np.load(map_path)
+                    hp_map = SamplingConverters.mw_map_2_hp_map(mw_map, lmax) * 1e6
+                    hp_map *= mask_hp
+                    cl = hp.sphtfunc.anafast(hp_map, lmax=lmax)
+                else:
+                    # original cached full-sky spectrum
+                    cl = self.compute_and_save_mw_power_spec(
+                        map_path, component=component, lam=lam0
+                    )
+                return cl
+
+            # HEALPix components
+            if component == "processed_cmb":
+                map_path = self.file_templates[component].format(
+                    lmax=lmax,
+                    realisation=realisation,
+                )
+            else:
+                # extend for other HP components as needed
+                map_path = self.file_templates[component].format(
+                    lmax=lmax,
+                    realisation=realisation,
+                )
+
+            hp_map = hp.read_map(map_path, verbose=False) * 1e6
+            if masked:
+                hp_map *= mask_hp
+            cl = hp.sphtfunc.anafast(hp_map, lmax=lmax)
+            return cl
+
+        # ---------- loop over comp_a and plot ratios / residuals ----------
+        for i, comp_ai in enumerate(comp_list):
+            color = colours[i % len(colours)]
+
+            cl_a = get_cl_component(comp_ai)
+            cl_b = get_cl_component(comp_b)
+
+            D_ell_a = (ell * (ell + 1) * cl_a) / (2 * np.pi)
+            D_ell_b = (ell * (ell + 1) * cl_b) / (2 * np.pi)
+
+            if ratio:
+                result = D_ell_a / D_ell_b
+                label = f"{comp_ai}/{comp_b}"
+            else:
+                result = D_ell_b - D_ell_a
+                label = f"{comp_b}-{comp_ai}"
+
+            # store the values used for plotting
+            results[label] = result.copy()
+
+            ax.plot(
+                ell,
+                result,
+                linewidth=2.0,
+                label=label,
+                linestyle="-",
+                color=color,
+            )
+
+        ax.set_xlim(1, lmax)
+        if ratio:
+            ax.set_ylim(0.5, 1.5)
+            ax.set_ylabel(r"Ratio of $D_{\ell}$", fontsize=14)
+            ax.axhline(1, ls=":", color="red")
+        else:
+            ax.set_ylabel(r"$\Delta D_{\ell}$ ($\mu\mathrm{K}^2$)", fontsize=14)
+            ax.axhline(0, ls=":", color="black", alpha=0.7)
+
+        ax.set_xlabel(r"$\ell$", fontsize=14)
+        if masked and f_sky is not None:
+            ax.set_title(
+                f"Processed CMB vs cILC-synth ratio (lam={lam0}, pseudo, f_sky={f_sky:.3f})"
+            )
+        else:
+            ax.set_title(f"Processed CMB vs cILC-synth ratio (lam={lam0})")
+
+        ax.grid(True, which="both", linestyle=":", linewidth=0.5)
+        ax.legend(fontsize=14)
+        fig.tight_layout()
+        plt.show()
+
+        # return data used for plotting
+        return ell, results
+
+
 
 
     def visualise_cross_spectrum(
@@ -966,7 +1173,8 @@ class Visualise():
         logy: bool = False,
         loglog: bool = False,
         input_unit: str = "uK",
-        ):
+        masked: bool = False,
+    ):
         """
         Visualise cross power spectra C_ell^{XY} (or D_ell^{XY}) for one or more
         component pairs.
@@ -980,17 +1188,41 @@ class Visualise():
                 [('ilc_synth', 'processed_cmb'),
                  ('ilc_improved', 'processed_cmb')]
         use_Dl : bool
-            If True, plot D_ell = ell(ell+1) C_ell / (2π) (µK² if input_unit="K").
-            If False, plot C_ell.
+            If True, plot D_ell = ell(ell+1) C_ell / (2π).
         logy : bool
             If True, use log scale in y axis.
         loglog : bool
             If True, use log–log axes.
-        input_unit : {"K", ...}
+        input_unit : {"K", "uK", ...}
             Passed to PowerSpectrumCrossTT.cl_to_Dl.
+        masked : bool
+            If True, multiply all maps by the same HEALPix mask before anafast
+            and work with pseudo-spectra \tilde C_\ell.
         """
 
-        # normalise comp_pairs to a list of pairs
+        # ---------- mask + f_sky ----------
+        mask_hp = None
+        f_sky = None
+        f_sky2 = None
+        if masked:
+            # MW mask → HP, apodised
+            mask_mw = self.data_handler.mask_mw_beamed()   # (T, P) in MW
+            mask_hp = SamplingConverters.mw_map_2_hp_map(
+                mask_mw, self.lmax
+            )
+            mask_hp = np.asarray(mask_hp, dtype=np.float32)
+
+            f_sky  = float(np.mean(mask_hp))       # <M>
+            f_sky2 = float(np.mean(mask_hp**2))    # <M^2>
+
+            print(
+                f"visualise_cross_spectrum: using masked spectra "
+                f"(f_sky={f_sky:.4f}, f_sky2={f_sky2:.4f})."
+            )
+        else:
+            print("visualise_cross_spectrum: unmasked spectra.")
+
+        # ---------- normalise comp_pairs ----------
         if isinstance(comp_pairs, tuple) and len(comp_pairs) == 2:
             pair_list = [comp_pairs]
         else:
@@ -1012,7 +1244,7 @@ class Visualise():
 
         fig, ax = plt.subplots(figsize=(8, 6))
 
-        # ---- helpers: return HEALPix map in µK for any component ----
+        # ---------- helpers: return HEALPix map in µK ----------
         def get_mw_hp_map(component: str):
             """Load MW-format map from disk and convert to HEALPix, in µK."""
             if component == "ilc_improved":
@@ -1046,7 +1278,6 @@ class Visualise():
         def get_hp_map(component: str):
             """Load HEALPix map for a component, in µK."""
             template = self.file_templates[component]
-            # crude but matches your current compute_power_spectrum_for_component
             if "frequency" in template:
                 map_path = template.format(
                     realisation=realisation,
@@ -1058,15 +1289,14 @@ class Visualise():
                     realisation=realisation,
                     lmax=lmax,
                 )
-
             hp_map = hp.read_map(map_path, verbose=False) * 1e6
             return hp_map
 
-        # ---- loop over pairs and plot cross spectra ----
+        # ---------- loop over pairs and plot cross spectra ----------
         for i, (comp_x, comp_y) in enumerate(pair_list):
             color = colours[i % len(colours)]
 
-            # pick the right loader for each component independently
+            # load maps
             if comp_x in mw_components:
                 hp_map_x = get_mw_hp_map(comp_x)
             else:
@@ -1077,20 +1307,39 @@ class Visualise():
             else:
                 hp_map_y = get_hp_map(comp_y)
 
-            # cross-spectrum C_ell^{XY}
+            # apply mask to both if requested
+            if masked:
+                hp_map_x = hp_map_x * mask_hp
+                hp_map_y = hp_map_y * mask_hp
+
+            # cross-spectrum C_ell^{XY} (pseudo Cl)
             Cl_xy = hp.sphtfunc.anafast(hp_map_x, map2=hp_map_y, lmax=lmax)
             ell = np.arange(Cl_xy.size)
 
+            # approximate de-masking
+            #if masked and f_sky2 is not None:
+            #    Cl_xy = Cl_xy / f_sky2
+
+            # D_ell or C_ell
             if use_Dl:
-                yvals = PowerSpectrumCrossTT.cl_to_Dl(ell, Cl_xy, input_unit=input_unit)
-                ylabel = (
-                    r"$\ell(\ell+1)C_\ell^{XY}/2\pi\,[\mu\mathrm{K}^2]$"
-                    if str(input_unit).lower() in ("k", "kelvin")
-                    else r"$\ell(\ell+1)C_\ell^{XY}/2\pi ($\mu K^2$)$"
+                yvals = PowerSpectrumCrossTT.cl_to_Dl(
+                    ell, Cl_xy, input_unit=input_unit
                 )
+                if masked:
+                    ylabel = (
+                        r"$\ell(\ell+1)C_\ell^{XY}/2\pi\,[\mu\mathrm{K}^2]$"
+                        if str(input_unit).lower() in ("k", "kelvin")
+                        else r"$\ell(\ell+1)\hat{C_\ell}^{XY}/2\pi$"
+                    )
+                else: 
+                    ylabel = (
+                        r"$\ell(\ell+1)C_\ell^{XY}/2\pi\,[\mu\mathrm{K}^2]$"
+                        if str(input_unit).lower() in ("k", "kelvin")
+                        else r"$\ell(\ell+1)C_\ell^{XY}/2\pi$"
+                    )
             else:
                 yvals = Cl_xy
-                ylabel = r"$C_\ell^{XY} (\mu{K^2})$"
+                ylabel = r"$C_\ell^{XY}\,[\mu\mathrm{K}^2]$"
 
             ax.plot(
                 ell,
@@ -1101,25 +1350,27 @@ class Visualise():
                 label=f"{comp_x} × {comp_y}",
             )
 
-        # ---- formatting ----
+        # ---------- formatting ----------
         if loglog:
             ax.set_xscale("log")
             ax.set_yscale("log")
-            ax.set_ylim(1e2, 1e4)
-        if logy:
+        elif logy:
             ax.set_yscale("log")
 
         ax.set_xlabel(r"$\ell$", fontsize=15)
         ax.set_ylabel(ylabel, fontsize=15)
-        ax.set_title(f"power spectrum (lam={lam})", fontsize=16)
+        if masked and f_sky is not None:
+            ax.set_title(f"pseudo power spectrum (lam={lam} with mask f_sky={f_sky:.3f})", fontsize=16)
+        else:
+            ax.set_title(f"power spectrum (lam={lam})", fontsize=16)
+
         ax.grid(True, which="both", linestyle=":", linewidth=0.5)
         ax.legend(fontsize=12)
         fig.tight_layout()
-
         plt.show()
 
 
-    def visualise_mse_scatter(self, n_realisations: int, split=(0.8, 0.2)):
+    def visualise_mse_scatter(self, n_realisations: int, split=(0.8, 0.2), masked=False):
         """
         Plot MSE(NN) vs MSE(ILC) for an arbitrary number of realisations,
         with a train/validation split.
@@ -1156,8 +1407,8 @@ class Visualise():
         mse_nn  = np.empty(n_realisations, dtype=float)
 
         for r in idx:
-            mse_ilc[r] = self.inference.compute_mse("ilc", r) * 1E12
-            mse_nn[r]  = self.inference.compute_mse("nn",  r) * 1E12 
+            mse_ilc[r] = self.inference.compute_mse("ilc", r, masked=masked) * 1E12
+            mse_nn[r]  = self.inference.compute_mse("nn",  r, masked=masked) * 1E12 
 
         # --- prepare scatter plot ---
         fig, ax = plt.subplots(figsize=(7, 6))
@@ -1207,7 +1458,8 @@ class Visualise():
             title_lam = None
 
         if title_lam is not None:
-            ax.set_title(f"MSE(NN) vs MSE(ILC) (lam={title_lam})", fontsize=14)
+            suffix = " (masked)" if masked else ""
+            ax.set_title(f"MSE(NN) vs MSE(ILC){suffix} (lam={title_lam})", fontsize=14)
         else:
             ax.set_title("MSE(NN) vs MSE(ILC)", fontsize=14)
 

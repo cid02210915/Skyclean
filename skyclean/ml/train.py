@@ -381,7 +381,124 @@ class Train:
 
         acc = 1.0 - mse_clean / mse_ilc # Fractional improvement
         return acc
- 
+    
+    def harm_loss_fn_from_pred(
+        pred_residuals: jnp.ndarray,
+        residuals: jnp.ndarray,
+        norm_quad_weights: jnp.ndarray,
+        mask_mwss: jnp.ndarray,
+        L: int = 512,
+    ):
+        """
+        Harmonic loss:
+        - Compute spherical harmonic coefficients of the residual maps
+        - Minimise |a_lm(pred) - a_lm(true)|^2, with quadrature weights over T.
+        
+        pred_residuals, residuals: (B, T, P, C=1)
+        mask_mwss: (T, P) or (T, P, 1)
+        """
+        L=512
+        # --- handle mask (same logic as pixel loss) ---
+        mask = jnp.asarray(mask_mwss)
+        if mask.ndim == 2:
+            mask = mask[:, :, None]       # (T, P, 1)
+        elif mask.ndim == 3 and mask.shape[-1] == 1:
+            pass                          # already (T, P, 1)
+        else:
+            raise ValueError(f"Unexpected mask_mwss shape: {mask.shape}")
+
+        # Apply mask in pixel space (same for pred and target)
+        pred_residuals = pred_residuals * mask
+        residuals      = residuals * mask
+
+        # Remove the channel dimension for the transform: (B, T, P)
+        pred_maps   = pred_residuals[..., 0]
+        target_maps = residuals[..., 0]
+
+        # ---- spherical harmonic transform, batched over (B, T) ----
+        # forward: map (P,) -> alm (ℓ,m) representation
+        forward = functools.partial(s2fft.forward, L=L, method="jax_cuda")
+
+        # vmap over time, then over batch: in_axes=(0)-> over T, then (0)-> over 
+        forward_b = jax.vmap(forward, in_axes=0, out_axes=0)       # (B, T, P) -> (B, ℓ, m)
+
+        pred_spec   = forward_b(pred_maps)     # (B, ℓ, m)
+        target_spec = forward_b(target_maps)   # (B, ℓ, m)
+
+        # Take magnitude so we compare |a_{ℓm}|:
+        pred_amps   = jnp.abs(pred_spec)
+        target_amps = jnp.abs(target_spec) # why absolute? 
+        #pred_amps   = pred_spec
+        #target_amps = target_spec
+
+        # pointwise L2 loss in harmonic space: (B, T, ℓ, m)
+        losses = optax.l2_loss(target_amps, pred_amps)
+
+        return jnp.mean(losses) # average over batch
+
+
+    @staticmethod
+    def harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=512):
+        """
+        Harmonic-space accuracy in the McCarthy+ sense:
+            acc = 1 - MSE_clean / MSE_ILC
+
+        computed in spherical-harmonic space, *without* any quadrature
+        weighting over T, and only vmapping the forward transform over
+        the batch axis.
+
+        pred_residuals, residuals: (B, T, P, C)
+        mask_mwss: (T, P) or (T, P, 1)
+        L: band-limit for s2fft.forward
+        """
+        L=512
+        # aliases
+        delta_ilc = residuals
+        pred_delta_ilc = pred_residuals
+
+        # --- broadcast mask to (1, T, P, 1) like in pix_acc_fn_from_pred ---
+        mask = jnp.asarray(mask_mwss)
+        if mask.ndim == 2:
+            mask = mask[None, :, :, None]    # (1, T, P, 1)
+        elif mask.ndim == 3 and mask.shape[-1] == 1:
+            mask = mask[None, :, :, :]       # (1, T, P, 1)
+        else:
+            raise ValueError(f"Unexpected mask_mwss shape: {mask.shape}")
+
+        # apply mask in pixel space
+        delta_ilc = delta_ilc * mask        # (B, T, P, C)
+        pred_delta_ilc = pred_delta_ilc * mask
+
+        # drop channel dimension -> (B, T, P)
+        delta_ilc_maps = delta_ilc[..., 0]
+        pred_delta_ilc_maps = pred_delta_ilc[..., 0]
+
+        # --- spherical harmonic transform, vmapped only over batch (B) ---
+        # forward: (T, P) -> alm(ℓ, m, ...)  (whatever layout your s2fft.forward uses)
+        forward = functools.partial(s2fft.forward, L=L, method="jax_cuda")
+
+        # vmap over batch axis 0: in_axes=0, out_axes=0
+        forward_batch = jax.vmap(forward, in_axes=0, out_axes=0)
+
+        # alm shapes: (B, ..., ℓ, m) depending on s2fft config
+        alm_ilc = forward_batch(delta_ilc_maps)
+        alm_pred = forward_batch(pred_delta_ilc_maps)
+
+        # work with amplitudes |a_{ℓm}| to match your earlier pattern
+        amp_ilc = jnp.abs(alm_ilc)
+        amp_pred = jnp.abs(alm_pred)
+
+        # --- define harmonic MSEs, unweighted over (B, T, ℓ, m, ...) ---
+        # MSE_ILC^harm = < |a_ilc|^2 >
+        diff_ilc_sq = amp_ilc**2
+        mse_ilc = jnp.mean(diff_ilc_sq)
+
+        # MSE_clean^harm = < (|a_ilc| - |a_pred|)^2 >
+        diff_clean_sq = (amp_ilc - amp_pred)**2
+        mse_clean = jnp.mean(diff_clean_sq)
+
+        acc = 1.0 - mse_clean / (mse_ilc + 1e-24)
+        return acc
 
     @staticmethod
     def loss_and_acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
@@ -393,7 +510,9 @@ class Train:
         # Single forward pass
         pred_residuals = model(images)
         loss = Train.pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+        #loss = Train.harm_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
         accuracy = Train.pix_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+        #accuracy = Train.harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
         return loss, accuracy # Return loss as main value, accuracy as aux
 
     @jax.jit
@@ -513,15 +632,15 @@ class Train:
 
         # Split prior to training loop
         graphdef, state = nnx.split((model, optimizer, metrics))
-        print('Loading the mask...')
-        mask_mwss = self.dataset.mask_mwss(fsky=fsky)   # (T, P, 1)
-        mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
-
+        mask_mwss = self.dataset.mask_mwss_beamed(fsky=fsky)   # (T, P, 1)
         if not masked:
             # same shape, all ones → effectively no masking
             mask_mwss = jnp.ones_like(mask_mwss)
             print("Training WITHOUT mask (mask_mwss = 1 everywhere).")
         else:
+            print('Loading the mask')
+            print('shape of mask_mwss loaded:', np.shape(mask_mwss))
+            mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
             print("Training WITH MWSS mask (mask-weighted loss & accuracy).")
         
         print_gpu_usage("Before training.")

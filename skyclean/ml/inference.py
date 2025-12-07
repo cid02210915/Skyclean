@@ -278,7 +278,7 @@ class Inference:
         # Save result if requested
         if save_result:
             if masked:
-                mask_mw = self.data_handler.load_mask_mw()
+                mask_mw = self.data_handler.mask_mw_beamed()
                 cmb_mw *= mask_mw
                 self._save_masked_cmb_prediction(cmb_mw, realisation, masked)
             else:
@@ -323,31 +323,49 @@ class Inference:
             R = R                  # already (H, W)
         else:
             raise ValueError(f"Unexpected shape for R: {R.shape}")
+        
+        if masked:
+            mask = self.data_handler.mask_mwss_beamed()  # (T, P) or (T, P, 1)
+            mask = np.asarray(mask)
+            if mask.ndim == 3 and mask.shape[-1] == 1:
+                mask = mask[..., 0]
+            elif mask.ndim != 2:
+                raise ValueError(f"Unexpected mask shape: {mask.shape}")
+        else:
+            mask = None
+
         if comp == "ilc":
             print(f"Calculating MSE(ILC) for realisation {realisation}...")
-            mse = float(np.mean(R ** 2)) # in K
-            return mse
-
-        # comp == "nn":
-        print(f"Calculating MSE(NN) for realisation {realisation}...")
-        # Ensure model is loaded
-        if self.model is None:
-            print("Loading model...")
-            self.model = self.load_model()  
-            print("Loaded model.")
-
-        # Prepare network input (same pipeline as in predict_cmb)
-        F = self.data_handler.transform(F).astype(np.float32)
-        F = jnp.expand_dims(F, axis=0)  # Add batch dimension
+            diff = R
             
-        # Predict normalised residual and inverse-transform
-        R_pred_norm = self.model(F)
-        R_pred = self.data_handler.inverse_transform(R_pred_norm) # shape: ()
-        R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
+        else: # comp == "nn":
+            print(f"Calculating MSE(NN) for realisation {realisation}...")
+            
+            if self.model is None: # Ensure model is loaded
+                print("Loading model...")
+                self.model = self.load_model()  
+                print("Loaded model.")
+
+            # Prepare network input (same pipeline as in predict_cmb)
+            F = self.data_handler.transform(F).astype(np.float32)
+            F = jnp.expand_dims(F, axis=0)  # Add batch dimension
+            
+            # Predict normalised residual and inverse-transform
+            R_pred_norm = self.model(F)
+            R_pred = self.data_handler.inverse_transform(R_pred_norm) # shape: ()
+            R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
         
-        # MSE(NN) = <(R_pred - R_true)^2>
-        diff = R - np.asarray(R_pred)
-        mse = float(np.mean(diff ** 2))
+            # MSE(NN) = <(R_pred - R_true)^2>
+            diff = R - np.asarray(R_pred)
+        
+        if mask is None:
+            mse = float(np.mean(diff ** 2)) # in K
+        else:
+            w = mask
+            num = np.sum(w * diff**2)
+            denom = np.sum(w) + 1e-12
+            mse = float(num / denom)
+
         print(mse)
         return mse
 
