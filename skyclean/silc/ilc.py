@@ -59,16 +59,35 @@ class SILCTools():
 
     # ---- cached Gaussian beam per L ----
     @lru_cache(maxsize=32)
-    def _cached_beam(L: int):
-        nsamp = 1200.0
+    def _cached_beam(L: int, nsamp: float = 1200.0)-> np.ndarray:
         lmax  = L
-        npix  = hp.nside2npix(1 << (int(0.5 * lmax) - 1).bit_length())
-        scale_fwhm = 4.0 * math.sqrt(nsamp / npix)
+
+        nside = 1 << (int(0.5 * lmax) - 1).bit_length()
+        npix  = hp.nside2npix(nside)
+
+        frac = nsamp / npix
+        print(f"[SILCTools._cached_beam] nsamp={nsamp}, npix={npix}, nsamp/npix={frac:.3e}")
+
+        '''
+        if frac > 1.0:
+            raise ValueError(
+                f"nsamp/npix = {frac} > 1. "
+                "The smoothing kernel would be larger than the full sky; "
+                "decrease nsamp or change the resolution."
+            )
+        '''
+        
+        scale_fwhm = 4.0 * math.sqrt(frac)
         return hp.gauss_beam(scale_fwhm, lmax=lmax - 1)   # (L,)
 
 
     @staticmethod
-    def smoothed_covariance(MW_Map1: np.ndarray, MW_Map2: np.ndarray, method='jax_cuda'):
+    def smoothed_covariance(
+        MW_Map1: np.ndarray,
+        MW_Map2: np.ndarray,
+        method: str = "jax_cuda",
+        nsamp: float = 1200.0,
+    ):
         """
         Return real-valued covariance map, smoothed by a Gaussian beam in harmonic space.
         """
@@ -86,54 +105,48 @@ class SILCTools():
         map1 = _ensure_mw(np.real(MW_Map1))
         map2 = _ensure_mw(np.real(MW_Map2))
 
-        # trivial guard
         if L < 2 or map1.shape[1] != exp:
             return np.real(map1 * map2)
 
-        # pixelwise product (keep real; reality=True below)
         Rpix = map1 * map2
-
-        # forward -> beam -> inverse
         Ralm = s2fft.forward(Rpix, L=L, method=method, spmd=False, reality=True)
-        beam = SILCTools._cached_beam(Ralm.shape[0])  # CPU array
+
+        # note: nsamp is now a real argument
+        beam = SILCTools._cached_beam(Ralm.shape[0], nsamp=nsamp)
 
         if method == "numpy":
-            # match dtype to avoid implicit casts
             convolved = Ralm * beam[:, None].astype(Ralm.dtype, copy=False)
             out = s2fft.inverse(convolved, L=L, method="numpy", spmd=False, reality=True)
             return np.real(out)
 
-        # JAX path: keep multiply on device and dtype-aligned
         jbeam = jnp.asarray(beam, dtype=Ralm.dtype)
         convolved = Ralm * jbeam[:, None]
         out = s2fft.inverse(convolved, L=L, method=method, spmd=False, reality=True)
         return np.asarray(jnp.real(out))
 
-
     @staticmethod 
     def compute_covariance(task):
-        #print("compute_covariance", flush = True)
         """
-        Computes the covariance between two frequency maps at a given scale.
-
-        Args:
-        task (tuple): A tuple containing (i, fq, frequencies, scale, doubled_MW_wav_c_j).
-
-        Returns:
-        tuple: A tuple containing indices i, fq and the computed covariance matrix.
+        task: (i, fq, frequencies, scale, doubled_MW_wav_c_j, method, nsamp)
         """
-        i, fq, frequencies, scale, doubled_MW_wav_c_j, method  = task
-        key_i = (frequencies[i], scale)
+        i, fq, frequencies, scale, doubled_MW_wav_c_j, method, nsamp = task
+        key_i  = (frequencies[i], scale)
         key_fq = (frequencies[fq], scale)
         if key_i not in doubled_MW_wav_c_j or key_fq not in doubled_MW_wav_c_j:
             raise KeyError(f"Missing data for keys {key_i} or {key_fq}.")
-        return i, fq, SILCTools.smoothed_covariance(doubled_MW_wav_c_j[key_i], doubled_MW_wav_c_j[key_fq], method)
+        return i, fq, SILCTools.smoothed_covariance(
+            doubled_MW_wav_c_j[key_i],
+            doubled_MW_wav_c_j[key_fq],
+            method=method,
+            nsamp=nsamp,
+        )
     
 
     @staticmethod
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
                                     realisation: int, method: str, path_template: str, *,
-                                    component: str = "cfn", lmax: int = 64, lam: float | None = None):
+                                    component: str = "cfn", lmax: int = 64, lam: float | None = None,
+                                    nsamp: float = 1200.0,):
         
         #print("calculate_covariance_matrix", flush = True)
 
@@ -157,7 +170,7 @@ class SILCTools():
         full_array = np.zeros((total_frequency, total_frequency, n_rows, n_cols))
 
         # Build work items (upper triangle)
-        tasks = [(i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method)
+        tasks = [(i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method, nsamp)
                  for i in range(total_frequency) for fq in range(i, total_frequency)]
 
         if method != "numpy":
@@ -190,6 +203,7 @@ class SILCTools():
             realisation=int(realisation),
             lmax=int(lmax),
             lam=lam_str,
+            nsamp=nsamp,
         )
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         np.save(save_path, full_array)
@@ -200,7 +214,8 @@ class SILCTools():
     @staticmethod
     def double_and_save_wavelet_maps(
         original_wavelet_c_j, frequencies, scales, realisation, 
-        component, path_template, *, lmax=64, lam: float | None = None, method="jax_cuda"
+        component, path_template, *, lmax=64, lam: float | None = None, 
+        method="jax_cuda", nsamp: float | None = None, 
     ):
         #print ('double_and_save_wavelet_maps', flush = True)
         """Minimal fix: compute + save doubled maps serially (no MP)."""
@@ -218,6 +233,7 @@ class SILCTools():
                     realisation=int(realisation),   # template pads via {:04d}
                     lmax=int(lmax),
                     lam=str(lam),
+                    nsamp=nsamp,
                 )
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 np.save(out_path, np.asarray(doubled))
@@ -277,7 +293,8 @@ class SILCTools():
     
     def compute_weights_generalised(R, scale, realisation, weight_vector_matrix_template, comp, L_max, 
                                     extract_comp, *, constraint=False, F=None, f=None, 
-                                    reference_vectors=None, lam: float | None = None):
+                                    reference_vectors=None, lam: float | None = None,
+                                    nsamp: float | None = None):
         #print("compute_weights_generalised", flush=True)
         """
         Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
@@ -351,6 +368,7 @@ class SILCTools():
             realisation=int(realisation),
             lmax=int(L_max-1),
             lam=str(lam),
+            nsamp=nsamp, 
         )
 
         # Track constraint singularities (mirrors R singular tracking)
@@ -453,7 +471,8 @@ class SILCTools():
 
     @staticmethod
     def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str, *, 
-                         path_template:str, component: str, extract_comp: str, lmax:int, lam: float | None = None):
+                         path_template:str, component: str, extract_comp: str, lmax:int, 
+                         lam: float | None = None, nsamp: float | None = None):
 
         #print("trim_to_original", flush=True)
         """
@@ -518,6 +537,7 @@ class SILCTools():
                 realisation=int(realisation),
                 lmax=int(lmax),
                 lam=lam_str,
+                nsamp=nsamp, 
             )
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             np.save(save_path, mw_map_original)
@@ -528,7 +548,7 @@ class SILCTools():
 
     @staticmethod
     def load_frequency_data(file_template: str, frequencies: list, scales: list, comp: str, lmax: int, *,
-                        realisation: int, lam: float | None = None):
+                        realisation: int, lam: float | None = None, nsamp: float | None = None):
         #print("load_frequency_data", flush = True)
         """
         Load NumPy arrays from dynamically generated file paths for each frequency and scale.
@@ -558,6 +578,7 @@ class SILCTools():
                     realisation=realisation,
                     lmax=lmax,
                     lam=lam,
+                    nsamp=nsamp, 
                 )
                 try:
                     frequency_data[(frequency, scale)] = np.load(filename)
@@ -610,7 +631,7 @@ class SILCTools():
     def synthesize_ILC_maps_generalised(
         trimmed_maps, realisation, file_templates, lmax, N_directions,lam, component=None, 
         extract_comp=None, visualise=False, constraint=None, frequencies=None, F=None, f=None, 
-        reference_vectors=None,
+        reference_vectors=None, nsamp=None,  
     ):
         #print("synthesize_ILC_maps_generalised", flush=True)
         """
@@ -650,6 +671,7 @@ class SILCTools():
             realisation=int(realisation_str),
             lmax=int(lmax),
             lam=str(lam),
+            nsamp=nsamp,
         )
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         np.save(out_path, MW_Pix)
@@ -716,7 +738,7 @@ class ProduceSILC():
 
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, lam,
                               N_directions, comp, constraint=False, F=None, extract_comp=None,
-                             reference_vectors=None):
+                             reference_vectors=None, nsamp=None,):
 
         lmax = L_max - 1  
         realisations = [int(r) for r in realisations]
@@ -786,6 +808,7 @@ class ProduceSILC():
                 realisation=int(realisation),   # int
                 lmax=L_max-1,
                 lam=lam,
+                nsamp=nsamp, 
             )
 
             # 2) Double resolution and save (single call)
@@ -800,6 +823,7 @@ class ProduceSILC():
                 component=comp,
                 lmax=L_max-1,
                 lam=lam,
+                nsamp=nsamp, 
             )
             dt = time.perf_counter() - t0
             print(f'Doubled and saved wavelet maps in {dt:.2f} seconds')
@@ -814,6 +838,7 @@ class ProduceSILC():
                 realisation=int(realisation),   # int
                 lmax=L_max-1,
                 lam=lam,
+                nsamp=nsamp,
             )
 
             # 4) Compute covariance matrices (serial, JAX backend)
@@ -830,6 +855,7 @@ class ProduceSILC():
                     component=comp,
                     lmax=L_max - 1,
                     lam=lam,
+                    nsamp=nsamp,
                 )
 
             dt = time.perf_counter() - t0
@@ -848,6 +874,7 @@ class ProduceSILC():
                         realisation=int(realisation),
                         lmax=L_max-1,
                         lam = str(lam), 
+                        nsamp=nsamp,
                     )
                 )
                 for scale in scales
@@ -869,6 +896,7 @@ class ProduceSILC():
                     f=f,
                     reference_vectors=reference_vectors,
                     lam=str(lam),
+                    nsamp=nsamp,
                 )
 
             dt = time.perf_counter() - t0
@@ -889,6 +917,7 @@ class ProduceSILC():
                     realisation=int(realisation),
                     lmax=L_max-1,
                     lam=str(lam),
+                    nsamp=nsamp,
                 )
                 W = np.load(weight_vector_path)  # mmap_mode='r' optional
                 print("→ loading:", weight_vector_path)
@@ -920,6 +949,7 @@ class ProduceSILC():
                         realisation=int(realisation),
                         lmax=lmax,
                         lam=str(lam),
+                        nsamp=nsamp,
                     ),
                     map_
                 )
@@ -939,6 +969,7 @@ class ProduceSILC():
                     realisation=int(realisation),
                     lmax=int(lmax),
                     lam=str(lam),
+                    nsamp=nsamp,
                 )
 
                 if os.path.exists(save_path):
@@ -968,6 +999,7 @@ class ProduceSILC():
                         extract_comp=extract_comp,
                         lmax=int(lmax),
                         lam=str(lam),
+                        nsamp=nsamp,
                     )
 
                 # Ensure saved on disk (trim_to_original already saved when path_template provided,
@@ -998,6 +1030,7 @@ class ProduceSILC():
              F=F, 
              f=f, 
              reference_vectors=reference_vectors,
+             nsamp=nsamp,
             )         
             synthesized_map.append(np.asarray(synth_map))
 
