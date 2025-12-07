@@ -134,33 +134,39 @@ class DownloadData():
 
 
     def download_all(self): 
-            """
-            Downloads all specified foreground components, noise and CMB realisations.
+        """
+        Downloads all specified foreground components, noise and CMB realisations.
 
-            Returns:
-                None
-            """
-            # Download foregrounds, which have only one realisation.
-            print("Downloading foreground components...")
-            for component in self.components:
-                if component == "cmb" or component == "noise":
-                    continue
+        Returns:
+            None
+        """
+        # Download foregrounds, which have only one realisation.
+        print("Downloading foreground components...")
+        for component in self.components:
+            if component == "cmb" or component == "noise":
+                continue
+            else:
+                for frequency in self.frequencies:
+
+                    # minimal CIB guard
+                    if component == "cib" and frequency not in {"353", "545", "857"}:
+                        continue
+
+                    self.download_foreground_component(component, frequency)
+
+        # now download CMB and noise, which are realisation dependent.
+        for realisation in range(self.realisations):
+            realisation += self.start_realisation  # Adjust for starting realisation
+            print(realisation)
+            print(f"Downloading CMB & noise for realisation {realisation}...")
+            self.generate_and_save_cmb_realisation(realisation)
+            if 'noise' in self.components:
+                if realisation > 299: 
+                    continue # there are only ffp10 300 noise realisations
                 else:
                     for frequency in self.frequencies:
-                        self.download_foreground_component(component, frequency)
+                        self.download_foreground_component("noise", frequency, realisation)
 
-            # now download CMB and noise, which are realisation dependent.
-            for realisation in range(self.realisations):
-                realisation += self.start_realisation  # Adjust for starting realisation
-                print(realisation)
-                print(f"Downloading CMB & noise for realisation {realisation}...")
-                self.generate_and_save_cmb_realisation(realisation)
-                if 'noise' in self.components:
-                    if realisation > 299: 
-                        continue # there are only ffp10 300 noise realisations
-                    else:
-                        for frequency in self.frequencies:
-                            self.download_foreground_component("noise", frequency, realisation)
 
 # components = ["sync", "dust"]
 # frequencies = ["030", "070", "143", "217", "353"]

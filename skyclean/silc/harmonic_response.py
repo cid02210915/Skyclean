@@ -99,13 +99,13 @@ class HarmonicWindows:
         self.J = int(np.ceil(np.log(max(1, self.L - 1)) / np.log(self.lam)))
 
     def scaling(self):
-        # Φ_{ℓ0} = sqrt((2ℓ+1)/(4π)) * η_λ(ℓ / λ^{J0})
-        return np.sqrt((2.0*self.ells + 1.0)/(4.0*np.pi)) * \
+        # Φ_{ℓ0} = sqrt((2ℓ+1)/(8π**2)) * η_λ(ℓ / λ^{J0})
+        return np.sqrt((2.0*self.ells + 1.0)/(8.0*np.pi**2)) * \
                self.g.eta(self.ells / (self.lam**self.J0))
 
     def wavelet(self, j):
-        # Ψ_{j;ℓ0} = sqrt((2ℓ+1)/(4π)) * κ_λ(ℓ / λ^{j})
-        return np.sqrt((2.0*self.ells + 1.0)/(4.0*np.pi)) * \
+        # Ψ_{j;ℓ0} = sqrt((2ℓ+1)/(8π**2)) * κ_λ(ℓ / λ^{j})
+        return np.sqrt((2.0*self.ells + 1.0)/(8.0*np.pi**2)) * \
                self.g.kappa(self.ells / (self.lam**j))
 
 
@@ -125,7 +125,7 @@ def admissibility(Phi_l0, Psi_j_l0, ells, tol=1e-6):
     S = np.abs(Phi_l0)**2
     for W in Psi_j_l0.values():
         S += np.abs(W)**2
-    S = (4.0*np.pi)/(2.0*ells + 1.0) * S
+    S = (8.0*np.pi**2)/(2.0*ells + 1.0) * S
 
     err = np.abs(S - 1.0)
     ok = bool(np.all(err < tol))
@@ -214,6 +214,46 @@ class HRFigures:
         plt.show()
 
 
+def cosine_taper(L, ell_taper, ell_max=None):
+    """
+    Raised-cosine taper in multipole l.
+
+    Define the window w(l) by
+        w(l) = 1
+            for  l ≤ l_taper
+
+        w(l) = ½ [ 1 + cos( π (l - l_taper) / (l_max - l_taper) ) ]
+            for  l_taper < l < l_max
+
+        w(l) = 0
+            for  l ≥ l_max
+
+    Parameters
+    ----------
+    L : int
+        Band-limit (l runs from 0 to L-1).
+    ell_taper : int
+        Multipole at which tapering starts.
+    ell_max : int, optional
+        Multipole at which the window reaches zero. Defaults to L-1.
+
+    Returns
+    -------
+    w : ndarray, shape (L,)
+        Taper window w(l).
+    """
+    if ell_max is None:
+        ell_max = L - 1
+
+    ells = np.arange(L, dtype=float)
+    w = np.ones(L, dtype=float)
+
+    mid = (ells > ell_taper) & (ells < ell_max)
+    w[ells >= ell_max] = 0.0
+    w[mid] = 0.5 * (1.0 + np.cos(np.pi * (ells[mid] - ell_taper) /
+                                 (ell_max - ell_taper)))
+    return w
+
 
 def build_axisym_filter_bank(L, lam, J0=0):
     """
@@ -245,5 +285,13 @@ def build_axisym_filter_bank(L, lam, J0=0):
     if lmin > 0:
         psi[:, :lmin, :] = 0.0
         phi_l[:lmin]     = 0.0
+    '''
+    # ---- automatic taper: 94% of lmax ----
+    lmax = L - 1
+    ell_taper = int(0.94 * lmax)
+    w = cosine_taper(L, ell_taper, ell_max=lmax)
 
+    psi = psi * w[None, :, None]
+    phi_l = phi_l * w
+    '''
     return [psi, phi_l]
