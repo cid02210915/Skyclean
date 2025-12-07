@@ -35,6 +35,7 @@ class Pipeline:
         constraint: bool = False,
         F = None,
         reference_vectors = None,
+        nsamp: float = 1200.0, 
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -56,6 +57,7 @@ class Pipeline:
         self.reference_vectors = reference_vectors
         #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
+        self.nsamp = nsamp
 
     # -------------------------
     # Steps
@@ -199,7 +201,7 @@ class Pipeline:
                           if k in ("base_dir", "file_templates", "realization", "mask_path")}
 
             # desired column order comes from your input component list; ignore extras like 'noise'
-            components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync")]
+            components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync", "cib", "dust")]
 
             # build F with explicit column order 
             F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(
@@ -231,6 +233,7 @@ class Pipeline:
                 F=F,
                 extract_comp=extract_comp,
                 reference_vectors=reference_vectors,
+                nsamp=self.nsamp, 
             )
 
 
@@ -247,7 +250,8 @@ class Pipeline:
         realisation: int | None = None,        # defaults to self.start_realisation
         lmax: int | None = None,               # defaults to self.lmax
         lam: str | float | int | None = None,  # defaults to self.lam_str
-        field: int = 0
+        field: int = 0,
+        nsamp: float | int | None = None, 
     ):
         """
         Compute TT C_ell (and plot D_ell). Returns (ell, cl).
@@ -259,6 +263,7 @@ class Pipeline:
         lmax_ = self.lmax if lmax is None else int(lmax)
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         freqs = self.frequencies if frequencies is None else list(frequencies)
+        nsamp_ = self.nsamp if nsamp is None else nsamp
     
         # --- templates + processed-CFN detection ---
         ft = FileTemplates(self.directory).file_templates
@@ -289,6 +294,7 @@ class Pipeline:
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
                 realisation=r, lmax=lmax_, lam=lam_,
+                nsamp=nsamp_,  
             )
             src = "ilc_synth"; label = f"ILC-synth ({tgt})"
     
