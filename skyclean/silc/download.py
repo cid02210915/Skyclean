@@ -126,7 +126,7 @@ class DownloadData():
                 m = (l >= 2) & (l <= lmax)
                 cl[l[m]] = dl[m] * (2.0 * np.pi) / (l[m] * (l[m] + 1.0))   # D_l -> C_l
                 nside = 2048
-                cmb_map = hp.synfast(cl, nside=nside, pixwin=True, lmax=1023) # convolve with pixel window
+                cmb_map = hp.synfast(cl, nside=nside, pixwin=False, lmax=1023) # convolve with pixel window
                 hp.write_map(filename, cmb_map)
                 print(f"Downloaded CMB realisation {realisation}.")
             else:
