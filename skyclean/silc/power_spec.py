@@ -11,7 +11,6 @@ class MapAlmConverter:
     def __init__(self, file_templates: Dict[str, str]):
         self.file_templates = file_templates
 
-    # ---------- public ----------
     def to_alm(
         self,
         component: str,
@@ -27,6 +26,7 @@ class MapAlmConverter:
         frequencies: Optional[Union[str, int, Iterable[int]]] = None,
         lam: Optional[Union[int, float, str]] = None,
         nsamp: float | None = None, 
+        constraint: bool | None = None, 
     ) -> Dict[str, Any]:
 
         if processed is not None:
@@ -35,7 +35,8 @@ class MapAlmConverter:
         path = self._format_path(
             component=component, source=source,
             frequency=frequency, realisation=realisation, lmax=lmax,
-            extract_comp=extract_comp, frequencies=frequencies, lam=lam, nsamp=nsamp,
+            extract_comp=extract_comp, frequencies=frequencies, lam=lam, 
+            nsamp=nsamp, constraint=constraint,
         )
 
         # 2) Load the map from disk
@@ -81,6 +82,7 @@ class MapAlmConverter:
         frequencies: Optional[Union[str, int, Iterable[int]]],
         lam: Optional[Union[int, float, str]],
         nsamp: Optional[Union[int, float]],  
+        constraint: Optional[bool] = None,
     ) -> str:
         
         if source == "downloaded":
@@ -127,8 +129,10 @@ class MapAlmConverter:
 
             lam_str = lam if isinstance(lam, str) else f"{float(lam):.1f}"
             nsamp_str = "" if nsamp is None else str(int(nsamp))
+            mode = "con" if constraint else "uncon"
 
             kw = dict(
+                mode=mode,
                 extract_comp=extract_comp,   # target, e.g. 'cmb'
                 component=component,         # source mixture, e.g. 'cfn'
                 frequencies=freq_str,
