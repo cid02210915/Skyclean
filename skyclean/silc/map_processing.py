@@ -172,7 +172,7 @@ class ProcessMaps():
                     hp_map_reduced = HPTools.convolve_and_reduce(
                         hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
                     )
-
+                    
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
             cfn += hp_map_reduced
