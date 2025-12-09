@@ -144,7 +144,7 @@ class Pipeline:
                   f"bytes_limit={ms['bytes_limit']}",
                   f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
                   f"num_allocs={ms.get('num_allocs', 'n/a')}")
-            
+              
         ft = FileTemplates(self.directory).file_templates
     
         # Templates
@@ -234,8 +234,8 @@ class Pipeline:
                 extract_comp=extract_comp,
                 reference_vectors=reference_vectors,
                 nsamp=self.nsamp, 
+                overwrite=self.overwrite,
             )
-
 
     def step_power_spec(
         self,
@@ -251,24 +251,27 @@ class Pipeline:
         lmax: int | None = None,               # defaults to self.lmax
         lam: str | float | int | None = None,  # defaults to self.lam_str
         field: int = 0,
-        nsamp: float | int | None = None, 
+        nsamp: float | int | None = None,
+        overwrite: bool | None = None,
     ):
         """
         Compute TT C_ell (and plot D_ell). Returns (ell, cl).
         unit: "K" (input C_ell in K^2) or "uK"/"µK" (input already µK^2). Plot is in µK^2.
         """
-    
+        # resolve overwrite
+        overwrite = self.overwrite if overwrite is None else overwrite
+
         # defaults from pipeline
-        r     = self.start_realisation if realisation is None else int(realisation)
-        lmax_ = self.lmax if lmax is None else int(lmax)
-        lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
-        freqs = self.frequencies if frequencies is None else list(frequencies)
-        nsamp_ = self.nsamp if nsamp is None else nsamp
-    
+        r      = self.start_realisation if realisation is None else int(realisation)
+        lmax_  = self.lmax if lmax is None else int(lmax)
+        lam_   = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
+        freqs  = self.frequencies if frequencies is None else list(frequencies)
+        nsamp_ = getattr(self, "nsamp", None) if nsamp is None else nsamp
+
         # --- templates + processed-CFN detection ---
         ft = FileTemplates(self.directory).file_templates
         has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
-    
+
         # --- choose source automatically (prefer processed CFN if present) ---
         if source == "auto":
             if has_processed_cfn:
@@ -277,74 +280,111 @@ class Pipeline:
                 source = "ilc_synth"
             else:
                 source = "downloaded"
-    
+
         # --- make a local copy of templates and alias processed_cfn -> cfn if needed ---
         ft_local = dict(ft)
         if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
-            # allow processed/cfn loads even if only "cfn" key exists
             ft_local["processed_cfn"] = ft_local["cfn"]
-    
+
         conv = MapAlmConverter(ft_local)
-    
+
         # ---- load selected map ----
         if source == "ilc_synth":
-            comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")  # template {component}
-            tgt     = extract_comp or (self.ilc_components[0] if self.ilc_components else "cmb")       # template {extract_comp}
+            comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")
+            tgt     = extract_comp or (self.ilc_components[0] if self.ilc_components else "cmb")
             out = conv.to_alm(
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
                 realisation=r, lmax=lmax_, lam=lam_,
-                nsamp=nsamp_,  
+                nsamp=nsamp_, constraint=self.constraint,
             )
-            src = "ilc_synth"; label = f"ILC-synth ({tgt})"
-    
+            src = "ilc_synth"
+            label = f"ILC-synth ({tgt})"
+
         elif source == "processed":
-            # default to CFN if available; otherwise fall back to 'cmb'
             if component is not None:
                 comp_use = component
             else:
                 comp_use = "cfn" if has_processed_cfn else "cmb"
-    
+
             out = conv.to_alm(
                 component=comp_use, source="processed",
                 frequency=frequency, realisation=r, lmax=lmax_,
             )
-            src = "processed"; label = f"Processed {comp_use}"
-    
+            src = "processed"
+            label = f"Processed {comp_use}"
+
         elif source == "downloaded":
             comp_use = component or "cmb"
             out = conv.to_alm(
                 component=comp_use, source="downloaded",
                 frequency=frequency, realisation=r, lmax=lmax_, field=field,
             )
-            src = "downloaded"; label = f"Downloaded {comp_use}"
-    
+            src = "downloaded"
+            label = f"Downloaded {comp_use}"
+
         else:
             raise ValueError("source must be one of: 'auto', 'ilc_synth', 'processed', 'downloaded'.")
-    
+
         # ---- alm -> C_ell ----
         if out["format"] == "mw":
             ell, cl = PowerSpectrumTT.from_mw_alm(np.asarray(out["alm"]))
         else:
             ell, cl = PowerSpectrumTT.from_healpy_alm(out["alm"])
-    
-        # ---- C_ell -> D_ell (plot in µK^2) ----
-        Dl = PowerSpectrumTT.cl_to_Dl(ell, cl, input_unit=unit)  # "K" or "uK"
-    
-        # pick a simple style by source (works with tuple-plotter or dict-plotter)
-        style = {"ilc_synth": "-", "processed": "--", "downloaded": "-."}.get(src, "-")
-    
-        try:
-            # dict path
-            PowerSpectrumTT.plot_Dl_series({"ell": ell, "Dl": Dl, "label": label, "source": src},
-                                           save_path=save_path, show=True)
-        except Exception:
-            # tuple fallback
-            PowerSpectrumTT.plot_Dl_series([(ell, Dl, label, style)], save_path=save_path, show=True)
-    
-        return ell, cl
-    
 
+        # ---- C_ell -> D_ell (plot in µK^2) ----
+        Dl = PowerSpectrumTT.cl_to_Dl(ell, cl, input_unit=unit)
+
+        # ---------- save spectrum arrays to .npy for ILC_synth ----------
+        if source == "ilc_synth" and "ilc_spectrum" in ft:
+            mode = "con" if getattr(self, "constraint", False) else "uncon"
+            freq_tag = "_".join(freqs)
+
+            spec_path = ft["ilc_spectrum"].format(
+                mode=mode,
+                extract_comp=tgt,
+                component=comp_in,
+                frequencies=freq_tag,
+                realisation=r,
+                lmax=lmax_,
+                lam=lam_,
+                nsamp=nsamp_,
+            )
+            os.makedirs(os.path.dirname(spec_path), exist_ok=True)
+            if overwrite or not os.path.exists(spec_path):
+                np.save(spec_path, {"ell": ell, "cl": cl, "Dl": Dl})
+
+            if save_path is None:
+                png_path = spec_path.replace(".npy", ".png")
+            else:
+                png_path = save_path
+        else:
+            png_path = save_path
+        # ---------------------------------------------------------------------
+
+        # pick a simple style
+        style = {"ilc_synth": "-", "processed": "--", "downloaded": "-."}.get(src, "-")
+
+        # respect overwrite for PNG
+        if png_path is not None and (not overwrite) and os.path.exists(png_path):
+            plot_save_path = None
+        else:
+            plot_save_path = png_path
+
+        try:
+            PowerSpectrumTT.plot_Dl_series(
+                {"ell": ell, "Dl": Dl, "label": label, "source": src},
+                save_path=plot_save_path, show=True
+            )
+        except Exception:
+            PowerSpectrumTT.plot_Dl_series(
+                [(ell, Dl, label, style)],
+                save_path=plot_save_path, show=True
+            )
+
+        return ell, cl
+   
+        
 
     # --- step_cross_power_spec ---
     def step_cross_power_spec(
@@ -370,6 +410,7 @@ class Pipeline:
         lam: str | float | int | None = None,
         field: int = 0,
         plot_r: bool = False, 
+        overwrite: bool | None = None,  
     ):
         """
         Compute TT cross C_ell^{XY} (and plot D_ell^{XY}). Returns (ell, cl_xy).
@@ -380,6 +421,7 @@ class Pipeline:
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         fX    = self.frequencies if frequencies_X is None else list(frequencies_X)
         fY    = self.frequencies if frequencies_Y is None else list(frequencies_Y)
+        overwrite = self.overwrite if overwrite is None else overwrite
 
         # templates + processed-CFN detection (mirror)
         ft = FileTemplates(self.directory).file_templates
@@ -438,14 +480,24 @@ class Pipeline:
         # C_ell -> D_ell^{XY} (µK^2) and plot
         Dl_xy = PowerSpectrumTT.cl_to_Dl(ell, cl_xy, input_unit=unit)
         style = "--"
+        # respect overwrite for PNG
+        if save_path is not None and (not overwrite) and os.path.exists(save_path):
+            cross_save_path = None
+        else:
+            cross_save_path = save_path
+
         try:
-            PowerSpectrumTT.plot_Dl_series({"ell": ell, "Dl": Dl_xy,
-                                            "label": f"Cross: {labelX} × {labelY}",
-                                            "source": "processed"},
-                                           save_path=save_path, show=True)
+            PowerSpectrumTT.plot_Dl_series(
+                {"ell": ell, "Dl": Dl_xy,
+                 "label": f"Cross: {labelX} × {labelY}",
+                 "source": "processed"},
+                save_path=cross_save_path, show=True
+            )
         except Exception:
-            PowerSpectrumTT.plot_Dl_series([(ell, Dl_xy, f"Cross: {labelX} × {labelY}", style)],
-                                           save_path=save_path, show=True)
+            PowerSpectrumTT.plot_Dl_series(
+                [(ell, Dl_xy, f"Cross: {labelX} × {labelY}", style)],
+                save_path=cross_save_path, show=True
+            )
         if plot_r:
             if outX["format"] == "mw":
                 _, cl_xx = PowerSpectrumTT.from_mw_alm(np.asarray(outX["alm"]))
