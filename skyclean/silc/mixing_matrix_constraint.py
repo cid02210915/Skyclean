@@ -58,6 +58,8 @@ class SpectralVector:
         components_order: list[str] | None = None,  # desired column order
         beta_cib: float = 1.532,     # CIB emissivity index (WITH 217 GHz, best-fit)
         T_cib: float = 12.243,       # CIB effective temperature [K]
+        beta_d: float = 1.55,        # Dust emissivity index
+        T_d: float = 19.7,           # Dust temperature [K]
     ):
         """
         Returns:
@@ -89,17 +91,28 @@ class SpectralVector:
             cib = cib / cib[idx_353]
         # *************************************************
 
+        # ---- Dust modified blackbody SED in K_CMB ----
+        x_d = h * nu / (k * T_d)
+        Bnu_d = (nu**3) / (np.exp(x_d) - 1.0)
+        dust = (nu ** float(beta_d)) * Bnu_d / g_nu
+
+        # normalise Dust to 1 at 353 GHz (same convention as CIB)
+        if "353" in frequencies:
+            idx_353 = frequencies.index("353")
+            dust = dust / dust[idx_353]
+
         # RAW spectral response vectors (all in K_CMB)
         vecs = {
             "cmb":  np.ones_like(nu),
             "tsz":  x * ((np.exp(x) + 1.0) / (np.exp(x) - 1.0)) - 4.0,
             "sync": (nu / float(nu0)) ** float(beta_s) / g_nu,
             "cib":  cib,
+            "dust": dust,
         }
 
         # Decide column order: keep ONLY supported names, IN THE GIVEN ORDER
         if components_order is None:
-            F_cols = ["cmb", "tsz", "sync", "cib"]
+            F_cols = ["cmb", "tsz", "sync", "cib", "dust"]
         else:
             wanted = [str(c).lower() for c in components_order]
             F_cols = [c for c in wanted if c in vecs]

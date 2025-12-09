@@ -173,18 +173,41 @@ class HRFigures:
 
 
     @staticmethod
-    def visualise_generating_functions(L: int, lam: float = 2.0, J0: int = 0):
+    def visualise_generating_functions(L: int, lam: float | None = None, J0: int = 0):
         ells = np.arange(L)
         hw   = HarmonicWindows(L=L, lam=lam, J0=J0)
+
+        bands = [] 
 
         # scaling generating windows
         eta = hw.g.eta(ells / (lam**J0))
         plt.plot(ells, eta, '--', label='Scal.')
 
+        # band-limits for scaling
+        if np.max(np.abs(eta)) != 0:
+            w = np.abs(eta)
+            thr = 1e-3 * w.max()
+            supp = np.where(w > thr)[0]
+            ell_min = int(supp[0])
+            ell_max = int(supp[-1])
+            ell_peak = int(ells[np.argmax(w)])
+            bands.append(("Scal.", ell_min, ell_peak, ell_max))
+
         # wavelet generating windows
         for j in range(J0, hw.J + 1):
             kappa = hw.g.kappa(ells / (lam**j))
             plt.plot(ells, kappa, label=f'j={j}')
+
+            # band-limits for this wavelet
+            if np.max(np.abs(kappa)) == 0:
+                continue
+            w = np.abs(kappa)
+            thr = 1e-3 * w.max()
+            supp = np.where(w > thr)[0]
+            ell_min = int(supp[0])
+            ell_max = int(supp[-1])
+            ell_peak = int(ells[np.argmax(w)])
+            bands.append((j, ell_min, ell_peak, ell_max))
 
         plt.xlabel('ℓ')
         plt.ylabel('Generating response')
@@ -193,9 +216,14 @@ class HRFigures:
         plt.title(f'Generating functions (λ={lam}, J0={J0}, L={L})')
         plt.show()
 
+        # print table 
+        print("Generating fn   ell_min^j   ell_peak^j   ell_max^j")
+        for label, ell_min, ell_peak, ell_max in bands:
+            print(f"{str(label):>13s}   {ell_min:9d}   {ell_peak:11d}   {ell_max:9d}")
+
 
     @staticmethod
-    def visualise_harmonic_generators(L: int, lam: float = 2.0, J0: int = 0):
+    def visualise_harmonic_generators(L: int, lam: float | None = None, J0: int = 0):
         hw   = HarmonicWindows(L=L, lam=lam, J0=J0)
         ells = hw.ells  # 0..L-1
 
@@ -212,7 +240,6 @@ class HRFigures:
         plt.xlim(0, 10)   
         plt.ylim(0, 1)  
         plt.show()
-
 
 def cosine_taper(L, ell_taper, ell_max=None):
     """
@@ -255,6 +282,7 @@ def cosine_taper(L, ell_taper, ell_max=None):
     return w
 
 
+
 def build_axisym_filter_bank(L, lam, J0=0):
     """
     Format to match `filters.filters_directional_vectorised(L, N_directions, lam)`:
@@ -295,3 +323,228 @@ def build_axisym_filter_bank(L, lam, J0=0):
     phi_l = phi_l * w
     '''
     return [psi, phi_l]
+
+
+class SimpleHarmonicWindows:
+    """
+    Build scale-discretised wavelet *and scaling* windows.
+
+    For each band j you provide:
+      - ell_peaks[j] : desired wavelet peak ℓ_peak^j
+      - lam_list[j]  : λ_j used in that band
+
+    Wavelets use kappa; scaling uses eta.
+    """
+
+    def __init__(self, L, ell_peaks, lam_list, scal_ell_cut=None, scal_lam=None):
+        self.L    = int(L)
+        self.ells = np.arange(self.L, dtype=float)
+
+        self.ell_peaks = np.asarray(ell_peaks, dtype=float)
+        self.lam_list  = np.asarray(lam_list,  dtype=float)
+        assert self.ell_peaks.shape == self.lam_list.shape
+
+        self.J = len(self.ell_peaks)
+
+        # one generator per λ_j (for wavelets)
+        self.g_per_j = [AxisymmetricGenerators(lam_j)
+                        for lam_j in self.lam_list]
+
+        # --- scaling parameters (you choose these) ---
+        # scal_ell_cut: multipole up to which scaling has support/peak
+        # scal_lam:     λ used for scaling generator
+        self.scal_ell_cut = scal_ell_cut if scal_ell_cut is not None else 64.0
+        self.scal_lam     = scal_lam     if scal_lam     is not None else 2.0
+
+        # ----- scaling window settings -----
+        # use the same λ as the lowest band (or just 2.0)
+        self.scal_lam   = float(self.lam_list[0])
+        self.g_scal     = AxisymmetricGenerators(self.scal_lam)
+        self.scal_band  = (0, 64, 64)   # (ℓ_min, ℓ_peak, ℓ_max) 
+
+    # ---------- scaling (eta) ----------
+
+    def scaling_raw(self):
+        """
+        Scaling window using eta, centred at ℓ_peak = 64.
+        """
+        ell_min, ell_peak, ell_max = self.scal_band
+
+        t   = self.ells / float(ell_peak)
+        phi = self.g_scal.eta(t)           # η: scaling kernel
+
+        # normalise so max = 1
+        m = phi.max()
+        if m > 0:
+            phi = phi / m
+        return phi
+
+    def scaling_band(self, truncate=True):
+        """
+        Scaling window, optionally truncated to [0, 64]
+        like the 'Scal.' row in Table 1.
+        """
+        phi = self.scaling_raw()
+        if truncate:
+            ell_min, ell_peak, ell_max = self.scal_band
+            mask_outside = (self.ells < ell_min) | (self.ells > ell_max)
+            phi[mask_outside] = 0.0
+        return phi
+
+
+    # ---------- wavelets (kappa) ----------
+
+    def wavelet_raw(self, j):
+        ell_peak = self.ell_peaks[j]
+        gen      = self.g_per_j[j]
+
+        t   = self.ells / ell_peak
+        psi = gen.kappa(t)        # <-- κ: wavelet
+
+        m = psi.max()
+        if m > 0:
+            psi = psi / m
+        return psi
+
+    def band_edges(self, j):
+        ell_peak = float(self.ell_peaks[j])
+    
+        # 1) choose which λ to use for the edges  (UNCHANGED idea)
+        if j > 0 and (ell_peak == 512 or ell_peak == 2015):
+            lam_edges = float(self.lam_list[j - 1])
+        else:
+            lam_edges = float(self.lam_list[j])
+    
+        # 2) compute edges from that λ  (same formulas as before)
+        ell_min = ell_peak / lam_edges
+        ell_max = ell_peak * lam_edges
+    
+        # 3) EXTRA STEP: at transition peaks, chop the TOP edge
+        #    at the *next* peak, so j=3 uses ell_max ≈ 705, and
+        #    j=8 uses ell_max ≈ 2539.
+        if (ell_peak == 512 or ell_peak == 2015) and j < self.J - 1:
+            ell_max = min(ell_max, float(self.ell_peaks[j + 1]))
+    
+        return int(ell_min), int(ell_peak), int(ell_max)
+
+    
+    def wavelet_band(self, j, truncate=True):
+        psi = self.wavelet_raw(j)
+        if truncate:
+            ell_min, ell_peak, ell_max = self.band_edges(j)
+            mask_outside = (self.ells < ell_min) | (self.ells > ell_max)
+            psi[mask_outside] = 0.0
+        return psi
+
+    # ---------- scaling (eta) ----------
+
+    def scaling_raw(self):
+        """
+        Scaling window using eta:
+
+            Phi_raw[ell] = eta( ell / scal_ell_cut )
+
+        (you control scal_ell_cut and scal_lam).
+        """
+        t   = self.ells / float(self.scal_ell_cut)
+        phi = self.g_scal.eta(t)      # <-- η: scaling
+
+        m = phi.max()
+        if m > 0:
+            phi = phi / m
+        return phi
+
+    # ---------- plotting helper ----------
+    def plot_all_wavelets(self, truncate=True):
+        """
+        Plot all bands j on one figure.
+        Set truncate=False to see the raw κ-wavelets.
+        Also print (ℓ_min^j, ℓ_peak^j, ℓ_max^j) for each band.
+        """
+        plt.figure(figsize=(10, 6))
+    
+        for j in range(self.J):
+            psi_j = self.wavelet_band(j, truncate=truncate)
+            ell_min, ell_peak, ell_max = self.band_edges(j)
+    
+            # print band edges for this j
+            print(f"j = {j:2d}  ->  ell_min = {ell_min:4d}, "
+                  f"ell_peak = {ell_peak:4d}, ell_max = {ell_max:4d}")
+    
+            plt.plot(self.ells, psi_j, label=f"j={j}, peak={ell_peak}")
+    
+            # show theoretical band edges
+            plt.axvline(ell_min,  color='k', linestyle='--', alpha=0.15)
+            plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
+            plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
+    
+        plt.xlim(0, self.L - 1)
+        plt.ylim(0, 1.1)
+        plt.xlabel(r"$\ell$")
+        plt.ylabel(r"$\Psi_{\ell j}$")
+        plt.grid(True, alpha=0.3)
+        plt.legend(ncol=2, fontsize=8)
+        plt.title(
+            "Scale-discretised wavelet bands "
+            f"({'truncated' if truncate else 'raw'})"
+        )
+        plt.tight_layout()
+        plt.show()
+
+    def plot_scaling_and_wavelets(self, truncate=True):
+         """
+         Plot scaling + all wavelet bands on one figure.
+         Legend on the right, larger axis/legend fonts.
+         """
+         plt.figure(figsize=(12, 6))
+     
+         axis_label_size = 18
+         tick_size = 14
+         legend_size = 12  # larger legend / "j" labels
+     
+         # ----- scaling -----
+         phi = self.scaling_band(truncate=truncate)
+         ell_min_s, ell_peak_s, ell_max_s = self.scal_band
+     
+         # print scaling band (keep full info)
+         print(f"scal -> ell_min = {ell_min_s:4d}, ell_peak = {ell_peak_s:4d}, ell_max = {ell_max_s:4d}")
+     
+         plt.plot(self.ells, phi, label="scal", linewidth=2)
+         plt.axvline(ell_min_s,  color='k', linestyle='--', alpha=0.15)
+         plt.axvline(ell_peak_s, color='k', linestyle=':',  alpha=0.3)
+         plt.axvline(ell_max_s,  color='k', linestyle='--', alpha=0.15)
+     
+         # ----- wavelets -----
+         for j in range(self.J):
+             psi_j = self.wavelet_band(j, truncate=truncate)
+             ell_min, ell_peak, ell_max = self.band_edges(j)
+     
+             # no need to print peak value separately any more
+             print(f"j = {j:2d}  ->  ell_min = {ell_min:4d}, ell_max = {ell_max:4d}")
+     
+             # legend label is just j=...
+             plt.plot(self.ells, psi_j, label=f"j={j}")
+             plt.axvline(ell_min,  color='k', linestyle='--', alpha=0.15)
+             plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
+             plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
+     
+         plt.xlim(0, self.L - 1)
+         plt.ylim(0, 1.1)
+     
+         plt.xlabel(r"$\ell$", fontsize=axis_label_size)
+         plt.ylabel("window", fontsize=axis_label_size)
+         plt.xticks(fontsize=tick_size)
+         plt.yticks(fontsize=tick_size)
+         plt.grid(True, alpha=0.3)
+         plt.title("Scaling + wavelet harmonic windows", fontsize=axis_label_size)
+     
+         # legend to the right, with larger font
+         plt.legend(
+             loc="center left",
+             bbox_to_anchor=(1.02, 0.5),
+             fontsize=legend_size,
+             frameon=False
+         )
+     
+         plt.tight_layout()
+         plt.show()

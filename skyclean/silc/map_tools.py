@@ -375,8 +375,8 @@ class MWTools():
 
         # default JAX path
         #j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-        #j_filter = build_axisym_filter_bank(L, lam=lam)
-        j_filter = build_axisym_filter_bank(L, J0=0)
+        j_filter = build_axisym_filter_bank(L, lam=lam)
+        #j_filter = build_axisym_filter_bank(L, J0=0)
 
         
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
@@ -590,7 +590,7 @@ class MWTools():
             jnp.ndarray: The reconstructed MW map from the wavelet coefficients.
         """
         #j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
-        j_filter = build_axisym_filter_bank(L, J0=0)
+        j_filter = build_axisym_filter_bank(L, lam=lam)
         #print(wavelet_coeffs[0].shape)
         f_scal = wavelet_coeffs[0]  # Scaling coefficients are at the first index
         wavelet_coeffs = wavelet_coeffs[1:]  # Remove scaling coefficients from

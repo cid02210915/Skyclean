@@ -35,6 +35,7 @@ class Pipeline:
         constraint: bool = False,
         F = None,
         reference_vectors = None,
+        nsamp: float = 1200.0, 
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -56,6 +57,7 @@ class Pipeline:
         self.reference_vectors = reference_vectors
         #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
+        self.nsamp = nsamp
 
     # -------------------------
     # Steps
@@ -199,7 +201,7 @@ class Pipeline:
                           if k in ("base_dir", "file_templates", "realization", "mask_path")}
 
             # desired column order comes from your input component list; ignore extras like 'noise'
-            components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync")]
+            components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync", "cib", "dust")]
 
             # build F with explicit column order 
             F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(
@@ -231,6 +233,7 @@ class Pipeline:
                 F=F,
                 extract_comp=extract_comp,
                 reference_vectors=reference_vectors,
+                nsamp=self.nsamp, 
             )
 
 
@@ -247,7 +250,8 @@ class Pipeline:
         realisation: int | None = None,        # defaults to self.start_realisation
         lmax: int | None = None,               # defaults to self.lmax
         lam: str | float | int | None = None,  # defaults to self.lam_str
-        field: int = 0
+        field: int = 0,
+        nsamp: float | int | None = None, 
     ):
         """
         Compute TT C_ell (and plot D_ell). Returns (ell, cl).
@@ -259,6 +263,7 @@ class Pipeline:
         lmax_ = self.lmax if lmax is None else int(lmax)
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         freqs = self.frequencies if frequencies is None else list(frequencies)
+        nsamp_ = self.nsamp if nsamp is None else nsamp
     
         # --- templates + processed-CFN detection ---
         ft = FileTemplates(self.directory).file_templates
@@ -289,6 +294,7 @@ class Pipeline:
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
                 realisation=r, lmax=lmax_, lam=lam_,
+                nsamp=nsamp_,  
             )
             src = "ilc_synth"; label = f"ILC-synth ({tgt})"
     
@@ -498,29 +504,84 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run the SILC pipeline with configurable parameters and GPU selection."
     )
-    parser.add_argument('--components', nargs='+', default=["cmb", "sync", "dust", "noise", 'tsz'])
-    parser.add_argument('--wavelet-components', nargs='+', default=["cfn"])
-    parser.add_argument('--ilc-components', nargs='+', default=["cmb"])
+    parser.add_argument('--components', nargs='+',
+                        default=["cmb", "sync", "dust", "noise", "tsz"],
+                        help="Components to include in the pipeline.")
+    parser.add_argument('--wavelet-components', nargs='+',
+                        default=["cfn"],
+                        help="Components to use as input for the wavelet transform.")
+    parser.add_argument('--ilc-components', nargs='+',
+                        default=["cmb"],
+                        help="Components to extract with the ILC.")
     parser.add_argument('--frequencies', nargs='+',
-                        default=["030", "044", "070", "100", "143", "217", "353", "545", "857"])
-    parser.add_argument('--realisations', type=int, default=1)
-    parser.add_argument('--start-realisation', type=int, default=0)
-    parser.add_argument('--lmax', type=int, default=512)
-    parser.add_argument('--N-directions', type=int, default=1)
-    parser.add_argument('--lam', type=float, default=2.0)
-    parser.add_argument('--method', type=str, default='jax_cuda')
-    parser.add_argument('--visualise', action='store_true')
-    parser.add_argument('--save-ilc-intermediates', action='store_true')
-    parser.add_argument('--overwrite', action='store_true')
-    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data')
-    parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--steps', nargs='+',
-                        choices=['download', 'process', 'wavelets', 'ilc', 'all'],
-                        help="Which steps to run (one or more). Examples: --steps download  or  --steps process wavelets  or  --steps all")
+                        default=["030", "044", "070", "100", "143", "217", "353", "545", "857"],
+                        help="Frequency channels to use.")
+    parser.add_argument('--realisations', type=int, default=1,
+                        help="Number of realisations to process.")
+    parser.add_argument('--start-realisation', type=int, default=0,
+                        help="Index of the first realisation.")
+    parser.add_argument('--lmax', type=int, default=512,
+                        help="Maximum multipole L used in the analysis.")
+    parser.add_argument('--N-directions', type=int, default=1,
+                        help="Number of wavelet directions.")
+    parser.add_argument('--lam', type=float, default=2.0,
+                        help="Wavelet dilation parameter λ.")
+    parser.add_argument('--method', type=str, default='jax_cuda',
+                        help="Backend / method (e.g. 'jax_cuda', 'jax_cpu').")
+    parser.add_argument('--visualise', action='store_true',
+                        help="If set, produce diagnostic plots during wavelet steps.")
+    parser.add_argument('--save-ilc-intermediates', action='store_true',
+                        help="If set, save intermediate ILC products (covariances, weights, etc.).")
+    parser.add_argument('--overwrite', action='store_true',
+                        help="If set, overwrite existing files.")
+    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data',
+                        help="Base directory for input/output data.")
+    
+    # GPU selection
+    parser.add_argument('--gpu', type=int, default=0,
+                        help="Index of the GPU to use (e.g. 0 or 1).")
+    parser.add_argument(
+        '--mem-fraction',
+        type=float,
+        default=0.7,
+        help="GPU memory fraction to use (0–1, default: 0.7). "
+             "Used to limit JAX/XLA GPU memory usage."
+    )
+
+    # Constrained ILC options (pipeline already supports these)
+    parser.add_argument(
+        '--constraint',
+        action='store_true',
+        help="Enable constrained ILC using a spectral mixing matrix F."
+    )
+    parser.add_argument(
+        '--nsamp',
+        type=float,
+        default=1200.0,
+        help="Number of Monte Carlo samples (nsamp) for constrained ILC."
+    )
+
+    # Which steps to run (now including power spectra)
+    parser.add_argument(
+        '--steps',
+        nargs='+',
+        choices=['download', 'process', 'wavelets', 'ilc',
+                 'power_spec', 'cross_power_spec', 'all'],
+        help=(
+            "Which steps to run (one or more). Examples:\n"
+            "  --steps download\n"
+            "  --steps process wavelets\n"
+            "  --steps ilc power_spec\n"
+            "  --steps all"
+        )
+    )
 
     args = parser.parse_args()
+
+    # GPU environment setup
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-    print(f"Using GPU {args.gpu} for computation.")
+    os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(args.mem_fraction)
+    print(f"Using GPU {args.gpu} with memory fraction {args.mem_fraction} for computation.")
 
     pipeline = Pipeline(
         components=args.components,
@@ -537,5 +598,8 @@ def main():
         save_ilc_intermediates=args.save_ilc_intermediates,
         overwrite=args.overwrite,
         directory=args.directory,
+        constraint=args.constraint,
+        nsamp=args.nsamp,
     )
+
     pipeline.run(steps=args.steps)
