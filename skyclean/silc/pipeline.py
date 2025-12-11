@@ -603,3 +603,6 @@ def main():
     )
 
     pipeline.run(steps=args.steps)
+
+if __name__ == "__main__": # Run main() only when the file is executed as a script, e.g. python3 -m skyclean.silc.pipeline
+    main()    
