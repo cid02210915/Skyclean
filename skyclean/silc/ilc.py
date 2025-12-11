@@ -146,7 +146,7 @@ class SILCTools():
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
                                     realisation: int, method: str, path_template: str, *,
                                     component: str = "cfn", lmax: int = 64, lam: float | None = None,
-                                    nsamp: float = 1200.0,):
+                                    nsamp: float = 1200.0, overwrite: bool = False,):
         
         #print("calculate_covariance_matrix", flush = True)
 
@@ -156,44 +156,12 @@ class SILCTools():
         """
 
         if not frequencies:
-            raise ValueError("Frequency list is empty.")
+                raise ValueError("Frequency list is empty.")
 
         # --- normalization to fit current pipeline ---
         norm_freqs = [str(f).zfill(3) for f in frequencies]
         scale_i = int(scale)
-
-        # Size from a sample
-        sample_data = doubled_MW_wav_c_j[(norm_freqs[0], scale_i)]
-        n_rows, n_cols = sample_data.shape
-
-        total_frequency = len(norm_freqs)
-        full_array = np.zeros((total_frequency, total_frequency, n_rows, n_cols))
-
-        # Build work items (upper triangle)
-        tasks = [(i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method, nsamp)
-                 for i in range(total_frequency) for fq in range(i, total_frequency)]
-
-        if method != "numpy":
-            # serial fallback for jax/jax_cuda to avoid BrokenProcessPool
-            for t in tasks:
-                i, fq, cov = SILCTools.compute_covariance(t)
-                full_array[i, fq] = cov
-        else:
-            # CPU/NumPy path can safely use processes
-            ctx = mp.get_context("spawn")  # more robust than fork for native libs
-            with ProcessPoolExecutor(mp_context=ctx) as executor:
-                futures = [executor.submit(SILCTools.compute_covariance, t) for t in tasks]
-                for fut in as_completed(futures):
-                    i, fq, covariance_matrix = fut.result()
-                    full_array[i, fq] = covariance_matrix
-                    
-
-        # Fill symmetric part
-        for l1 in range(1, total_frequency):
-            for l2 in range(l1):
-                full_array[l1, l2] = full_array[l2, l1]
-
-        # Save using normalized frequency tags
+    
         f_str = "_".join(norm_freqs)
         lam_str = str(lam)
         save_path = path_template.format(
@@ -206,38 +174,77 @@ class SILCTools():
             nsamp=nsamp,
         )
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+        # early exit: reuse existing matrix
+        if (not overwrite) and os.path.exists(save_path):
+            return np.load(save_path)
+    
+        # --- only now do the heavy work ---
+        sample_data = doubled_MW_wav_c_j[(norm_freqs[0], scale_i)]
+        n_rows, n_cols = sample_data.shape
+        total_frequency = len(norm_freqs)
+        full_array = np.zeros((total_frequency, total_frequency, n_rows, n_cols))
+    
+        tasks = [
+            (i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method, nsamp)
+            for i in range(total_frequency)
+            for fq in range(i, total_frequency)
+        ]
+    
+        if method != "numpy":
+            for t in tasks:
+                i, fq, cov = SILCTools.compute_covariance(t)
+                full_array[i, fq] = cov
+        else:
+            ctx = mp.get_context("spawn")
+            with ProcessPoolExecutor(mp_context=ctx) as executor:
+                futures = [executor.submit(SILCTools.compute_covariance, t) for t in tasks]
+                for fut in as_completed(futures):
+                    i, fq, covariance_matrix = fut.result()
+                    full_array[i, fq] = covariance_matrix
+    
+        for l1 in range(1, total_frequency):
+            for l2 in range(l1):
+                full_array[l1, l2] = full_array[l2, l1]
+    
         np.save(save_path, full_array)
-
         return full_array
-
 
     @staticmethod
     def double_and_save_wavelet_maps(
         original_wavelet_c_j, frequencies, scales, realisation, 
         component, path_template, *, lmax=64, lam: float | None = None, 
-        method="jax_cuda", nsamp: float | None = None, 
+        method="jax_cuda", nsamp: float | None = None, overwrite: bool = False, 
     ):
-        #print ('double_and_save_wavelet_maps', flush = True)
-        """Minimal fix: compute + save doubled maps serially (no MP)."""
+        """Compute + save doubled maps serially (no MP), respecting overwrite."""
         doubled_MW_wav_c_j = {}
+
         for f in frequencies:
             for s in scales:
-                doubled = SILCTools.Single_Map_doubleworker(original_wavelet_c_j[(f, s)], method)
-                doubled_MW_wav_c_j[(f, s)] = doubled
-
                 freq_tag = f if isinstance(f, str) else f"{int(f):03d}"
                 out_path = path_template.format(
                     component=component,
                     frequency=freq_tag,
                     scale=int(s),
-                    realisation=int(realisation),   # template pads via {:04d}
+                    realisation=int(realisation),
                     lmax=int(lmax),
                     lam=str(lam),
                     nsamp=nsamp,
                 )
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                np.save(out_path, np.asarray(doubled))
+
+                if (not overwrite) and os.path.exists(out_path):
+                    doubled = np.load(out_path)
+                else:
+                    doubled = SILCTools.Single_Map_doubleworker(
+                        original_wavelet_c_j[(f, s)], method
+                    )
+                    np.save(out_path, np.asarray(doubled))
+
+                doubled_MW_wav_c_j[(f, s)] = doubled
+
         return doubled_MW_wav_c_j
+
 
 
     @staticmethod
@@ -294,7 +301,7 @@ class SILCTools():
     def compute_weights_generalised(R, scale, realisation, weight_vector_matrix_template, comp, L_max, 
                                     extract_comp, *, constraint=False, F=None, f=None, 
                                     reference_vectors=None, lam: float | None = None,
-                                    nsamp: float | None = None):
+                                    nsamp: float | None = None, overwrite: bool = False,):
         #print("compute_weights_generalised", flush=True)
         """
         Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
@@ -315,8 +322,7 @@ class SILCTools():
             inverses, weight_vectors, singular_matrices_location, extract_comp
         """
         #print('R:', R.shape)
-
-        # --- shape handling --- what?
+ 
         # Swap the axes to get R_Pix
         R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3) #(pix,pix,freq,freq)
         # Get dimensions for looping and size of sub-matrices
@@ -370,6 +376,12 @@ class SILCTools():
             lam=str(lam),
             nsamp=nsamp, 
         )
+        weight_path = weight_vector_matrix_template.format(**fmt)
+
+        if (not overwrite) and os.path.exists(weight_path):
+            weight_vectors = np.load(weight_path)
+            # return dummy inverses + existing weights
+            return None, weight_vectors, [], extract_comp
 
         # Track constraint singularities (mirrors R singular tracking)
         singular_constraints_location = []
@@ -445,7 +457,9 @@ class SILCTools():
               "constraint singularities (F^T R^{-1} F) at scale", scale, "realisation", realisation)
 
         # save final weight vector matrix
-        np.save(weight_vector_matrix_template.format(**fmt), weight_vectors)
+        if overwrite or not os.path.exists(weight_path):
+            np.save(weight_path, weight_vectors)
+
         return inverses, weight_vectors, singular_matrices_location, extract_comp
     
 
@@ -472,7 +486,7 @@ class SILCTools():
     @staticmethod
     def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str, *, 
                          path_template:str, component: str, extract_comp: str, lmax:int, 
-                         lam: float | None = None, nsamp: float | None = None):
+                         lam: float | None = None, nsamp: float | None = None, overwrite: bool = False,):
 
         #print("trim_to_original", flush=True)
         """
@@ -540,7 +554,8 @@ class SILCTools():
                 nsamp=nsamp, 
             )
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            np.save(save_path, mw_map_original)
+            if overwrite or not os.path.exists(save_path):
+                np.save(save_path, mw_map_original)
             #print(f"[SAVE] Trimmed map -> {save_path}")
 
         return int(scale), mw_map_original
@@ -631,7 +646,7 @@ class SILCTools():
     def synthesize_ILC_maps_generalised(
         trimmed_maps, realisation, file_templates, lmax, N_directions,lam, component=None, 
         extract_comp=None, visualise=False, constraint=None, frequencies=None, F=None, f=None, 
-        reference_vectors=None, nsamp=None,  
+        reference_vectors=None, nsamp=None, overwrite: bool = False, 
     ):
         #print("synthesize_ILC_maps_generalised", flush=True)
         """
@@ -664,7 +679,9 @@ class SILCTools():
         MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=int(1), lam=float(lam))
 
         # 4) Save
+        mode = "con" if constraint else "uncon"
         out_path = file_tmpl["ilc_synth"].format(
+            mode=mode,
             extract_comp=extract_comp,
             component=component,
             frequencies=freq_tag,
@@ -674,7 +691,8 @@ class SILCTools():
             nsamp=nsamp,
         )
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        np.save(out_path, MW_Pix)
+        if overwrite or not os.path.exists(out_path):
+            np.save(out_path, MW_Pix)
     
         # 5) Visualise
         if visualise:
@@ -738,7 +756,7 @@ class ProduceSILC():
 
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, lam,
                               N_directions, comp, constraint=False, F=None, extract_comp=None,
-                             reference_vectors=None, nsamp=None,):
+                             reference_vectors=None, nsamp=None, overwrite: bool = False,):
 
         lmax = L_max - 1  
         realisations = [int(r) for r in realisations]
@@ -824,6 +842,7 @@ class ProduceSILC():
                 lmax=L_max-1,
                 lam=lam,
                 nsamp=nsamp, 
+                overwrite=overwrite,  
             )
             dt = time.perf_counter() - t0
             print(f'Doubled and saved wavelet maps in {dt:.2f} seconds')
@@ -856,6 +875,7 @@ class ProduceSILC():
                     lmax=L_max - 1,
                     lam=lam,
                     nsamp=nsamp,
+                    overwrite=overwrite,   
                 )
 
             dt = time.perf_counter() - t0
@@ -897,6 +917,7 @@ class ProduceSILC():
                     reference_vectors=reference_vectors,
                     lam=str(lam),
                     nsamp=nsamp,
+                    overwrite=overwrite,  
                 )
 
             dt = time.perf_counter() - t0
@@ -941,18 +962,18 @@ class ProduceSILC():
                     extract_comp=extract_comp
                 )
                 doubled_maps.append(map_)
-                np.save(
-                    output_templates['ilc_maps'].format(
-                        component=comp,
-                        extract_comp=extract_comp,
-                        scale=scale,
-                        realisation=int(realisation),
-                        lmax=lmax,
-                        lam=str(lam),
-                        nsamp=nsamp,
-                    ),
-                    map_
+                ilc_path = output_templates['ilc_maps'].format(
+                    component=comp,
+                    extract_comp=extract_comp,
+                    scale=scale,
+                    realisation=int(realisation),
+                    lmax=lmax,
+                    lam=str(lam),
+                    nsamp=nsamp,
                 )
+                if overwrite or not os.path.exists(ilc_path):
+                    np.save(ilc_path, map_)
+
             dt = time.perf_counter() - t0
             print(f'Created ILC maps in {dt:.2f} seconds')
             timings["create_ilc_maps"].append(dt)
@@ -972,8 +993,7 @@ class ProduceSILC():
                     nsamp=nsamp,
                 )
 
-                if os.path.exists(save_path):
-                    #print(f"ILC trimmed map for scale {sc}, realisation {realisation} already exists. Loading.")
+                if (not overwrite) and os.path.exists(save_path):
                     tm = np.load(save_path)
                     trimmed_maps.append(tm)
                     continue
@@ -1000,6 +1020,7 @@ class ProduceSILC():
                         lmax=int(lmax),
                         lam=str(lam),
                         nsamp=nsamp,
+                        overwrite=overwrite, 
                     )
 
                 # Ensure saved on disk (trim_to_original already saved when path_template provided,
@@ -1031,6 +1052,7 @@ class ProduceSILC():
              f=f, 
              reference_vectors=reference_vectors,
              nsamp=nsamp,
+             overwrite=overwrite, 
             )         
             synthesized_map.append(np.asarray(synth_map))
 
