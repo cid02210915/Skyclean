@@ -31,6 +31,9 @@ class FileTemplates():
             "ilc_doubled_wavelet_maps": os.path.join(directory, "SILC/ilc_doubled_wavelet_maps"),
             "ilc_trimmed_maps": os.path.join(directory, "SILC/ilc_trimmed_maps"),
             "ilc_synthesised_maps": os.path.join(directory, "SILC/ilc_synthesised_maps"),
+            # ilc_synth spectra
+            "ilc_synthesised_spec": os.path.join(directory, "SILC/ilc_synthesised_spec"),
+            "ilc_synthesised_cross_spec": os.path.join(directory, "SILC/ilc_synthesised_cross_spec"),
             # ML 
             "ml_maps": os.path.join(directory, "ML/maps"),
             "ml_models": os.path.join(directory, "ML/models"),
@@ -130,7 +133,7 @@ class FileTemplates():
         # Final synthesized map — records target (extract_comp), source (component), and band-set
         "ilc_synth": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
-            "{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         'ilc_improved': os.path.join(
@@ -147,9 +150,16 @@ class FileTemplates():
 
         "ilc_spectrum": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
-            "{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
+        # Optional: cross power spectrum (e.g. ILC vs processed)
+        "ilc_cross_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_cross_spec"],
+            "{mode}_{extract_comp}_from-{component}_x-{other}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+        ),
+
+        # Improved ILC power spectrum after ML
         'ilc_improved_spectrum': os.path.join(
             self.output_directories["ilc_improved_maps"], 
             "ilc_improved_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
