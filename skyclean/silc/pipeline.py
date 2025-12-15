@@ -513,6 +513,88 @@ class Pipeline:
 
         return ell, cl_xy
 
+    
+    def step_power_spec_both(
+        self,
+        unit: str = "K",
+        realisation: int | None = None,
+        lmax: int | None = None,
+        lam: str | float | int | None = None,
+        field: int = 0,
+        nsamp: float | int | None = None,
+        overwrite: bool | None = None,
+    ):
+        """
+        Convenience wrapper: compute power spectra for both the processed map
+        and the ILC-synth map. Saves them to a single .npy file and returns
+        (ell, cl_processed, cl_ilc).
+        """
+
+        # defaults from pipeline
+        r       = self.start_realisation if realisation is None else int(realisation)
+        lmax_   = self.lmax if lmax is None else int(lmax)
+        overwrite_ = self.overwrite if overwrite is None else overwrite
+        nsamp_  = getattr(self, "nsamp", None) if nsamp is None else nsamp
+        lam_tag = self.lam_str if lam is None else (
+            lam if isinstance(lam, str) else f"{float(lam):.1f}"
+        )
+
+        # 1) processed map spectrum
+        ell_proc, cl_proc = self.step_power_spec(
+            unit=unit,
+            source="processed",
+            component="cfn",     # or "cmb" depending on what you processed
+            realisation=r,
+            lmax=lmax_,
+            lam=lam,
+            field=field,
+            nsamp=nsamp_,
+            overwrite=overwrite_,
+            save_path=None,      # avoid extra PNG here if you don't want plots
+        )
+
+        # 2) ILC map spectrum
+        ell_ilc, cl_ilc = self.step_power_spec(
+            unit=unit,
+            source="ilc_synth",
+            component="cfn",     # input comp to ILC
+            extract_comp="cmb",  # extracted comp; adjust if needed
+            realisation=r,
+            lmax=lmax_,
+            lam=lam,
+            field=field,
+            nsamp=nsamp_,
+            overwrite=overwrite_,
+            save_path=None,
+        )
+
+        # sanity check: same ell grid
+        if not np.array_equal(ell_proc, ell_ilc):
+            raise ValueError("ell grids for processed and ILC spectra do not match")
+
+        ell = ell_proc
+
+        # 3) save combined spectra
+        mode = "con" if getattr(self, "constraint", False) else "uncon"
+
+        out_dir = os.path.join(self.directory, "power_spectra")
+        os.makedirs(out_dir, exist_ok=True)
+
+        fname = f"Cl_both_{mode}_r{r}_lmax{lmax_}_lam{lam_tag}.npy"
+        out_path = os.path.join(out_dir, fname)
+
+        data = {
+            "ell": ell,
+            "cl_processed": cl_proc,
+            "cl_ilc": cl_ilc,
+        }
+
+        if overwrite_ or (not os.path.exists(out_path)):
+            np.save(out_path, data)
+            print(f"[power_spec] Saved combined spectra to {out_path}")
+        else:
+            print(f"[power_spec] Skipped saving (exists and overwrite=False): {out_path}")
+
         
     def run(self, steps=None):
         """
@@ -542,7 +624,8 @@ class Pipeline:
             self.step_ilc()
 
         if "power_spec" in steps:
-            self.step_power_spec()
+            #self.step_power_spec()
+            self.step_power_spec_both()
 
         if "cross_power_spec" in steps:
             self.step_cross_power_spec()
