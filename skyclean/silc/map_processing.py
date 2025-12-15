@@ -40,7 +40,8 @@ class ProcessMaps():
         self.desired_lmax = desired_lmax
         self.directory = directory
         self.overwrite = overwrite
-        self.templates = FileTemplates(directory="/Scratch/agnes/data")
+        #self.templates = FileTemplates(directory="/Scratch/agnes/data")
+        self.templates = FileTemplates(directory=directory)
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates

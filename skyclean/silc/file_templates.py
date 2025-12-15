@@ -177,8 +177,11 @@ class FileTemplates():
 
         }
 
+    # put beams fit files inside 'HFI_beams' folder inside data directory
     def hfi_beam_path(self, frequency: str) -> str:
-        return os.path.join(self.directory, self.HFI_BEAM_FILE[str(frequency)])
+        """Return full path to the HFI beam file for a given frequency."""
+        fname = self.HFI_BEAM_FILE[str(frequency)]
+        return os.path.join(self.directory, "HFI_beams", fname)
      
     @staticmethod
     def create_dir(directory: str):
