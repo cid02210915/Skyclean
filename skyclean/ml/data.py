@@ -44,8 +44,8 @@ class CMBFreeILC():
         self.file_templates = files.file_templates
         # retrieve shapes
         ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(
-            extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
-            realisation=0, lmax=self.lmax, lam = self.lam))
+            mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
+            realisation=0, lmax=self.lmax, lam = self.lam, nsamp='1200.0'))
         self.H = ilc_map_temp.shape[0]+1
         self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
         self.produce_residuals()  # Create residual maps for all realisations
@@ -73,8 +73,8 @@ class CMBFreeILC():
             print(f"Creating residual maps for realisation {realisation}...")
             # load ilc (already in MW sampling)
             ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(
-            extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
-            realisation=realisation, lmax=self.lmax, lam = self.lam))
+            mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
+            realisation=realisation, lmax=self.lmax, lam = self.lam, nsamp='1200.0'))
             #ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(realisation=realisation, lmax=lmax, lam=lam))
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
