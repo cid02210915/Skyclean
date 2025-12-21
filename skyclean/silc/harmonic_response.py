@@ -1,4 +1,6 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 class AxisymmetricGenerators:
@@ -241,6 +243,7 @@ class HRFigures:
         plt.ylim(0, 1)  
         plt.show()
 
+
 def cosine_taper(L, ell_taper, ell_max=None):
     """
     Raised-cosine taper in multipole l.
@@ -280,7 +283,6 @@ def cosine_taper(L, ell_taper, ell_max=None):
     w[mid] = 0.5 * (1.0 + np.cos(np.pi * (ells[mid] - ell_taper) /
                                  (ell_max - ell_taper)))
     return w
-
 
 
 def build_axisym_filter_bank(L, lam, J0=0):
@@ -325,6 +327,7 @@ def build_axisym_filter_bank(L, lam, J0=0):
     return [psi, phi_l]
 
 
+
 class SimpleHarmonicWindows:
     """
     Build scale-discretised wavelet *and scaling* windows.
@@ -350,7 +353,7 @@ class SimpleHarmonicWindows:
         self.g_per_j = [AxisymmetricGenerators(lam_j)
                         for lam_j in self.lam_list]
 
-        # --- scaling parameters (you choose these) ---
+        # --- scaling parameters ---
         # scal_ell_cut: multipole up to which scaling has support/peak
         # scal_lam:     λ used for scaling generator
         self.scal_ell_cut = scal_ell_cut if scal_ell_cut is not None else 64.0
@@ -366,14 +369,15 @@ class SimpleHarmonicWindows:
 
     def scaling_raw(self):
         """
-        Scaling window using eta, centred at ℓ_peak = 64.
+        Scaling window using eta:
+
+            Phi_raw[ell] = eta( ell / scal_ell_cut )
+
+        (you control scal_ell_cut and scal_lam).
         """
-        ell_min, ell_peak, ell_max = self.scal_band
+        t   = self.ells / float(self.scal_ell_cut)
+        phi = self.g_scal.eta(t)      # <-- η: scaling
 
-        t   = self.ells / float(ell_peak)
-        phi = self.g_scal.eta(t)           # η: scaling kernel
-
-        # normalise so max = 1
         m = phi.max()
         if m > 0:
             phi = phi / m
@@ -435,24 +439,6 @@ class SimpleHarmonicWindows:
             mask_outside = (self.ells < ell_min) | (self.ells > ell_max)
             psi[mask_outside] = 0.0
         return psi
-
-    # ---------- scaling (eta) ----------
-
-    def scaling_raw(self):
-        """
-        Scaling window using eta:
-
-            Phi_raw[ell] = eta( ell / scal_ell_cut )
-
-        (you control scal_ell_cut and scal_lam).
-        """
-        t   = self.ells / float(self.scal_ell_cut)
-        phi = self.g_scal.eta(t)      # <-- η: scaling
-
-        m = phi.max()
-        if m > 0:
-            phi = phi / m
-        return phi
 
     # ---------- plotting helper ----------
     def plot_all_wavelets(self, truncate=True):
@@ -548,3 +534,66 @@ class SimpleHarmonicWindows:
      
          plt.tight_layout()
          plt.show()
+
+
+    @staticmethod
+    def build_s2wav_filters(
+        L: int,
+        ell_peaks,
+        lam_list,
+        scal_ell_cut: float = 64.0,
+        scal_lam: float | None = None,
+        truncate: bool = True,
+    ):
+        hw = SimpleHarmonicWindows(
+            L,
+            ell_peaks,
+            lam_list,
+            scal_ell_cut=scal_ell_cut,
+            scal_lam=scal_lam,
+        )
+    
+        # ---- build generator windows ----
+        kappa_jl = np.stack(
+            [hw.wavelet_band(j, truncate=truncate) for j in range(hw.J)],
+            axis=0,
+        ).astype(np.float64)  # (J,L)
+    
+        scal_l = hw.scaling_band(truncate=truncate).astype(np.float64)  # (L,)
+    
+        # ============================================================
+        # Enforce admissibility Eq.(30) directly (axisymmetric => m=0)
+        #   (4π/(2ℓ+1)) |Φ_{ℓ0}|^2 + (8π^2/(2ℓ+1)) Σ_j |Ψ^j_{ℓ0}|^2 = 1
+        # ============================================================
+        ells = np.arange(L, dtype=np.float64)
+        twoell1 = 2.0 * ells + 1.0
+    
+        w_scal = (4.0 * np.pi) / twoell1
+        w_wav  = (8.0 * np.pi**2) / twoell1
+    
+        denom = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
+    
+        alpha = np.ones_like(denom)
+        mask = denom > 0
+        alpha[mask] = 1.0 / np.sqrt(denom[mask])
+    
+        scal_l   = scal_l * alpha
+        kappa_jl = kappa_jl * alpha[None, :]
+    
+        # ---- optional: print Eq.(30) check ----
+        denom_post = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
+        print("\n=== Eq.(30) check (should be ~1) ===")
+        for ell in [0, 1, 2, 5, 10, 20, 32, 64, 128, min(256, L-1), L-1]:
+            if ell < L:
+                print(f"ell={ell:4d}  value={denom_post[ell]:.6e}")
+        print("min/max over ell with denom>0:", np.nanmin(denom_post[mask]), np.nanmax(denom_post[mask]))
+        print("===================================\n")
+    
+        # ---- pack into s2wav expected n-grid: (J, L, 2L-1), n=0 at mid ----
+        M = 2 * L - 1
+        mid = L - 1
+    
+        wav_jln = np.zeros((hw.J, L, M), dtype=np.complex128)
+        wav_jln[:, :, mid] = kappa_jl.astype(np.complex128)
+    
+        return jnp.array(wav_jln), jnp.array(scal_l.astype(np.complex128))
