@@ -1,16 +1,18 @@
 import os 
+os.environ["JAX_ENABLE_X64"] = "1"
+import jax
+jax.config.update("jax_enable_x64", True)
 import healpy as hp
 import numpy as np
 import jax.numpy as jnp
 from astropy.io import fits
-import jax
 import matplotlib.pyplot as plt
-jax.config.update("jax_enable_x64", True)
 import s2fft
 import s2wav
 import s2wav.filters as filters
 from .utils import *
 from .harmonic_response import build_axisym_filter_bank
+from .harmonic_response import SimpleHarmonicWindows
 from .power_spec import PowerSpectrumTT
 
 
@@ -142,7 +144,7 @@ class HPTools():
         return w
 
 
-    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float, ell_taper_frac: float = 0.94):
+    def beam_convolve(hp_map: np.ndarray, lmax: int, standard_fwhm_rad: float, ell_taper_frac: float = 0.97):
         """
         Converts healpix map to alm space, applies a tapered standard beam,
         and converts back to map space.
@@ -163,7 +165,7 @@ class HPTools():
         taper = HPTools.fermi_taper(lmax + 1, ell_taper, ell_max=lmax)
 
         # Tapered effective beam
-        # bl *= taper
+        #bl *= taper
 
         # Apply tapered beam
         alm_conv = hp.almxfl(alm, bl)
@@ -245,10 +247,10 @@ class HPTools():
             numpy.ndarray: The healpix map with converted units.    
         """
         if frequency == "545":
-            unit_conversion = 58.0356
+            unit_conversion = 57.117072864249856
             hp_map /= unit_conversion
         if frequency == "857":
-            unit_conversion = 2.2681
+            unit_conversion = 1.4357233820474276
             hp_map /= unit_conversion
         else:
             hp_map = hp_map  # No conversion for other frequencies
@@ -280,8 +282,8 @@ class HPTools():
         """
         
         hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
-        # hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
-        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
+        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
         return hp_map_reduced
     
     @staticmethod
@@ -313,11 +315,11 @@ class HPTools():
         )
 
         # Step 2: pixel-window deconvolution
-        # hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
 
         # Step 3: reduce to target NSIDE for CFN accumulation
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
-            hp_map_beamed,
+            hp_map_noP,
             lmax=lmax,
             nside=nside
         )
@@ -388,42 +390,56 @@ class MWTools():
             reality = True,
         )
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
+        print("scaling_coeffs shape:", scaling_coeffs.shape, "dtype:", scaling_coeffs.dtype)
+        print("scaling_coeffs min/max:", float(jnp.min(scaling_coeffs)), float(jnp.max(scaling_coeffs)))
+        print("scaling_coeffs L2 norm:", float(jnp.linalg.norm(scaling_coeffs)))
+
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs  
+    
 
-
-
-    ''' 
     @staticmethod
-    def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float = 2.0):
-        """
-        Performs a wavelet transform on MW map using scale-discretised filters
-        for axisym (N_directions=1), otherwise the library's directional filters
-        """
-        # --- minimal fix: choose filters based on N_directions ---
-        if N_directions == 1:
-            j_filter = build_axisym_filter_bank(L, lam) 
-            print ('shape:', j_filter[0].shape) 
-            print ('shape:', j_filter[1].shape) 
-        else:
-            j_filter = filters.filters_directional_vectorised(L, N_directions, lam=lam)
+    def wavelet_transform_from_map(
+        mw_map: jnp.ndarray,
+        L: int,
+        N_directions: int,
+        lam: float,   # kept for API compatibility, but we’ll override internally
+    ):
+        # --- define the filter bank here ---
+        ell_peaks = [64, 128, 256, 512, 705, 917,
+                     1192, 1550, 2015, 2539, 3047, 3600]
+        lam_list  = [2.0,  2.0,  2.0, 1.377,
+                     1.3,  1.3,  1.3, 1.3,
+                     1.26005, 1.2001, 1.2, 1.1815]
 
+        # 1) build filters (wav_jln, scal_l)
+        wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(
+            L, ell_peaks, lam_list
+        )
+        filters = (wav_jln, scal_l)
+
+        # 2) use a safe lambda (even though samples.py is patched)
+        lam_safe = float(np.max(lam_list))
+
+        # 3) run analysis
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
             mw_map,
-            N       = N_directions,
-            L       = L,
-            lam     = lam, 
-            filters = j_filter,
-            reality = True,
+            L=L,
+            N=N_directions,
+            J_min=0,
+            lam=lam_safe,
+            spin=0,
+            sampling="mw",
+            nside=None,
+            reality=True,
+            filters=filters,
         )
 
-        # output format
-        scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)
-        wavelet_coeffs.insert(0, scaling_coeffs)
-        return wavelet_coeffs, scaling_coeffs 
-    ''' 
-
-
+        scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
+        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
+        return wavelet_coeffs, scaling_coeffs
+    
+    '''     
     @staticmethod
     def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float):
         """
@@ -453,7 +469,7 @@ class MWTools():
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
-
+    '''
 
     @staticmethod
     def wavelet_to_mw_alm(
@@ -574,7 +590,44 @@ class MWTools():
                 wav_template.format(comp=comp, frequency=frequency, scale=scale, realisation=realisation, lmax=lmax, lam=lam),
                 np_wav,
             )
+            
 
+    @staticmethod
+    def inverse_wavelet_transform(wavelet_coeffs: list, L: int, lam: float, N_directions: int = 1):
+
+        # same ell_peaks / lam_list as forward
+        ell_peaks = [64, 128, 256, 512, 705, 917,
+                     1192, 1550, 2015, 2539, 3047, 3600]
+        lam_list  = [2.0,  2.0,  2.0, 1.377,
+                     1.3,  1.3,  1.3, 1.3,
+                     1.26005, 1.2001, 1.2, 1.1815]
+
+        wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(L, ell_peaks, lam_list)
+        filters = (wav_jln, scal_l)
+        lam_safe = float(np.max(lam_list))
+
+        f_scal_tiled = wavelet_coeffs[0]
+        print("f_scal_tiled shape:", f_scal_tiled.shape)
+        f_scal = f_scal_tiled[0]  # (Lj, 2Lj-1)
+        print("f_scal shape:", f_scal.shape)
+
+        wav_coeffs = wavelet_coeffs[1:]
+
+        mw_map = s2wav.synthesis(
+            wav_coeffs,
+            f_scal=f_scal_tiled,
+            L=L,
+            N=N_directions,
+            lam=lam_safe,
+            spin=0,
+            sampling="mw",
+            nside=None,
+            reality=True,      # if you want real map back
+            filters=filters,
+        )
+        return mw_map
+    
+    '''
     @staticmethod
     def inverse_wavelet_transform(wavelet_coeffs: list, L: int, lam: float, N_directions: int = 1):
         """
@@ -606,7 +659,8 @@ class MWTools():
             N = N_directions
         )
         return mw_map
-    
+    '''
+
     @staticmethod
     def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
         """
@@ -701,41 +755,41 @@ class MWTools():
             plt.grid(ls=':')
         plt.show()
     '''
+
     @staticmethod
-    def visualise_axisym_wavelets(L: int, rel_thresholds=(0.0, 1e-3, 1e-4)):
+    def visualise_axisym_wavelets(L: int, lam: float = 2.0, eps: float = 1e-6):
         """
-        Plots the axisymmetric wavelet filters and the scaling function,
-        then prints band tables for multiple relative thresholds.
-
-        rel_thresholds : iterable of floats
-            Each value is a fraction of the maximum amplitude used to
-            decide support:
-                support = {ℓ : |w(ℓ)| > thr * max_ℓ |w(ℓ)|}
+        Plot axisymmetric wavelet filters and scaling function,
+        then print a single band table with (ell_min^j, ell_peak^j, ell_max^j, N_samp^j).
+    
+        N_samp^j is computed from ell_max^j as:
+            N_samp^j = (ell_max^j + 1) * (2*ell_max^j + 1)
         """
-        psi, phi_l = build_axisym_filter_bank(L=L)
-
+        # Build axisymmetric filter bank
+        psi, phi_l = build_axisym_filter_bank(L=L, lam=lam)
+    
         j_filter = psi
         J = j_filter.shape[0]
         shape = j_filter.shape
         ells = np.arange(L)
         middle_m = L - 1  # m = 0 column
-
-        # --------- plot (independent of threshold) ----------
+    
+        # --------- plot ---------
         plt.figure(figsize=(7, 4))
         base = plt.get_cmap("tab20")
-
+    
         scal_color = base(0)
         wavelet_colors = [base(i + 1) for i in range(J)]
-
+    
         # scaling function
         w_scal = np.real(phi_l)
         if w_scal.max() != 0:
             w_scal_plot = w_scal / w_scal.max()
         else:
             w_scal_plot = w_scal
-
+    
         plt.plot(ells, w_scal_plot, "--", color=scal_color, label="Scal.")
-
+    
         # wavelets
         for j in range(shape[0]):
             wj = np.real(j_filter[j][:, middle_m])
@@ -744,63 +798,63 @@ class MWTools():
             else:
                 wj_plot = wj
             plt.plot(ells, wj_plot, color=wavelet_colors[j], label=fr"$j = {j}$")
-
+    
         plt.xlabel(r"$\ell$", fontsize=16)
         plt.ylabel("Normalised harmonic response", fontsize=16)
         plt.title("Axisym wavelets")
         plt.grid(ls=':')
-
+    
         plt.legend(bbox_to_anchor=(1.02, 1.0),
                    loc="upper left",
                    borderaxespad=0.)
         plt.tight_layout()
         plt.show()
-
-        # --------- band tables for each threshold ----------
-        for thr in rel_thresholds:
-            bands = []
-
-            # ----- scaling -----
-            w_abs = np.abs(w_scal)
-            if w_abs.max() != 0:
-                cutoff = thr * w_abs.max()
-                support = np.where(w_abs > cutoff)[0]
-            else:
-                support = np.array([], dtype=int)
-
-            if support.size > 0:
-                ell_min  = int(support[0])
-                ell_max  = int(support[-1])
-                ell_peak = int(ells[np.argmax(w_abs)])
-                bands.append(("Scal.", ell_min, ell_peak, ell_max))
-
-            # ----- wavelets -----
-            for j in range(shape[0]):
-                wj = np.real(j_filter[j][:, middle_m])
-                w_abs = np.abs(wj)
-
-                if w_abs.max() == 0:
-                    continue
-
-                cutoff = thr * w_abs.max()
-                support = np.where(w_abs > cutoff)[0]
-                if support.size == 0:
-                    continue
-
-                ell_min  = int(support[0])
-                ell_max  = int(support[-1])
-                ell_peak = int(ells[np.argmax(w_abs)])
-                bands.append((j, ell_min, ell_peak, ell_max))
-
-            # ----- print table for this threshold -----
-            print(f"\nBand table (relative threshold = {thr:g})")
-            print("Wavelet scale j   ell_min^j   ell_peak^j   ell_max^j")
-            for label, ell_min, ell_peak, ell_max in bands:
-                if isinstance(label, str):   # scaling row
-                    lab_str = f"{label:>13s}"
-                else:                        # integer j
-                    lab_str = f"{label:14d}"
-                print(f"{lab_str}   {ell_min:9d}   {ell_peak:11d}   {ell_max:9d}")
+    
+        # --------- single band table (no thresholds) ----------
+        bands = []
+    
+        # ----- scaling -----
+        w_abs = np.abs(w_scal)
+        if w_abs.max() != 0:
+            support = np.where(w_abs > eps * w_abs.max())[0]
+        else:
+            support = np.array([], dtype=int)
+    
+        if support.size > 0:
+            ell_min  = int(support[0])
+            ell_max  = int(support[-1])
+            ell_peak = int(ells[np.argmax(w_abs)])
+            Nsamp    = (ell_max + 1) * (2 * ell_max + 1)
+            bands.append(("Scal.", ell_min, ell_peak, ell_max, Nsamp))
+    
+        # ----- wavelets -----
+        for j in range(shape[0]):
+            wj = np.real(j_filter[j][:, middle_m])
+            w_abs = np.abs(wj)
+    
+            if w_abs.max() == 0:
+                continue
+            
+            support = np.where(w_abs > eps * w_abs.max())[0]
+            if support.size == 0:
+                continue
+            
+            ell_min  = int(support[0])
+            ell_max  = int(support[-1])
+            ell_peak = int(ells[np.argmax(w_abs)])
+            Nsamp    = (ell_max + 1) * (2 * ell_max + 1)
+            bands.append((j, ell_min, ell_peak, ell_max, Nsamp))
+    
+        # ----- print table once -----
+        print("\nBand table (single eps cut)")
+        print("Wavelet scale j   ell_min^j   ell_peak^j   ell_max^j     N_samp^j")
+        for label, ell_min, ell_peak, ell_max, Nsamp in bands:
+            if isinstance(label, str):   # scaling row
+                lab_str = f"{label:>13s}"
+            else:                        # integer j
+                lab_str = f"{label:14d}"
+            print(f"{lab_str}   {ell_min:9d}   {ell_peak:11d}   {ell_max:9d}   {Nsamp:11d}")
+    
 
 
 class SamplingConverters():
