@@ -387,7 +387,7 @@ class Train:
         residuals: jnp.ndarray,
         norm_quad_weights: jnp.ndarray,
         mask_mwss: jnp.ndarray,
-        L: int = 512,
+        L: int = 1024,
     ):
         """
         Harmonic loss:
@@ -397,7 +397,7 @@ class Train:
         pred_residuals, residuals: (B, T, P, C=1)
         mask_mwss: (T, P) or (T, P, 1)
         """
-        L=512
+        #L=512
         # --- handle mask (same logic as pixel loss) ---
         mask = jnp.asarray(mask_mwss)
         if mask.ndim == 2:
@@ -855,7 +855,7 @@ def main():
     parser.add_argument(
         '--lmax',
         type=int,
-        default=511,
+        default=1023,
         help='Maximum multipole for the wavelet transform'
     )
     parser.add_argument(
