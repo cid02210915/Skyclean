@@ -131,7 +131,7 @@ class Train:
                  lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0), 
-                 directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = None):
+                 directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = 'pixel'):
         """
         Parameters:
             frequencies (list): List of frequencies for the maps.
@@ -826,11 +826,11 @@ class Train:
         ax3.legend()
         
         title = f"lmax={self.lmax}, Realisations={self.realisations}, Batch Size={self.batch_size}, lr={self.learning_rate}, Momentum={self.momentum}, Lam={self.lam}, chs={self.chs}, loss_fc={self.loss_tag}"        
-        fig.suptitle(f"Epoch {epochs[-2]}\n{title}", fontsize=11, y=1.02)
+        fig.suptitle(f"Epoch {epochs[-1]}\n{title}", fontsize=11, y=1.02)
         plt.tight_layout()
-        #plt.savefig(f'data/ML/models/checkpoint_{epochs[-1]}/training_metrics.png', bbox_inches='tight', dpi=150)
+        plt.savefig(f'data/ML/models/checkpoint_{epochs[-1]}/training_metrics.png', bbox_inches='tight', dpi=150)
         plt.show()
-        # plt.close()  # Close to save memory
+        #plt.close()  # Close to save memory
 
     def plot_examples(self, model, test_batch, epoch: int, n_examples: int = 1):
         """Plot input, output, model prediction and residuals for sample examples.
@@ -892,7 +892,7 @@ class Train:
         
         plt.tight_layout()
         fig.suptitle(f"Epoch {epoch}", fontsize=16)
-        #plt.savefig(f'prediction.png', bbox_inches='tight', dpi=150)
+        plt.savefig(f'data/ML/models/checkpoint_{epoch[-1]}/prediction.png', bbox_inches='tight', dpi=150)
         plt.show()
 
 
@@ -989,29 +989,12 @@ def main():
         help='Base directory for data'
     )
     parser.add_argument(
-        '--gpu',
-        type=int,
-        default=0,
-        help='Index of the GPU to use (e.g., 0 or 1)'
-    )
-    parser.add_argument(
-        '--mem-fraction',
-        type=float,
-        default=0.7,
-        help='GPU memory fraction to use (default: 0.7)'
-    )
-    parser.add_argument(
         '--resume-training',
         action='store_true',
         help='Resume training from the last checkpoint'
     )
     
     args = parser.parse_args()
-
-    # Set GPU configuration
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(args.mem_fraction)
-    print(f"Using GPU {args.gpu} with {args.mem_fraction*100:.0f}% memory fraction for training.")
 
     # Convert arguments to match Train class parameters
     shuffle = not args.no_shuffle
@@ -1041,22 +1024,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-# Example usage:
-# python3 -m skyclean.ml.train \
-#   --gpu 0 \
-#   --frequencies 030 100 353 \
-#   --realisations 1000 \
-#   --lmax 511 \
-#   --lam 2.0 \
-#   --batch-size 8 \
-#   --epochs 100 \
-#   --learning-rate 1e-3 \
-#   --momentum 0.95 \
-#   --chs 1 16 32 32 64 \
-#   --directory /Scratch/matthew/data/ \
-#   --mem-fraction 0.7
 
 
 
