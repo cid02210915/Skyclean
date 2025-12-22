@@ -8,13 +8,38 @@ import sys
 
 # GPU configuration
 # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.9"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0" # remove this line because it forces the use of physical GPU 0, but Slurm may assign different GPU IDs
 
 import jax
+print("available JAX GPU devices:", jax.devices("gpu")) # check available GPUs
+
 jax.config.update("jax_enable_x64", False)  # Use 32-bit
-gpu = jax.devices()[0]
-info = gpu.memory_stats()
-print('Initial GPU usage for device 0:', info["bytes_limit"] / 1024**3, "GiB")
+try:
+    gpus = jax.devices("gpu")
+except Exception:
+    gpus = []
+if not gpus:
+    print("No GPU visible to JAX. devices() =", jax.devices())
+else:
+    gpu = gpus[0]
+    info = gpu.memory_stats()
+
+    if info is None:
+        print("JAX memory_stats() not available on this backend.")
+        print("Device:", gpu)
+    else:
+        bytes_limit = info.get("bytes_limit", None)
+        bytes_in_use = info.get("bytes_in_use", None)
+
+        if bytes_limit is None:
+            print("memory_stats() returned keys:", list(info.keys()))
+        else:
+            print("GPU 0 bytes_limit:", bytes_limit / 1024**3, "GiB")
+            if bytes_in_use is not None:
+                print("GPU 0 bytes_in_use:", bytes_in_use / 1024**3, "GiB")
+#gpu = jax.devices()[0]
+#info = gpu.memory_stats()
+#print('Initial GPU usage for device 0:', info["bytes_limit"] / 1024**3, "GiB")
 
 import numpy as np
 import jax.numpy as jnp
@@ -54,13 +79,51 @@ def get_gpu_memory_usage():
     
     return percentage, mb_used, mb_total
 
-def print_gpu_usage(stage_name):
+def get_gpu_memory_usage(device_id: int = 0):
+    """
+    Return (percentage, mb_used, mb_total) for GPU device_id.
+    If not available, return (None, None, None).
+    """
+    # Prefer actual GPU devices; fall back gracefully.
+    try:
+        gpus = jax.devices("gpu")
+    except Exception:
+        gpus = []
+
+    if not gpus: # No GPU backend visible to JAX
+        return None, None, None
+
+    if device_id >= len(gpus):
+        device_id = 0
+
+    gpu = gpus[device_id]
+    mem = gpu.memory_stats()
+
+    if mem is None: # Some backends return None
+        return None, None, None
+
+    # Keys can vary; use .get and guard division.
+    bytes_in_use = mem.get("bytes_in_use", None)
+    bytes_limit  = mem.get("bytes_limit", None)
+
+    if bytes_in_use is None or bytes_limit is None or bytes_limit == 0:
+        return None, None, None
+
+    mb_used = bytes_in_use / (1024 ** 2)
+    mb_total = bytes_limit / (1024 ** 2)
+    percentage = (bytes_in_use / bytes_limit) * 100.0
+
+    return percentage, mb_used, mb_total
+
+# def print_gpu_usage(stage_name):
+def print_gpu_usage(stage_name: str, device_id: int = 0):
     """Print GPU memory usage for a given stage."""
-    percentage, mb_used, mb_total = get_gpu_memory_usage()
+    # percentage, mb_used, mb_total = get_gpu_memory_usage()
+    percentage, mb_used, mb_total = get_gpu_memory_usage(device_id=device_id)
     if percentage is not None:
         print(f"[GPU Memory] {stage_name}: {percentage:.1f}% ({mb_used:.0f}/{mb_total:.0f} MB)")
     else:
-        print(f"[GPU Memory] {stage_name}: Unable to query GPU memory")
+        print(f"[GPU Memory] {stage_name}: Unable to query GPU memory via JAX memory_stats()")
 
 
 class Train: 
