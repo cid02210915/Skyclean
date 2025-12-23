@@ -637,7 +637,7 @@ class Train:
         return state
 
 
-    def execute_training_procedure(self, masked: bool = False, fsky: float = 0.7):
+    def execute_training_procedure(self, masked: bool = False, fsky: float = 0.7, apodisation: int = 2):
         """Execute the training procedure for the CMB-Free ILC model.
 
         Parameters:
@@ -697,13 +697,13 @@ class Train:
 
         # Split prior to training loop
         graphdef, state = nnx.split((model, optimizer, metrics))
-        mask_mwss = self.dataset.mask_mwss_beamed(fsky=fsky)   # (T, P, 1)
         if not masked:
             # same shape, all ones → effectively no masking
             mask_mwss = jnp.ones_like(mask_mwss)
             print("Training WITHOUT mask (mask_mwss = 1 everywhere).")
         else:
             print('Loading the mask')
+            mask_mwss = self.dataset.mask_mwss_beamed(fsky=fsky, apodisation=apodisation)   # (T, P, 1)
             print('shape of mask_mwss loaded:', np.shape(mask_mwss))
             mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
             print("Training WITH MWSS mask (mask-weighted loss & accuracy).")

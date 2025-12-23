@@ -45,7 +45,6 @@ class FileTemplates():
                 print(f"Creating directory: {value}")
                 os.makedirs(value)
 
-        mask_file = os.path.join(directory, "HFI_Mask_GalPlane-apo0_2048_R2.00.fits")
         
         self.download_templates = {
             "sync": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
@@ -53,6 +52,7 @@ class FileTemplates():
             "noise":"http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_noise_{frequency}_full_map_mc_{realisation:05d}.fits",
             'tsz':  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "cib":  "http://pla.esac.esa.int/pla/aio/product-action?MAP.MAP_ID=COM_CompMap_CIB-GNILC-F{frequency}_2048_R2.00.fits",
+            "mask": "https://irsa.ipac.caltech.edu/data/Planck/release_2/ancillary-data/masks/HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits",
         }
 
         self.file_templates = {
@@ -173,7 +173,7 @@ class FileTemplates():
         "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
 
         # ---------------- mask for ML ----------------
-        "mask": mask_file,
+        "mask": os.path.join(directory, "HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits"),
 
         }
 

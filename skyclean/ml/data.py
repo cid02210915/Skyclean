@@ -241,11 +241,10 @@ class CMBFreeILC():
         return signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std
     
 
-    def mask_hp(self,fsky=0.7) -> np.ndarray:
+    def load_mask_hp(self,fsky=0.7, apodization=2) -> np.ndarray:
             """
             Load a mask in HEALPix FITS, given the desired f_sky value.
             """
-
             # Choose a column by index:
             # 0: GAL020, 1: GAL040, 2: GAL060, 3: GAL070,
             # 4: GAL080, 5: GAL090, 6: GAL097, 7: GAL099
@@ -262,10 +261,18 @@ class CMBFreeILC():
                 raise ValueError(f"Unsupported f_sky={fsky}. Allowed values: {sorted(get_index.keys())}")
             field_index = get_index[fsky]
 
-            # Use the template-managed path
-            mask_path = self.file_templates["mask"]
+            mask_path = self.file_templates["mask"].format(apodization=apodization)
+
+            if not os.path.exists(mask_path):
+                import urllib.request
+                url = self.download_templates["mask"].format(apodization=apodization)
+                os.makedirs(os.path.dirname(mask_path) or ".", exist_ok=True)
+                urllib.request.urlretrieve(url, mask_path)
+                print(f"Download mask for fsky={fsky} apodization={apodization}.")
+            else: 
+                print(f"Mask already exists: {mask_path} (skipping download)")
             mask = hp.read_map(mask_path, field=field_index)
-            print(f"Mask with f_sky={fsky} loaded from {mask_path}.")
+            print(f"Mask with fsky={fsky} apodization={apodization} loaded from {mask_path}.")
             return mask
     
     def mask_mwss(self,fsky=0.7) -> np.ndarray:
@@ -273,8 +280,7 @@ class CMBFreeILC():
         Convert a healpix mask to mwss format.
         '''
         lmax = self.lmax
-        mask_path = self.file_templates["mask"]
-        mask_hp = self.mask_hp(fsky=fsky)
+        mask_hp = self.load_mask_hp(fsky=fsky)
         mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp, lmax)
         L = lmax + 1
         mask_mwss = SamplingConverters.mw_map_2_mwss_map(mask_mw, L=L).astype(np.float32)
@@ -282,7 +288,6 @@ class CMBFreeILC():
         return mask_mwss
 
 
-    
     def mask_mwss_beamed(self, fsky=0.7) -> np.ndarray:
         """
         Proceed the mask by convolving and reducing, then converting to MWSS sampling.
@@ -291,8 +296,7 @@ class CMBFreeILC():
         lmax = self.lmax
         nside = HPTools.get_nside_from_lmax(lmax)
         standard_fwhm_rad = np.radians(5/60)
-        mask_path = self.file_templates["mask"]
-        mask_hp = self.mask_hp(fsky = fsky)
+        mask_hp = self.load_mask_hp(fsky = fsky)
         mask_hp_reduced = HPTools.convolve_and_reduce(
                 mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
             )
@@ -309,8 +313,7 @@ class CMBFreeILC():
         lmax = self.lmax
         nside = HPTools.get_nside_from_lmax(lmax)
         standard_fwhm_rad = np.radians(5/60)
-        mask_path = self.file_templates["mask"]
-        mask_hp = self.mask_hp(fsky)
+        mask_hp = self.load_mask_hp(fsky)
         mask_hp_reduced = HPTools.convolve_and_reduce(
             mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
         )
