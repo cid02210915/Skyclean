@@ -45,6 +45,8 @@ import numpy as np
 import jax.numpy as jnp
 import optax
 from flax import nnx
+import tensorflow as tf
+tf.config.set_visible_devices([], "GPU")
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 import s2fft

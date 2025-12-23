@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 
 from skyclean.silc import utils, HPTools, MWTools, SamplingConverters, FileTemplates
 import tensorflow as tf
+tf.config.set_visible_devices([], "GPU")
 
 import jax
 import jax.numpy as jnp

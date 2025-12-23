@@ -1,6 +1,16 @@
 # skyclean/ml/pipeline_ml.py
 
 import os
+
+# ---- must happen before any TF/TFDS import (Train/Data imports TF) ----
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
+try:
+    import tensorflow as tf
+    tf.config.set_visible_devices([], "GPU")  # keep TF off GPU
+except Exception as e:
+    # If TF isn't installed in some envs, don't hard-fail here
+    print(f"[warn] TensorFlow GPU disable skipped: {e}")
+# ----------------------------------------------------------------------
 import re
 import argparse
 from pathlib import Path
@@ -45,14 +55,14 @@ def resolve_model_dir_from_directory(directory: str) -> str:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Pipeline (train + inference) for Skyclean ML."
+        description="Pipeline (train + evaluate) for Skyclean ML."
     )
 
     parser.add_argument(
         "--mode",
         type=str,
         default="train",
-        choices=["train", "infer", "train+infer"],
+        choices=["train", "evaluate", "train+evaluate"],
         help="Which stages to run."
     )
 
@@ -63,7 +73,7 @@ def parse_args():
     parser.add_argument("--frequencies", nargs="+", default=["030", "100", "353"])
     parser.add_argument("--realisations", type=int, default=1000)
 
-    parser.add_argument("--lmax", type=int, default=1024)
+    parser.add_argument("--lmax", type=int, default=1023)
     parser.add_argument("--N-directions", type=int, default=1)
     parser.add_argument("--lam", type=float, default=2.0)
 
