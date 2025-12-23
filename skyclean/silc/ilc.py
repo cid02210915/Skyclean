@@ -1076,4 +1076,4 @@ class ProduceSILC():
                 W_for_final_check = weight_vector_load[mid_idx]
                 _check_against_F(W_for_final_check, F, f)
 
-            return synthesized_map, timings
+        return synthesized_map, timings

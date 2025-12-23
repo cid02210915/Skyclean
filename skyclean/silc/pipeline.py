@@ -609,7 +609,7 @@ class Pipeline:
             steps = ["download", "process", "wavelets", "ilc"]
 
         start_time = time.perf_counter()
-        print(f"=== RUN for lam={self.lam} ===")
+        print(f"==== RUN for lam={self.lam}, realisation={self.start_realisation + self.realisations} ====")
 
         if "download" in steps:
             self.step_download()
