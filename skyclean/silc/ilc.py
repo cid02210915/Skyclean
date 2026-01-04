@@ -17,6 +17,7 @@ import s2wav.filters as filters
 
 from .map_tools import *
 from .utils import *
+from .custom_s2wav_bandlimits import *
 from .file_templates import FileTemplates
 from .utils import normalize_targets   
 from .utils import save_array
@@ -58,150 +59,207 @@ class SILCTools():
         x2 = np.real(s2fft.inverse(padded, L=H, method = method, spmd = False, reality = True))
 
         return x2 
-    
+
+    # =========================
+    # DROP-IN REPLACEMENT BLOCK
+    # =========================
+    # Replace EVERYTHING you pasted with this block.
+    # This is "paper-only": no nsamp, local modes use f_sky = sigma^2/2.
 
     @staticmethod
     @lru_cache(maxsize=64)
     def _cached_gauss_beam(L: int, fwhm_rad: float) -> np.ndarray:
         """B_ell for ell=0..L-1, Gaussian beam with FWHM in radians."""
         return hp.gauss_beam(float(fwhm_rad), lmax=int(L) - 1)  # (L,)
+    
+    # ------------------------------------------------------------
+    # Paper helpers: sigma^2, f_sky, conversions (Eqs 44 + text)
+    # ------------------------------------------------------------
 
     @staticmethod
-    @lru_cache(maxsize=64)
-    def _cached_beam(L: int, nsamp: float = 1200.0) -> np.ndarray:
-        """
-        converts nsamp -> effective sky fraction -> FWHM(rad) heuristic,
-        then returns hp.gauss_beam(FWHM_rad, lmax=L-1).
-        """
-        L = int(L)
-        nsamp = float(nsamp)
-
-        N_pix_Omega_MW = float(L * (2 * L - 1))
-        frac = nsamp / N_pix_Omega_MW
-
-        if frac <= 0.0:
-            fwhm_rad = 0.0
-        elif frac >= 1.0:
-            raise ValueError(
-                f"nsamp/N_pix_Omega={frac:.3e} >= 1; decrease nsamp (kernel larger than sky)."
-            )
-        else:
-            fwhm_rad = 4.0 * math.sqrt(frac)  # radians (as previously assumed)
-
-        return hp.gauss_beam(float(fwhm_rad), lmax=L - 1)  # (L,)
-
+    @lru_cache(maxsize=256)
+    def sigma2_from_fwhm(fwhm_rad: float) -> float:
+        """Eq (44) rearranged: sigma^2 = FWHM^2 / (8 ln 2)."""
+        fwhm_rad = float(fwhm_rad)
+        if fwhm_rad <= 0.0:
+            return 0.0
+        return (fwhm_rad * fwhm_rad) / (8.0 * math.log(2.0))
+    
+    @staticmethod
+    @lru_cache(maxsize=256)
+    def f_sky_paper_from_fwhm(fwhm_rad: float) -> float:
+        """Paper approximation: f_sky ≈ sigma^2 / 2."""
+        return 0.5 * SILCTools.sigma2_from_fwhm(float(fwhm_rad))
+    
+    @staticmethod
+    def fwhm_from_sigma2(sigma2: float) -> float:
+        """Eq (44): FWHM = sqrt(8 ln2 * sigma^2)."""
+        sigma2 = float(sigma2)
+        if sigma2 <= 0.0:
+            return 0.0
+        return float(np.sqrt(8.0 * math.log(2.0) * sigma2))
+    
     # ============================================================
     # (B) Gaussian real-space window -> effective pixel count
+    #     (DIAGNOSTIC ONLY; NOT USED BY PAPER LOGIC)
     # ============================================================
 
     @staticmethod
     @lru_cache(maxsize=64)
     def n_pix_eff_gaussian_fullsky(fwhm_rad: float, nside: int) -> float:
         """
-        Effective pixel count of a Gaussian window on the sphere:
+        Diagnostic only:
             N_pix,eff = (ΣW)^2 / Σ(W^2)
         """
         fwhm_rad = float(fwhm_rad)
         nside = int(nside)
         if fwhm_rad <= 0.0:
             return 0.0
-
         sigma = fwhm_rad / math.sqrt(8.0 * math.log(2.0))
-
         npix = hp.nside2npix(nside)
-        theta, _ = hp.pix2ang(nside, np.arange(npix))  # centered at pole (symmetry)
-
+        theta, _ = hp.pix2ang(nside, np.arange(npix))  # centered at pole
         W = np.exp(-0.5 * (theta / sigma) ** 2)
         s1 = float(np.sum(W))
         s2 = float(np.sum(W * W))
         return 0.0 if s2 == 0.0 else (s1 * s1) / s2
-
+    
     @staticmethod
     @lru_cache(maxsize=256)
     def gaussian_pixel_counts_fullsky(fwhm_rad: float, nside: int, k_sigma: float = 3.0):
         """
-        Debug / reporting helper:
+        Diagnostic helper:
           N_sphere_hp : total HEALPix pixels on sphere
-          N_in_gauss  : literal count of pixels with theta <= k_sigma*sigma
-          N_pix_eff   : effective pixel count (ΣW)^2/Σ(W^2)
+          N_in_gauss  : pixels with theta <= k_sigma*sigma (hard cut; not paper)
+          N_pix_eff   : (ΣW)^2/Σ(W^2) (not paper)
           sigma       : sigma in radians
           theta_cut   : cutoff radius in radians
+          f_sky_paper : sigma^2/2 from paper
+          f_sky_eff_hp: N_pix_eff / N_pix_fullsky(HP)
         """
         fwhm_rad = float(fwhm_rad)
         nside = int(nside)
         k_sigma = float(k_sigma)
-
         sigma = fwhm_rad / math.sqrt(8.0 * math.log(2.0))
         theta_cut = min(k_sigma * sigma, math.pi)
-
         npix = hp.nside2npix(nside)
         theta, _ = hp.pix2ang(nside, np.arange(npix))
-
         N_in_gauss = int(np.count_nonzero(theta <= theta_cut))
-
         W = np.exp(-0.5 * (theta / sigma) ** 2)
         s1 = float(np.sum(W))
         s2 = float(np.sum(W * W))
         N_pix_eff = 0.0 if s2 == 0.0 else (s1 * s1) / s2
-
-        return npix, N_in_gauss, float(N_pix_eff), float(sigma), float(theta_cut)
-
+        f_sky_paper = SILCTools.f_sky_paper_from_fwhm(fwhm_rad)
+        f_sky_eff_hp = float(N_pix_eff) / float(npix) if npix > 0 else float("nan")
+        return (
+            int(npix),
+            int(N_in_gauss),
+            float(N_pix_eff),
+            float(sigma),
+            float(theta_cut),
+            float(f_sky_paper),
+            float(f_sky_eff_hp),
+        )
+    
     # ============================================================
     # (C) Paper-style per-band FWHM (Eqs 42–44) and N_modes
     # ============================================================
-
     @staticmethod
-    def fwhm_rad_wavelet(L: int, lam: float, j: int, Nfreq: int, Ndeproj: int = 0, b_tol: float = 0.01) -> float:
+    def fwhm_rad_wavelet(
+        L: int,
+        lam: float,
+        j: int,
+        Nfreq: int,
+        Ndeproj: int = 0,
+        b_tol: float = 0.01
+    ) -> float:
         """
-        Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for WAVELET band j (kappa).
+        Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for WAVELET band j.
+        SILC FIX: use fixed band edges from the bank.
+        """
+        L = int(L)
+        ells = np.arange(L, dtype=int)
+        ell_min = int(L0_j_silc(int(j)))
+        ell_max = int(wav_j_bandlimit_silc(L, int(j), multiresolution=True))
+        # Clip to available harmonic support 0..L-1
+        ell_min = max(0, min(ell_min, L - 1))
+        ell_max = max(0, min(ell_max, L - 1))
+        if ell_min > ell_max:
+            return 0.0
+        h = ((ells >= ell_min) & (ells <= ell_max)).astype(float)
+        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))  # Eq (42)
+        A = abs(1 + int(Ndeproj) - int(Nfreq))
+        # Eq (43)
+        sigma2 = 0.0 if S <= 0.0 else 2.0 * (A / (float(b_tol) * S))
+        # Eq (44)
+        return SILCTools.fwhm_from_sigma2(sigma2)
+    
+    @staticmethod
+    def fwhm_rad_scaling(
+        L: int,
+        lam: float,
+        J: int,
+        Nfreq: int,
+        Ndeproj: int = 0,
+        b_tol: float = 0.01
+    ) -> float:
+        """
+        Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for SCALING band (eta).
+        SILC FIX: scaling window fixed low-ℓ; J unused (API compatibility).
         """
         gen = AxisymmetricGenerators(float(lam))
         ells = np.arange(int(L), dtype=float)
-        h = gen.kappa(ells / (float(lam) ** int(j)))
-        Nm = float(np.sum((2.0 * ells + 1.0) * (h * h)))  # Eq (42)
-        sigma2 = 2.0 * (abs(1 + int(Ndeproj) - int(Nfreq)) / (float(b_tol) * Nm))  # Eq (43)
-        return float(np.sqrt(8.0 * math.log(2.0) * sigma2))  # Eq (44)  [radians]
-
+        h = gen.eta(ells)
+        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))  # Eq (42)
+        A = abs(1 + int(Ndeproj) - int(Nfreq))
+        sigma2 = 0.0 if S <= 0.0 else 2.0 * (A / (float(b_tol) * S))  # Eq (43)
+        return SILCTools.fwhm_from_sigma2(sigma2)  # Eq (44)
+    
     @staticmethod
-    def fwhm_rad_scaling(L: int, lam: float, J: int, Nfreq: int, Ndeproj: int = 0, b_tol: float = 0.01) -> float:
+    def n_modes_scaling_band(
+        L: int,
+        lam: float,
+        J: int,
+        fwhm_rad: float,
+        nside_nmodes: int = 2048
+    ) -> float:
         """
-        Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for SCALING band (eta) with index J.
+        PAPER local modes for scaling band:
+            N_modes(local) = f_sky(paper) * Σ(2l+1) (h_l)^2
         """
         gen = AxisymmetricGenerators(float(lam))
         ells = np.arange(int(L), dtype=float)
-        h = gen.eta(ells / (float(lam) ** int(J)))
-        Nm = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-        sigma2 = 2.0 * (abs(1 + int(Ndeproj) - int(Nfreq)) / (float(b_tol) * Nm))
-        return float(np.sqrt(8.0 * math.log(2.0) * sigma2))
-
+        h = gen.eta(ells)
+        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))  # Eq (42)
+        f_sky = SILCTools.f_sky_paper_from_fwhm(float(fwhm_rad))
+        return f_sky * S
+    
     @staticmethod
-    def n_modes_needlet_band(L: int, lam: float, band_j: int, fwhm_rad: float, nside_nmodes: int = 2048) -> float:
+    def n_modes_needlet_band(
+        L: int,
+        lam: float,
+        band_j: int,
+        fwhm_rad: float,
+        nside_nmodes: int = 2048
+    ) -> float:
         """
-        Needlet-domain modes for wavelet band j (kappa):
-            N_modes^j = (N_pix,eff / N_pix,Omega) * Σ(2ℓ+1) (h_ℓ^j)^2
+        PAPER local modes for wavelet band j:
+            N_modes(local) = f_sky(paper) * Σ(2l+1) (h_l^j)^2
         """
-        gen = AxisymmetricGenerators(float(lam))
-        ells = np.arange(int(L), dtype=float)
-        h = gen.kappa(ells / (float(lam) ** int(band_j)))
-        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-
-        N_pix_eff = SILCTools.n_pix_eff_gaussian_fullsky(float(fwhm_rad), int(nside_nmodes))
-        N_pix_Omega = float(L * (2 * L - 1))  # MW full-sky count
-        return (N_pix_eff / N_pix_Omega) * S
-
-    @staticmethod
-    def n_modes_scaling_band(L: int, lam: float, J: int, fwhm_rad: float, nside_nmodes: int = 2048) -> float:
-        """
-        Needlet-domain modes for scaling band (eta).
-        """
-        gen = AxisymmetricGenerators(float(lam))
-        ells = np.arange(int(L), dtype=float)
-        h = gen.eta(ells / (float(lam) ** int(J)))
-        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-
-        N_pix_eff = SILCTools.n_pix_eff_gaussian_fullsky(float(fwhm_rad), int(nside_nmodes))
-        N_pix_Omega = float(L * (2 * L - 1))
-        return (N_pix_eff / N_pix_Omega) * S
+        L = int(L)
+        ells = np.arange(L, dtype=int)
+        ell_data_max = L - 1
+        ell_min_bank = int(L0_j_silc(int(band_j)))
+        ell_max_bank = int(wav_j_bandlimit_silc(L, int(band_j), multiresolution=True))
+        if ell_min_bank > ell_data_max:
+            return 0.0
+        ell_min = max(0, ell_min_bank)
+        ell_max = min(ell_max_bank, ell_data_max)
+        if ell_min > ell_max:
+            return 0.0
+        h = ((ells >= ell_min) & (ells <= ell_max)).astype(float)
+        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))  # Eq (42)
+        f_sky = SILCTools.f_sky_paper_from_fwhm(float(fwhm_rad))
+        return f_sky * S
 
     # ============================================================
     # (D)  smoothed_covariance (pipeline-safe)
@@ -213,32 +271,35 @@ class SILCTools():
         MW_Map1: np.ndarray,
         MW_Map2: np.ndarray,
         method: str = "jax_cuda",
-        nsamp: float = 1200.0,
+        nsamp: float = 1200,  # kept for API compatibility; ignored in paper-only usage
         *,
         return_info: bool = False,
-        use_paper_fwhm: bool = False,
+        use_paper_fwhm: bool = False,  # kept for API compatibility; forced True below
         lam: float | None = None,
         band_j: int | None = None,
-        J_scal: int | None = None,
+        J_scal: int | None = None,   # kept for API compatibility, ignored for SILC
         scaling: bool = False,
         Nfreq: int | None = None,
         Ndeproj: int = 0,
         b_tol: float = 0.01,
-        # For pixel counts / N_pix_eff:
+        # For diagnostics:
         nside_nmodes: int = 2048,
         k_sigma: float = 3.0,
     ):
         """
-        Default (pipeline-safe):
-        -> beam comes from nsamp via _cached_beam().
+        PAPER-ONLY behaviour:
+          - compute per-band FWHM via Eqs (42)-(44)
+          - beam = hp.gauss_beam(FWHM)
+          - smooth real-space product
 
-        If use_paper_fwhm=True: uses paper per-band FWHM (Eqs 42-44),
-        which requires lam, Nfreq, and either (band_j) for wavelet or (J_scal, scaling=True) for scaling band.
-
-        Returns:
-          - if return_info=False: smoothed covariance map
-          - if return_info=True : (smoothed map, info dict)
+        nsamp/use_paper_fwhm kept only so upstream pipeline calls don't break.
         """
+        # ---- force paper path ----
+        use_paper_fwhm = True
+
+        if lam is None or Nfreq is None:
+            raise ValueError("Paper mode requires lam and Nfreq.")
+
         L = int(MW_Map1.shape[0])
 
         # --- ensure MW sampling width=2L-1 only if needed ---
@@ -264,53 +325,70 @@ class SILCTools():
         Rpix = map1 * map2
         Ralm = s2fft.forward(Rpix, L=L, method=method, spmd=False, reality=True)
 
-        # ----- choose beam -----
-        info = {}
+        # ----- paper FWHM -----
+        info: dict = {}
 
-        if not use_paper_fwhm:
-            # ORIGINAL behaviour: nsamp -> beam
-            beam = SILCTools._cached_beam(int(Ralm.shape[0]), nsamp=float(nsamp))
-            info["beam_source"] = "nsamp"
-            info["nsamp"] = float(nsamp)
-        else:
-            # PAPER behaviour: per-band FWHM -> beam
-            if lam is None or Nfreq is None:
-                raise ValueError("use_paper_fwhm=True requires lam and Nfreq.")
-            if scaling:
-                if J_scal is None:
-                    raise ValueError("scaling=True requires J_scal.")
-                fwhm_rad = SILCTools.fwhm_rad_scaling(L, lam, int(J_scal), int(Nfreq), int(Ndeproj), float(b_tol))
-                info["band"] = "scaling"
-                info["J_scal"] = int(J_scal)
-            else:
-                if band_j is None:
-                    raise ValueError("use_paper_fwhm=True (wavelet) requires band_j.")
-                fwhm_rad = SILCTools.fwhm_rad_wavelet(L, lam, int(band_j), int(Nfreq), int(Ndeproj), float(b_tol))
-                info["band"] = "wavelet"
-                info["band_j"] = int(band_j)
-
-            beam = SILCTools._cached_gauss_beam(int(Ralm.shape[0]), float(fwhm_rad))
-            info["beam_source"] = "paper"
-            info["fwhm_rad"] = float(fwhm_rad)
-            info["lam"] = float(lam)
-            info["Nfreq"] = int(Nfreq)
-            info["Ndeproj"] = int(Ndeproj)
-            info["b_tol"] = float(b_tol)
-
-            # optional: add N_pix_eff and counts for this fwhm
-            N_sphere_hp, N_in_gauss, N_pix_eff, sigma, theta_cut = SILCTools.gaussian_pixel_counts_fullsky(
-                float(fwhm_rad), int(nside_nmodes), float(k_sigma)
+        if scaling:
+            fwhm_rad = SILCTools.fwhm_rad_scaling(
+                L, float(lam), 0, int(Nfreq), int(Ndeproj), float(b_tol)
             )
-            info.update({
-                "nside_nmodes": int(nside_nmodes),
-                "k_sigma": float(k_sigma),
-                "sigma_rad": float(sigma),
-                "theta_cut_rad": float(theta_cut),
-                "N_sphere_hp": int(N_sphere_hp),
-                "N_in_gauss": int(N_in_gauss),
-                "N_pix_eff": float(N_pix_eff),
-                "N_pix_Omega_MW": int(L * (2 * L - 1)),
-            })
+            info["band"] = "scaling"
+        else:
+            if band_j is None:
+                raise ValueError("Paper wavelet mode requires band_j.")
+            fwhm_rad = SILCTools.fwhm_rad_wavelet(
+                L, float(lam), int(band_j), int(Nfreq), int(Ndeproj), float(b_tol)
+            )
+            info["band"] = "wavelet"
+            info["band_j"] = int(band_j)
+
+        beam = SILCTools._cached_gauss_beam(int(Ralm.shape[0]), float(fwhm_rad))
+
+        # ---- info ----
+        info.update({
+            "beam_source": "paper",
+            "fwhm_rad": float(fwhm_rad),
+            "lam": float(lam),
+            "Nfreq": int(Nfreq),
+            "Ndeproj": int(Ndeproj),
+            "b_tol": float(b_tol),
+            # paper: f_sky = sigma^2/2, sigma^2 = FWHM^2/(8 ln2)
+            "f_sky_paper": float(SILCTools.f_sky_paper_from_fwhm(float(fwhm_rad))),
+        })
+
+        # optional diagnostics: HEALPix-consistent effective sky fraction
+        if hasattr(SILCTools, "gaussian_pixel_counts_fullsky"):
+            try:
+                # Your updated gaussian_pixel_counts_fullsky returns:
+                # (npix_hp, N_in_gauss, N_pix_eff, sigma, theta_cut, f_sky_paper, f_sky_eff_hp)
+                out = SILCTools.gaussian_pixel_counts_fullsky(float(fwhm_rad), int(nside_nmodes), float(k_sigma))
+                if len(out) == 7:
+                    npix_hp, N_in_gauss, N_pix_eff, sigma, theta_cut, fsky_p, fsky_eff_hp = out
+                    info.update({
+                        "nside_nmodes": int(nside_nmodes),
+                        "k_sigma": float(k_sigma),
+                        "sigma_rad": float(sigma),
+                        "theta_cut_rad": float(theta_cut),
+                        "N_sphere_hp": int(npix_hp),
+                        "N_in_gauss": int(N_in_gauss),
+                        "N_pix_eff": float(N_pix_eff),
+                        "f_sky_eff_hp": float(fsky_eff_hp),
+                    })
+                else:
+                    # fallback for older 5-tuple version
+                    npix_hp, N_in_gauss, N_pix_eff, sigma, theta_cut = out
+                    info.update({
+                        "nside_nmodes": int(nside_nmodes),
+                        "k_sigma": float(k_sigma),
+                        "sigma_rad": float(sigma),
+                        "theta_cut_rad": float(theta_cut),
+                        "N_sphere_hp": int(npix_hp),
+                        "N_in_gauss": int(N_in_gauss),
+                        "N_pix_eff": float(N_pix_eff),
+                        "f_sky_eff_hp": float(N_pix_eff) / float(npix_hp) if npix_hp > 0 else float("nan"),
+                    })
+            except Exception:
+                pass
 
         # ----- apply beam + inverse -----
         if method == "numpy":
@@ -326,52 +404,85 @@ class SILCTools():
 
         return (smoothed, info) if return_info else smoothed
 
-    @staticmethod
-    def _J_from_L_lam(L: int, lam: float) -> int:
-        return int(np.ceil(np.log(max(L-1, 1.0)) / np.log(lam)))
 
-    @staticmethod 
+    @staticmethod
     def compute_covariance(task):
         """
-        task: (i, fq, frequencies, scale, doubled_MW_wav_c_j, method, nsamp)
+        PAPER-ONLY:
+          task: (i, fq, frequencies, scale, doubled_MW_wav_c_j, method, lam, Ndeproj, b_tol)
         """
-        i, fq, frequencies, scale, doubled_MW_wav_c_j, method, nsamp, lam, Ndeproj, b_tol = task
+        i, fq, frequencies, scale, doubled_MW_wav_c_j, method, lam, Ndeproj, b_tol = task
+
         key_i  = (frequencies[i], scale)
         key_fq = (frequencies[fq], scale)
         if key_i not in doubled_MW_wav_c_j or key_fq not in doubled_MW_wav_c_j:
             raise KeyError(f"Missing data for keys {key_i} or {key_fq}.")
-        
+
+        L = int(doubled_MW_wav_c_j[key_i].shape[0])
+
         smoothed, info = SILCTools.smoothed_covariance(
             doubled_MW_wav_c_j[key_i],
             doubled_MW_wav_c_j[key_fq],
             method=method,
-            nsamp=nsamp,
-            return_info=True,         
+            # nsamp kept for API compatibility, ignored:
+            nsamp=0.0,
+            return_info=True,
             use_paper_fwhm=True,
             lam=float(lam),
             Nfreq=len(frequencies),
             Ndeproj=int(Ndeproj),
             b_tol=float(b_tol),
             scaling=(int(scale) == 0),
-            J_scal=SILCTools._J_from_L_lam(int(doubled_MW_wav_c_j[key_i].shape[0]), float(lam)) if int(scale) == 0 else None,
             band_j=(int(scale) - 1) if int(scale) > 0 else None,
         )
 
+        # ---- print once per scale ----
         if (i == 0) and (fq == 0) and info.get("beam_source") == "paper":
-            # compute f_sky_eff on the fly (no need to edit smoothed_covariance)
-            f_sky_eff = float(info["N_pix_eff"]) / float(info["N_pix_Omega_MW"])
-            fwhm_arcmin = float(info["fwhm_rad"]) * (180.0 / math.pi) * 60.0
+            fwhm_rad = float(info["fwhm_rad"])
+            fwhm_arcmin = fwhm_rad * (180.0 / math.pi) * 60.0
 
-            band = info.get("band", "?")
-            tag = f"j={info.get('band_j')}" if band == "wavelet" else f"J={info.get('J_scal')}"
-            print(f"[locality] {band}({tag})  FWHM={fwhm_arcmin:.3f} arcmin  f_sky_eff={f_sky_eff:.3e}")
+            f_sky_paper = float(info.get("f_sky_paper", float("nan")))
+            f_sky_eff_hp = float(info.get("f_sky_eff_hp", float("nan")))
+
+            if int(scale) == 0:
+                Ls = scal_bandlimit_silc(L, multiresolution=True)
+                tag = f"scal(ell=0..{Ls-1})"
+
+                gen = AxisymmetricGenerators(float(lam))
+                ells = np.arange(int(L), dtype=float)
+                h = gen.eta(ells)
+                N_modes_full = float(np.sum((2.0 * ells + 1.0) * (h * h)))
+
+                N_modes_local = SILCTools.n_modes_scaling_band(L, float(lam), 0, fwhm_rad)
+            else:
+                j = int(scale) - 1
+                ell_min = int(L0_j_silc(j))
+                ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
+                tag = f"wav(j={j}, ell={ell_min}..{ell_max})"
+
+                ells = np.arange(int(L), dtype=int)
+                h = ((ells >= max(0, min(ell_min, L - 1))) & (ells <= max(0, min(ell_max, L - 1)))).astype(float)
+                N_modes_full = float(np.sum((2.0 * ells + 1.0) * (h * h)))
+
+                N_modes_local = SILCTools.n_modes_needlet_band(L, float(lam), j, fwhm_rad)
+
+            print(
+                f"[locality] {tag}  "
+                f"FWHM={fwhm_arcmin:.3f} arcmin  "
+                f"f_sky(paper)={f_sky_paper:.3e}  "
+                f"f_sky(eff_hp,diag)={f_sky_eff_hp:.3e}  "
+                f"N_modes(full)={N_modes_full:.3e}  "
+                f"N_modes(local,paper)={N_modes_local:.3e}"
+            )
+
         return i, fq, smoothed
+
 
     @staticmethod
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
                                     realisation: int, method: str, path_template: str, *,
                                     component: str = "cfn", lmax: int = 64, lam: float | None = None,
-                                    nsamp: float = 1200.0, overwrite: bool = False,
+                                    nsamp: float = 1200, overwrite: bool = False,
                                     Ndeproj: int = 0, b_tol: float = 0.01,):
         
         #print("calculate_covariance_matrix", flush = True)
@@ -412,7 +523,7 @@ class SILCTools():
         full_array = np.zeros((total_frequency, total_frequency, n_rows, n_cols))
 
         tasks = [
-            (i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method, nsamp, lam, int(Ndeproj), float(b_tol))
+            (i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method, lam, int(Ndeproj), float(b_tol))
             for i in range(total_frequency)
             for fq in range(i, total_frequency)
         ]
@@ -435,6 +546,7 @@ class SILCTools():
     
         np.save(save_path, full_array)
         return full_array
+    
 
     @staticmethod
     def double_and_save_wavelet_maps(
@@ -464,15 +576,13 @@ class SILCTools():
                 if (not overwrite) and os.path.exists(out_path):
                     doubled = np.load(out_path)
                 else:
-                    # IMPORTANT: read original using the SAME key format if possible
                     src = original_wavelet_c_j.get((freq_tag, s))
                     if src is None:
-                        src = original_wavelet_c_j[(f, s)]  # fallback if your original dict used unpadded keys
+                        src = original_wavelet_c_j[(f, s)] 
 
                     doubled = SILCTools.Single_Map_doubleworker(src, method)
                     np.save(out_path, np.asarray(doubled))
 
-                # IMPORTANT: store using the SAME normalized key you use everywhere else
                 doubled_MW_wav_c_j[(freq_tag, s)] = doubled
 
         return doubled_MW_wav_c_j
@@ -921,6 +1031,7 @@ class SILCTools():
             lam=str(lam),
             nsamp=nsamp,
         )
+
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         if overwrite or not os.path.exists(out_path):
             np.save(out_path, MW_Pix)
@@ -934,10 +1045,27 @@ class SILCTools():
                 SILCTools.visualize_MW_Pix_map(MW_Pix, title)
             except Exception:
                 pass
-            
+
         return MW_Pix
     
-
+    ELL_MIN = np.array([32, 64, 128, 256, 542, 705, 916, 1192, 1550, 2115, 2539, 3046], dtype=int)
+    ELL_PEAK = np.array([64, 128, 256, 512, 705, 917, 1192, 1550, 2015, 2539, 3047, 3600],dtype=int,)
+    ELL_MAX = np.array([128, 256, 512, 705, 916, 1192, 1549, 2015, 2539, 3047, 3656, 4253], dtype=int)
+    
+    @staticmethod
+    def wavelet_js_custom(L: int):
+        L = int(L)
+        js = []
+        for j in range(len(ELL_MIN)):
+            L0 = int(ELL_MIN[j])
+            if L0 >= L:
+                break
+            Lj = int(min(ELL_MAX[j], L))
+            if Lj <= L0:
+                continue
+            js.append(j)          # <-- keep it even if Lj repeats
+        return js
+    
 
 class ProduceSILC():
     """Perform  Scale-discretised, directional wavelet ILC (SILC)."""
@@ -980,34 +1108,25 @@ class ProduceSILC():
         files = FileTemplates(self.directory)
         self.file_templates = files.file_templates
 
-        # ilc_wavelet_paths, wavelet_map_directories, silc_output_dir, file_templates
-        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam) # use length of filter to obtain n_scales
-        self.scales = range(len(filter_sample[0]) + 1) 
+        L = self.lmax + 1  # convert lmax -> bandlimit
+        js = SILCTools.wavelet_js_custom(L)
+        self.scales = range(len(js) + 1)  # +1 scaling
+        self._js = js  # store mapping if you need it
 
 
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, lam,
                               N_directions, comp, constraint=False, F=None, extract_comp=None,
                              reference_vectors=None, nsamp=None, overwrite: bool = False,):
+    
+        L = int(L_max)
+        js = SILCTools.wavelet_js_custom(L)
+        scales = range(len(js) + 1)
+        lmax = L - 1 
 
-        lmax = L_max - 1  
-        realisations = [int(r) for r in realisations]
-        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam = float(lam)) # use length of filter to obtain n_scales
-        scales = range(len(filter_sample[0]) + 1) 
+        print(f"[DEBUG] passed L_max={L_max} -> L={int(L_max)} lmax={int(L_max)-1}")
+        print(f"[DEBUG] wavelet_js_custom(L)={SILCTools.wavelet_js_custom(int(L_max))}")
 
-        '''
-        def _check_against_F(W, F, f, tol=1e-6, scale=None):
-            W = np.asarray(W)
-            if W.ndim == 2 and 1 in W.shape:
-                W = W.reshape(-1)
-            resp = np.tensordot(W, F, axes=([-1], [0]))
-            ok = np.allclose(resp, f, atol=tol, rtol=0.0)
-            tag = f" [scale={scale}]" if scale is not None else ""
-            print(f"FINAL CHECK F^T w == f{tag} -> {ok}")
-            if not ok:
-                print(f"max |F^T w - f|{tag} = {float(np.max(np.abs(resp - f)))}")
-            return ok
-        '''
-        
+
         def _check_against_F(W, F, f, tol=1e-6):
             W = np.asarray(W)
             if W.ndim == 2 and 1 in W.shape:   # (1,Nf) or (Nf,1) -> (Nf,)
@@ -1232,6 +1351,7 @@ class ProduceSILC():
                     lam=str(lam),
                     nsamp=nsamp,
                 )
+                print(f"[trim] scale={sc} save_path={save_path}")
 
                 if (not overwrite) and os.path.exists(save_path):
                     tm = np.load(save_path)
@@ -1242,11 +1362,13 @@ class ProduceSILC():
                 arr = np.asarray(doubled_maps[i])
                 if arr.ndim == 3 and arr.shape[0] == 1:
                     arr2d = arr[0]
+                    print(f"[trim] scale={sc} doubled arr2d shape={arr2d.shape}") 
                 else:
                     arr2d = arr
                 L2, W2 = arr2d.shape
                 Lorig = (L2 + 1) // 2
                 if W2 != 2 * L2 - 1 or L2 != 2 * Lorig - 1 or L2 <= 1:
+                    print(f"[trim] scale={sc} PASS-THROUGH (no trim) shape={np.shape(arr)}")
                     tm = arr  # pass-through
                 else:
                     _, tm = SILCTools.trim_to_original(
@@ -1295,20 +1417,6 @@ class ProduceSILC():
              overwrite=overwrite, 
             )         
             synthesized_map.append(np.asarray(synth_map))
-
-            '''
-            # 10) Verify constraints
-            if constraint:
-                # per wavelet scale
-                for j, W in zip(scales, weight_vector_load):
-                    _check_against_F(W, F, f, scale=j)
-            
-                # scaling band (if available)
-                try:
-                    _check_against_F(w_scal_global, F, f, scale="j=0 (scaling)")
-                except NameError:
-                    pass
-                '''
 
             # 10) One-time verification per realisation (use mid scale)
             if constraint and weight_vector_load:
