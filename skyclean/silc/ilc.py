@@ -25,7 +25,7 @@ from .mixing_matrix_constraint import ILCConstraints
 import concurrent.futures
 import time
 from .harmonic_response import AxisymmetricGenerators
-
+from .custom_s2wav_bandlimits import j_max_silc
 
 class SILCTools():
     '''Tools for Scale-discretised, directional wavelet ILC (SILC).'''
@@ -59,12 +59,6 @@ class SILCTools():
         x2 = np.real(s2fft.inverse(padded, L=H, method = method, spmd = False, reality = True))
 
         return x2 
-
-    # =========================
-    # DROP-IN REPLACEMENT BLOCK
-    # =========================
-    # Replace EVERYTHING you pasted with this block.
-    # This is "paper-only": no nsamp, local modes use f_sky = sigma^2/2.
 
     @staticmethod
     @lru_cache(maxsize=64)
@@ -1051,21 +1045,16 @@ class SILCTools():
     ELL_MIN = np.array([32, 64, 128, 256, 542, 705, 916, 1192, 1550, 2115, 2539, 3046], dtype=int)
     ELL_PEAK = np.array([64, 128, 256, 512, 705, 917, 1192, 1550, 2015, 2539, 3047, 3600],dtype=int,)
     ELL_MAX = np.array([128, 256, 512, 705, 916, 1192, 1549, 2015, 2539, 3047, 3656, 4253], dtype=int)
-    
+
     @staticmethod
-    def wavelet_js_custom(L: int):
-        L = int(L)
-        js = []
-        for j in range(len(ELL_MIN)):
-            L0 = int(ELL_MIN[j])
-            if L0 >= L:
-                break
-            Lj = int(min(ELL_MAX[j], L))
-            if Lj <= L0:
-                continue
-            js.append(j)          # <-- keep it even if Lj repeats
-        return js
-    
+    def wavelet_js_custom(L: int, lam: float = 2.0) -> list[int]:
+        """
+        Wavelet indices to build, consistent with j_max_silc:
+        js = [0, 1, ..., j_max_silc(L)].
+        """
+        jmax = j_max_silc(int(L), lam=lam)
+        return list(range(jmax + 1))
+
 
 class ProduceSILC():
     """Perform  Scale-discretised, directional wavelet ILC (SILC)."""
@@ -1125,8 +1114,7 @@ class ProduceSILC():
 
         print(f"[DEBUG] passed L_max={L_max} -> L={int(L_max)} lmax={int(L_max)-1}")
         print(f"[DEBUG] wavelet_js_custom(L)={SILCTools.wavelet_js_custom(int(L_max))}")
-
-
+ 
         def _check_against_F(W, F, f, tol=1e-6):
             W = np.asarray(W)
             if W.ndim == 2 and 1 in W.shape:   # (1,Nf) or (Nf,1) -> (Nf,)
