@@ -282,8 +282,8 @@ class HPTools():
         """
         
         hp_map_beamed = HPTools.beam_convolve(hp_map, lmax=lmax, standard_fwhm_rad=standard_fwhm_rad)
-        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
-        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_noP, lmax=lmax, nside=nside)
+        #hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(hp_map_beamed, lmax=lmax, nside=nside)
         return hp_map_reduced
     
     @staticmethod
@@ -315,11 +315,11 @@ class HPTools():
         )
 
         # Step 2: pixel-window deconvolution
-        hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
+        #hp_map_noP = HPTools.pixwin_deconvolve(hp_map_beamed, lmax=lmax)
 
         # Step 3: reduce to target NSIDE for CFN accumulation
         hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
-            hp_map_noP,
+            hp_map_beamed,
             lmax=lmax,
             nside=nside
         )
