@@ -1,5 +1,6 @@
 import numpy as np
 import jax
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
@@ -327,12 +328,11 @@ def build_axisym_filter_bank(L, lam, J0=0):
     return [psi, phi_l]
 
 
-
 class SimpleHarmonicWindows:
     """
     Build scale-discretised wavelet *and scaling* windows.
 
-    For each band j you provide:
+    For each band j provide:
       - ell_peaks[j] : desired wavelet peak ℓ_peak^j
       - lam_list[j]  : λ_j used in that band
 
@@ -373,14 +373,14 @@ class SimpleHarmonicWindows:
 
             Phi_raw[ell] = eta( ell / scal_ell_cut )
 
-        (you control scal_ell_cut and scal_lam).
+        (control scal_ell_cut and scal_lam).
         """
         t   = self.ells / float(self.scal_ell_cut)
         phi = self.g_scal.eta(t)      # <-- η: scaling
 
         m = phi.max()
         if m > 0:
-            phi = phi / m
+            phi = phi
         return phi
 
     def scaling_band(self, truncate=True):
@@ -395,7 +395,6 @@ class SimpleHarmonicWindows:
             phi[mask_outside] = 0.0
         return phi
 
-
     # ---------- wavelets (kappa) ----------
 
     def wavelet_raw(self, j):
@@ -407,7 +406,7 @@ class SimpleHarmonicWindows:
 
         m = psi.max()
         if m > 0:
-            psi = psi / m
+            psi = psi
         return psi
 
     def band_edges(self, j):
@@ -431,7 +430,6 @@ class SimpleHarmonicWindows:
     
         return int(ell_min), int(ell_peak), int(ell_max)
 
-    
     def wavelet_band(self, j, truncate=True):
         psi = self.wavelet_raw(j)
         if truncate:
@@ -514,7 +512,7 @@ class SimpleHarmonicWindows:
              plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
              plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
      
-         plt.xlim(0, self.L - 1)
+         #plt.xlim(0, self.L - 1)
          plt.ylim(0, 1.1)
      
          plt.xlabel(r"$\ell$", fontsize=axis_label_size)
@@ -558,6 +556,8 @@ class SimpleHarmonicWindows:
             [hw.wavelet_band(j, truncate=truncate) for j in range(hw.J)],
             axis=0,
         ).astype(np.float64)  # (J,L)
+        
+        print("max |kappa_jl[j>=3, ell<=255]| =", np.max(np.abs(kappa_jl[3:, :256])))
     
         scal_l = hw.scaling_band(truncate=truncate).astype(np.float64)  # (L,)
     
