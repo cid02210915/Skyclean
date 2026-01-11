@@ -35,7 +35,7 @@ class Pipeline:
         constraint: bool = False,
         F = None,
         reference_vectors = None,
-        nsamp: float = 1200.0, 
+        nsamp: float = 1200, 
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
