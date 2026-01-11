@@ -3,133 +3,60 @@ import numpy as np
 
 """
 How to patch s2wav to use the SILC fixed band edges (ELL_MIN / ELL_MAX)
-=====================================================================
+======================================================================
 
 Goal
 ----
-Replace s2wav’s default λ-geometric band construction with a fixed,
-SILC-style wavelet filter bank, **without generating duplicate or
-phantom wavelet blocks at the highest band**.
-
-The SILC filter bank is defined by fixed harmonic support intervals
-(ELL_MIN[j], ELL_MAX[j]) and must satisfy:
-
-  • Each wavelet band has non-empty harmonic support within ℓ < L
-  • No two wavelet bands produce identical effective band-limits
-  • The partition of unity is enforced only on *existing* ℓ modes
-
-This patch ensures those conditions are met.
-
-Files to modify
----------------
-All changes are made in:
+Replace s2wav's default lambda-geometric band-limit logic with a fixed
+SILC-style filter bank by overriding the following functions in:
 
     s2wav/samples.py
 
-Functions that MUST be overridden
----------------------------------
-These functions control how many wavelet bands exist and how their
-harmonic support is defined:
-
-  • j_max(L, lam)
-  • scal_bandlimit(L, J_min, lam, multiresolution)
-  • LN_j(L, j, N, lam, multiresolution)
-
-Optional (only if you want full explicit control):
-  • wav_j_bandlimit(L, j, lam, multiresolution)
-  • L0_j(j, lam)
-
-------------------------
-**Never rely on `range(j_max + 1)` internally.**
-
-Instead, the wavelet indices must be selected by a function that:
-  • removes empty bands
-  • removes duplicate clipped bands
-  • preserves strict ordering in effective Lj
-
-This is what prevents the duplicate “last wavelet” bug.
-
-Implementation strategy
------------------------
-1. Define the fixed SILC band edges:
-
-       ELL_MIN[j], ELL_MAX[j]
-
-2. Select valid wavelet indices using:
-
-       wavelet_js_silc(L)
-
-   This function:
-     • keeps j only if ELL_MIN[j] < L
-     • clips Lj = min(ELL_MAX[j], L)
-     • discards bands with Lj ≤ L0j
-     • discards bands whose Lj duplicates the previous band
-
-3. Redefine j_max(L) as:
-
-       j_max(L) = max(wavelet_js_silc(L))
-
-   (Compatibility only — do NOT loop with range(j_max+1))
-
-4. Override LN_j so that:
-
-       Lj  = min(ELL_MAX[j], L)
-       L0j = ELL_MIN[j]
-
-   with multiresolution=True
-
-5. Ensure downstream code loops as:
-
-       for j in wavelet_js_silc(L):
-
-   NOT:
-
-       for j in range(j_max(L)+1)
+Functions to override (as referenced in our analysis notes)
+----------------------------------------------------------
+- j_max(L, lam)
+- scal_bandlimit(L, J_min, lam, multiresolution)
+- LN_j(L, j, N, lam, multiresolution)
+(Optional, only if you prefer to route everything explicitly)
+- wav_j_bandlimit(L, j, lam, multiresolution)
+- L0_j(j, lam)
 
 Patch workflow (terminal)
-------------------------
-1) Use a local editable checkout of s2wav:
+-------------------------
+1) Use a local editable checkout of s2wav so edits affect imports:
 
-       pip uninstall -y s2wav
-       cd /path/to/local/s2wav
-       pip install -e .
+    pip uninstall -y s2wav
+    cd /path/to/local/s2wav/repo
+    pip install -e .
 
-2) Confirm imports resolve to the local repo:
+2) Confirm Python imports s2wav from your local repo (not site-packages):
 
-       python - << EOF
-       import s2wav, inspect
-       print(inspect.getfile(s2wav))
-       EOF
+    python -c "import s2wav, inspect; print(inspect.getfile(s2wav))"
 
-   Expected: path inside your local repo.
+   Expected: a path inside your repo, e.g. /path/to/local/s2wav/s2wav/__init__.py
 
-3) Edit sampling helpers:
+3) Edit the s2wav sampling helpers:
 
-       nano s2wav/samples.py
+    nano s2wav/samples.py
 
-4) Insert:
-   • ELL_MIN / ELL_MAX arrays
-   • wavelet_js_silc(L)
-   • patched versions of j_max, scal_bandlimit, LN_j
+4) Paste the SILC code block into `samples.py`:
+   - ELL_MIN / ELL_MAX arrays
+   - SILC implementations: j_max_silc, scal_bandlimit_silc, wav_j_bandlimit_silc,
+     L0_j_silc, LN_j_silc
 
-5) Rename patched functions to the public API names s2wav expects:
+5) Rename the SILC implementations to the ORIGINAL public names that s2wav expects:
 
-       j_max_silc          → j_max
-       scal_bandlimit_silc → scal_bandlimit
-       LN_j_silc           → LN_j
+    j_max_silc            -> j_max
+    scal_bandlimit_silc   -> scal_bandlimit
+    LN_j_silc             -> LN_j
+    (optional)
+    wav_j_bandlimit_silc  -> wav_j_bandlimit
+    L0_j_silc             -> L0_j
 
-   (Optional)
-       wav_j_bandlimit_silc → wav_j_bandlimit
-       L0_j_silc            → L0_j
-       wavelet_js_silc     → wavelet_js
+6) Save and verify behaviour:
 
-6) Verify behaviour:
-
-       from s2wav.samples import LN_j
-       from s2wav.samples import j_max
-       print("j_max:", j_max(256))
-       for j in range(j_max(256)+1):
-           print(j, LN_j(256, j=j, N=1, multiresolution=True))
+    python -c "from s2wav.samples import LN_j; print(LN_j(4096, j=3, N=5, multiresolution=True))"
+ etc.
 
 """
 
@@ -149,9 +76,8 @@ Patch workflow (terminal)
 # j =  9  ->  ell_min = 2115, ell_max =  3047
 # j = 10  ->  ell_min = 2539, ell_max =  3656
 # j = 11  ->  ell_min = 3046, ell_max =  4253
+#
 # ----------------------------------------------------------------------
-
-import numpy as np
 
 ELL_MIN = np.array(
     [32,  64, 128, 256, 542, 705,
@@ -165,63 +91,29 @@ ELL_MAX = np.array(
     dtype=int,
 )
 
-# ----------------------------------------------------------------------
-# wavelet_js: which wavelet bands to build (NO duplicates after clipping)
-# ----------------------------------------------------------------------
-
-def wavelet_js_silc(L: int) -> list[int]:
-    """
-    Return wavelet indices j to build, avoiding duplicated multiresolution blocks.
-
-    We keep j only if:
-      - ELL_MIN[j] < L  (band starts before data ends)
-      - Lj > L0j        (band has non-empty harmonic support)
-      - Lj is strictly increasing vs previous kept band (prevents duplicates)
-    """
-    L = int(L)
-    js: list[int] = []
-    prev_Lj: int | None = None
-
-    for j in range(len(ELL_MIN)):
-        if int(ELL_MIN[j]) >= L:
-            break
-
-        L0j = int(ELL_MIN[j])
-        Lj  = int(min(ELL_MAX[j], L))  # multiresolution clip
-
-        if Lj <= L0j:
-            continue
-
-        if (prev_Lj is not None) and (Lj == prev_Lj):
-            # this is exactly the duplicate you are seeing (e.g. L=256 gives Lj=256 twice)
-            continue
-
-        js.append(j)
-        prev_Lj = Lj
-
-    if len(js) == 0:
-        raise ValueError("Band-limit L is too small for this filter bank.")
-
-    return js
-
 
 # ----------------------------------------------------------------------
-# j_max: keep for compatibility, but make it consistent with wavelet_js_silc
+# j_max: how many wavelet bands to use
 # ----------------------------------------------------------------------
 
 def j_max_silc(L: int, lam: float = 2.0) -> int:
     """
-    Compatibility helper: returns the largest j that will be USED.
+    Custom maximum wavelet scale index j_max for the SILC filter bank.
 
-    NOTE: If your code currently does `for j in range(j_max+1)`,
-    you MUST change that loop to `for j in wavelet_js_silc(L)`,
-    otherwise you can still generate duplicates.
+    Rule: include all bands whose LOWER edge ell_min[j] is below the
+    global harmonic band-limit L, so that every multipole ell < L is
+    covered by at least one filter.
+
+    The parameter lam is kept only for API compatibility and ignored.
     """
-    return int(wavelet_js_silc(int(L))[-1])
+    valid = np.where(ELL_MIN < L)[0]
+    if valid.size == 0:
+        raise ValueError("Band-limit L is too small for this filter bank.")
+    return int(valid[-1])
 
 
 # ----------------------------------------------------------------------
-# scaling bandlimit (unchanged)
+# scal_bandlimit: harmonic support of the scaling function
 # ----------------------------------------------------------------------
 
 def scal_bandlimit_silc(
@@ -230,14 +122,26 @@ def scal_bandlimit_silc(
     lam: float = 2.0,
     multiresolution: bool = False,
 ) -> int:
+    """
+    Custom scaling band-limit L_s.
+
+    In the SILC design, the scaling window occupies only the very
+    low-ell range up to ell_max_scal = 64.  s2wav expects the *number*
+    of ell modes, so we return
+
+        L_s = min(64 + 1, L) = min(65, L)
+
+    when multiresolution=True.  For multiresolution=False we keep the
+    original behaviour (full band-limit L).
+    """
     if multiresolution:
-        return int(min(65, int(L)))
+        return int(min(65, L))
     else:
         return int(L)
 
 
 # ----------------------------------------------------------------------
-# wav_j_bandlimit & L0_j (unchanged)
+# wav_j_bandlimit & L0_j: upper / lower edges for band j
 # ----------------------------------------------------------------------
 
 def wav_j_bandlimit_silc(
@@ -246,22 +150,34 @@ def wav_j_bandlimit_silc(
     lam: float = 2.0,
     multiresolution: bool = False,
 ) -> int:
+    """
+    Custom upper ell band-limit L_j for wavelet band j.
+
+    If multiresolution is True, use the fixed ELL_MAX[j], clipped by L.
+    Otherwise, return the full band-limit L (same as original s2wav).
+    """
     if not multiresolution:
         return int(L)
 
     if j < 0 or j >= len(ELL_MAX):
         raise IndexError(f"j={j} out of range for ELL_MAX")
-    return int(min(int(ELL_MAX[j]), int(L)))
+    return int(min(ELL_MAX[j], L))
 
 
 def L0_j_silc(j: int, lam: float = 2.0) -> int:
+    """
+    Custom lower ell cut L0_j for wavelet band j, using fixed ELL_MIN[j].
+
+    For completeness we mirror the original function signature, but lam
+    is ignored here.
+    """
     if j < 0 or j >= len(ELL_MIN):
         raise IndexError(f"j={j} out of range for ELL_MIN")
     return int(ELL_MIN[j])
 
 
 # ----------------------------------------------------------------------
-# LN_j (unchanged)
+# LN_j: main helper returning (L_j, N_j, L0_j)
 # ----------------------------------------------------------------------
 
 def LN_j_silc(
@@ -271,15 +187,29 @@ def LN_j_silc(
     lam: float = 2.0,
     multiresolution: bool = False,
 ):
+    """
+    Custom version of LN_j(L, j, N, lam, multiresolution).
+
+    Returns
+    -------
+    Lj  : int
+        Upper harmonic band-limit for scale j.
+    Nj  : int
+        Orientational band-limit for scale j.
+    L0j : int
+        Lower harmonic multipole supported by scale j.
+    """
     if multiresolution:
         Lj = wav_j_bandlimit_silc(L, j, lam, multiresolution=True)
         L0j = L0_j_silc(j, lam)
     else:
+        # No multiresolution: filters and coefficients are stored at full L
         Lj = int(L)
         L0j = 0
 
     Nj = int(N)
     if multiresolution:
+        # Same parity trick as original s2wav implementation
         Nj = min(N, Lj)
         Nj += (Nj + N) % 2
 
