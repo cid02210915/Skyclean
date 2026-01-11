@@ -1,5 +1,5 @@
 import os 
-os.environ["JAX_ENABLE_X64"] = "1"
+
 import jax
 jax.config.update("jax_enable_x64", True)
 import healpy as hp
@@ -359,7 +359,7 @@ class HPTools():
 class MWTools():
     """Tools to process maps in MW (McEwen & Wiaux) sampling"""
 
-
+    '''
     @staticmethod
     def wavelet_transform_from_map(mw_map: jnp.ndarray, L: int, N_directions: int, lam: float):
         """
@@ -396,7 +396,8 @@ class MWTools():
 
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs  
-    
+    '''
+
 
     @staticmethod
     def wavelet_transform_from_map(
@@ -421,6 +422,36 @@ class MWTools():
         # 2) use a safe lambda (even though samples.py is patched)
         lam_safe = float(np.max(lam_list))
 
+        print("\n[DEBUG analysis] L =", L, "N =", N_directions, "lam_safe =", lam_safe)
+        print("[DEBUG analysis] wav_jln shape:", np.asarray(wav_jln).shape, "dtype:", np.asarray(wav_jln).dtype)
+        print("[DEBUG analysis] scal_l shape:", np.asarray(scal_l).shape, "dtype:", np.asarray(scal_l).dtype)
+
+        wav = np.asarray(wav_jln)   # expect (J+1, L) or (J+1, L, ...)
+        phi = np.asarray(scal_l)    # expect (L,)
+
+        # if wav has extra dims, reduce to power in ell
+        if wav.ndim > 2:
+            wav_pow = np.sum(np.abs(wav)**2, axis=tuple(range(2, wav.ndim)))
+        else:
+            wav_pow = np.abs(wav)**2
+
+        S = np.abs(phi)**2 + np.sum(wav_pow, axis=0)
+
+        imin = int(np.argmin(S))
+        imax = int(np.argmax(S))
+
+        print("[DEBUG analysis] S(ell)=|phi|^2+sum|psi|^2  min/max:",
+              float(S[imin]), float(S[imax]))
+        print(f"[DEBUG analysis]   min at ell = {imin}")
+        print(f"[DEBUG analysis]   max at ell = {imax}")
+
+        print("[DEBUG analysis] S tail (last 20 ells):", S[-20:])
+
+        # peak ell per wavelet (fingerprint)
+        print("[DEBUG analysis] wavelet peak ells:")
+        for j in range(wav_pow.shape[0]):
+            print(f"  j={j:02d} peak ell ~ {int(np.argmax(wav_pow[j]))}")
+
         # 3) run analysis
         wavelet_coeffs, scaling_coeffs = s2wav.analysis(
             mw_map,
@@ -434,12 +465,21 @@ class MWTools():
             reality=True,
             filters=filters,
         )
+        print("[DEBUG analysis] returned #wavelet blocks (no scaling):", len(wavelet_coeffs))
+        for i, blk in enumerate(wavelet_coeffs):
+            arr = np.asarray(blk)
+            print(f"  wav_block[{i:02d}] shape={arr.shape} dtype={arr.dtype}")
+
+        print("[DEBUG analysis] scaling_coeffs shape:", np.asarray(scaling_coeffs).shape)
+        print("[DEBUG analysis] filters wav_jln shape:", np.asarray(wav_jln).shape)
+        print("[DEBUG analysis] filters scal_l shape:", np.asarray(scal_l).shape)
+        print("[DEBUG analysis] len(wavelet_coeffs) returned by s2wav.analysis:", len(wavelet_coeffs))
 
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
     
-    '''     
+    
     @staticmethod
     def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float):
         """
@@ -463,13 +503,13 @@ class MWTools():
             L       = L,
             lam     = lam,
             filters = j_filter,
-            reality = False,
+            reality = True,
         )
         scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
         scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
         wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
         return wavelet_coeffs, scaling_coeffs
-    '''
+
 
     @staticmethod
     def wavelet_to_mw_alm(
@@ -486,8 +526,8 @@ class MWTools():
         """
         
         # 1) Build filter bank
-        #j_filter = filters.filters_directional_vectorised(L, N_directions, J_min=0, lam=float(lam))
-        j_filter = build_axisym_filter_bank(L, lam=lam)
+        j_filter = filters.filters_directional_vectorised(L, N_directions, J_min=0, lam=float(lam))
+        #j_filter = build_axisym_filter_bank(L, lam=lam)
         J = len(j_filter[0])  # number of expected wavelet bands
         #print ("number of wavelet bands J:", J)
 
@@ -605,13 +645,41 @@ class MWTools():
         wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(L, ell_peaks, lam_list)
         filters = (wav_jln, scal_l)
         lam_safe = float(np.max(lam_list))
+        print("\n[DEBUG synthesis] L =", L, "N =", N_directions, "lam_safe =", lam_safe)
+        print("[DEBUG synthesis] wav_jln shape:", np.asarray(wav_jln).shape, "dtype:", np.asarray(wav_jln).dtype)
+        print("[DEBUG synthesis] scal_l shape:", np.asarray(scal_l).shape, "dtype:", np.asarray(scal_l).dtype)
+        print("[DEBUG synthesis] total blocks (incl scaling):", len(wavelet_coeffs))
 
         f_scal_tiled = wavelet_coeffs[0]
-        print("f_scal_tiled shape:", f_scal_tiled.shape)
         f_scal = f_scal_tiled[0]  # (Lj, 2Lj-1)
-        print("f_scal shape:", f_scal.shape)
+
+        print("[DEBUG synthesis] wavelet_coeffs total blocks (incl scaling):", len(wavelet_coeffs))
+        print("[DEBUG synthesis] f_scal_tiled shape:", np.asarray(wavelet_coeffs[0]).shape)
 
         wav_coeffs = wavelet_coeffs[1:]
+        Jplus1 = int(np.asarray(wav_jln).shape[0])
+        print("[DEBUG synthesis] filters imply J+1 =", Jplus1, "but len(wav_coeffs) =", len(wav_coeffs))
+
+        # (3) the S(ell) check (partition-of-unity)
+        wav = np.asarray(wav_jln)
+        phi = np.asarray(scal_l)
+    
+        if wav.ndim > 2:
+            wav_pow = np.sum(np.abs(wav)**2, axis=tuple(range(2, wav.ndim)))
+        else:
+            wav_pow = np.abs(wav)**2
+    
+        S = np.abs(phi)**2 + np.sum(wav_pow, axis=0)
+        print("[DEBUG synthesis] S min/max:", float(S.min()), float(S.max()))
+        print("[DEBUG synthesis] S tail (last 20):", S[-20:])
+    
+        # OPTIONAL: print peak ell of each psi_j
+        print("[DEBUG synthesis] wavelet peak ells:")
+        for j in range(wav_pow.shape[0]):
+            print(f"  j={j:02d} peak ell ~ {int(np.argmax(wav_pow[j]))}")
+            
+        print("[DEBUG synthesis] filters wav_jln shape:", np.asarray(wav_jln).shape)
+        print("[DEBUG synthesis] len(wav_coeffs) passed into s2wav.synthesis:", len(wav_coeffs))
 
         mw_map = s2wav.synthesis(
             wav_coeffs,
@@ -622,9 +690,10 @@ class MWTools():
             spin=0,
             sampling="mw",
             nside=None,
-            reality=True,      # if you want real map back
+            reality=True,     
             filters=filters,
         )
+
         return mw_map
     
     '''
@@ -754,107 +823,50 @@ class MWTools():
             #plt.xlim(0,2)            #check the removal of monopole and dipole
             plt.grid(ls=':')
         plt.show()
-    '''
 
+    '''
     @staticmethod
-    def visualise_axisym_wavelets(L: int, lam: float = 2.0, eps: float = 1e-6):
-        """
-        Plot axisymmetric wavelet filters and scaling function,
-        then print a single band table with (ell_min^j, ell_peak^j, ell_max^j, N_samp^j).
-    
-        N_samp^j is computed from ell_max^j as:
-            N_samp^j = (ell_max^j + 1) * (2*ell_max^j + 1)
-        """
-        # Build axisymmetric filter bank
-        psi, phi_l = build_axisym_filter_bank(L=L, lam=lam)
-    
-        j_filter = psi
-        J = j_filter.shape[0]
-        shape = j_filter.shape
-        ells = np.arange(L)
-        middle_m = L - 1  # m = 0 column
-    
-        # --------- plot ---------
-        plt.figure(figsize=(7, 4))
-        base = plt.get_cmap("tab20")
-    
-        scal_color = base(0)
-        wavelet_colors = [base(i + 1) for i in range(J)]
-    
-        # scaling function
-        w_scal = np.real(phi_l)
-        if w_scal.max() != 0:
-            w_scal_plot = w_scal / w_scal.max()
+    def visualise_axisym_wavelets(
+        L: int,
+        ell_peaks,
+        lam_list,
+        scal_ell_cut: float = 64.0,
+        scal_lam: float | None = None,
+        truncate: bool = True,
+    ):
+
+        j_filter = SimpleHarmonicWindows.build_s2wav_filters(
+            L=int(L),
+            ell_peaks=np.asarray(ell_peaks),
+            lam_list=np.asarray(lam_list),
+            scal_ell_cut=float(scal_ell_cut),
+            scal_lam=scal_lam,
+            truncate=bool(truncate),
+        )
+
+
+        l_list = np.arange(int(L))
+        middle_m = int(L) - 1  # m=0 index in MW layout
+
+        plt.figure()
+        if np.asarray(j_filter).ndim == 3:
+            # (n_scales, L, 2L-1): take m=0 slice
+            for i in range(j_filter.shape[0]):
+                plt.plot(l_list, np.real(j_filter[i][:, middle_m]), label=f"scale {i}")
+        elif np.asarray(j_filter).ndim == 2:
+            # (n_scales, L): already axisymmetric
+            for i in range(j_filter.shape[0]):
+                plt.plot(l_list, np.real(j_filter[i]), label=f"scale {i}")
         else:
-            w_scal_plot = w_scal
-    
-        plt.plot(ells, w_scal_plot, "--", color=scal_color, label="Scal.")
-    
-        # wavelets
-        for j in range(shape[0]):
-            wj = np.real(j_filter[j][:, middle_m])
-            if wj.max() != 0:
-                wj_plot = wj / wj.max()
-            else:
-                wj_plot = wj
-            plt.plot(ells, wj_plot, color=wavelet_colors[j], label=fr"$j = {j}$")
-    
-        plt.xlabel(r"$\ell$", fontsize=16)
-        plt.ylabel("Normalised harmonic response", fontsize=16)
-        plt.title("Axisym wavelets")
-        plt.grid(ls=':')
-    
-        plt.legend(bbox_to_anchor=(1.02, 1.0),
-                   loc="upper left",
-                   borderaxespad=0.)
-        plt.tight_layout()
+            raise ValueError(f"Unexpected filter shape: {np.asarray(j_filter).shape}")
+
+        plt.xlabel("l", fontsize=16)
+        plt.ylabel("Real part of wavelet filter (m=0)", fontsize=16)
+        plt.title("axisym (SimpleHarmonicWindows)", fontsize=16)
+        plt.legend()
+        plt.grid(ls=":")
         plt.show()
-    
-        # --------- single band table (no thresholds) ----------
-        bands = []
-    
-        # ----- scaling -----
-        w_abs = np.abs(w_scal)
-        if w_abs.max() != 0:
-            support = np.where(w_abs > eps * w_abs.max())[0]
-        else:
-            support = np.array([], dtype=int)
-    
-        if support.size > 0:
-            ell_min  = int(support[0])
-            ell_max  = int(support[-1])
-            ell_peak = int(ells[np.argmax(w_abs)])
-            Nsamp    = (ell_max + 1) * (2 * ell_max + 1)
-            bands.append(("Scal.", ell_min, ell_peak, ell_max, Nsamp))
-    
-        # ----- wavelets -----
-        for j in range(shape[0]):
-            wj = np.real(j_filter[j][:, middle_m])
-            w_abs = np.abs(wj)
-    
-            if w_abs.max() == 0:
-                continue
-            
-            support = np.where(w_abs > eps * w_abs.max())[0]
-            if support.size == 0:
-                continue
-            
-            ell_min  = int(support[0])
-            ell_max  = int(support[-1])
-            ell_peak = int(ells[np.argmax(w_abs)])
-            Nsamp    = (ell_max + 1) * (2 * ell_max + 1)
-            bands.append((j, ell_min, ell_peak, ell_max, Nsamp))
-    
-        # ----- print table once -----
-        print("\nBand table (single eps cut)")
-        print("Wavelet scale j   ell_min^j   ell_peak^j   ell_max^j     N_samp^j")
-        for label, ell_min, ell_peak, ell_max, Nsamp in bands:
-            if isinstance(label, str):   # scaling row
-                lab_str = f"{label:>13s}"
-            else:                        # integer j
-                lab_str = f"{label:14d}"
-            print(f"{lab_str}   {ell_min:9d}   {ell_peak:11d}   {ell_max:9d}   {Nsamp:11d}")
-    
+
 
 
 class SamplingConverters():
@@ -988,6 +1000,4 @@ class SamplingConverters():
             """
             mw_alm = s2fft.forward(mwss_map, L=L, sampling = "mwss", reality = True)
             return s2fft.inverse(mw_alm, L=L, sampling = "mw", reality = True)
-    
-
     
