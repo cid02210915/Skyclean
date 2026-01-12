@@ -4,6 +4,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
+from .custom_s2wav_bandlimits import j_max_silc
+
+
 class AxisymmetricGenerators:
     """
     Object-oriented version of the original generator builder.
@@ -99,7 +102,7 @@ class HarmonicWindows:
         self.J0  = int(J0)
         self.g   = AxisymmetricGenerators(self.lam)
         self.ells = np.arange(self.L)
-        self.J = int(np.ceil(np.log(max(1, self.L - 1)) / np.log(self.lam)))
+        self.J = int(j_max_silc(self.L, lam=self.lam))
 
     def scaling(self):
         # Φ_{ℓ0} = sqrt((2ℓ+1)/(8π**2)) * η_λ(ℓ / λ^{J0})
@@ -316,6 +319,7 @@ def build_axisym_filter_bank(L, lam, J0=0):
     if lmin > 0:
         psi[:, :lmin, :] = 0.0
         phi_l[:lmin]     = 0.0
+
     '''
     # ---- automatic taper: 94% of lmax ----
     lmax = L - 1
@@ -550,14 +554,17 @@ class SimpleHarmonicWindows:
             scal_ell_cut=scal_ell_cut,
             scal_lam=scal_lam,
         )
-    
+
+        jmax = j_max_silc(L, lam=2.0)
+        js = list(range(jmax + 1)) if jmax >= 0 else []
+
         # ---- build generator windows ----
         kappa_jl = np.stack(
-            [hw.wavelet_band(j, truncate=truncate) for j in range(hw.J)],
+            [hw.wavelet_band(j, truncate=truncate) for j in js],
             axis=0,
         ).astype(np.float64)  # (J,L)
         
-        print("max |kappa_jl[j>=3, ell<=255]| =", np.max(np.abs(kappa_jl[3:, :256])))
+        #print("max |kappa_jl[j>=3, ell<=255]| =", np.max(np.abs(kappa_jl[3:, :256])))
     
         scal_l = hw.scaling_band(truncate=truncate).astype(np.float64)  # (L,)
     
@@ -593,7 +600,7 @@ class SimpleHarmonicWindows:
         M = 2 * L - 1
         mid = L - 1
     
-        wav_jln = np.zeros((hw.J, L, M), dtype=np.complex128)
+        wav_jln = np.zeros((len(js), L, M), dtype=np.complex128)
         wav_jln[:, :, mid] = kappa_jl.astype(np.complex128)
     
         return jnp.array(wav_jln), jnp.array(scal_l.astype(np.complex128))
