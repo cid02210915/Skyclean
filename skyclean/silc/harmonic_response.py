@@ -1,6 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+from .custom_s2wav_bandlimits import j_max_silc
+
+
 class AxisymmetricGenerators:
     """
     Object-oriented version of the original generator builder.
@@ -96,7 +99,7 @@ class HarmonicWindows:
         self.J0  = int(J0)
         self.g   = AxisymmetricGenerators(self.lam)
         self.ells = np.arange(self.L)
-        self.J = int(np.ceil(np.log(max(1, self.L - 1)) / np.log(self.lam)))
+        self.J = int(j_max_silc(self.L, lam=self.lam))
 
     def scaling(self):
         # Φ_{ℓ0} = sqrt((2ℓ+1)/(8π**2)) * η_λ(ℓ / λ^{J0})
@@ -313,6 +316,7 @@ def build_axisym_filter_bank(L, lam, J0=0):
     if lmin > 0:
         psi[:, :lmin, :] = 0.0
         phi_l[:lmin]     = 0.0
+
     '''
     # ---- automatic taper: 94% of lmax ----
     lmax = L - 1
@@ -548,3 +552,71 @@ class SimpleHarmonicWindows:
      
          plt.tight_layout()
          plt.show()
+
+
+    @staticmethod
+    def build_s2wav_filters(
+        L: int,
+        ell_peaks,
+        lam_list,
+        scal_ell_cut: float = 64.0,
+        scal_lam: float | None = None,
+        truncate: bool = True,
+    ):
+        hw = SimpleHarmonicWindows(
+            L,
+            ell_peaks,
+            lam_list,
+            scal_ell_cut=scal_ell_cut,
+            scal_lam=scal_lam,
+        )
+
+        jmax = j_max_silc(L, lam=2.0)
+        js = list(range(jmax + 1)) if jmax >= 0 else []
+
+        # ---- build generator windows ----
+        kappa_jl = np.stack(
+            [hw.wavelet_band(j, truncate=truncate) for j in js],
+            axis=0,
+        ).astype(np.float64)  # (J,L)
+        
+        #print("max |kappa_jl[j>=3, ell<=255]| =", np.max(np.abs(kappa_jl[3:, :256])))
+    
+        scal_l = hw.scaling_band(truncate=truncate).astype(np.float64)  # (L,)
+    
+        # ============================================================
+        # Enforce admissibility Eq.(30) directly (axisymmetric => m=0)
+        #   (4π/(2ℓ+1)) |Φ_{ℓ0}|^2 + (8π^2/(2ℓ+1)) Σ_j |Ψ^j_{ℓ0}|^2 = 1
+        # ============================================================
+        ells = np.arange(L, dtype=np.float64)
+        twoell1 = 2.0 * ells + 1.0
+    
+        w_scal = (4.0 * np.pi) / twoell1
+        w_wav  = (8.0 * np.pi**2) / twoell1
+    
+        denom = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
+    
+        alpha = np.ones_like(denom)
+        mask = denom > 0
+        alpha[mask] = 1.0 / np.sqrt(denom[mask])
+    
+        scal_l   = scal_l * alpha
+        kappa_jl = kappa_jl * alpha[None, :]
+    
+        # ---- optional: print Eq.(30) check ----
+        denom_post = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
+        print("\n=== Eq.(30) check (should be ~1) ===")
+        for ell in [0, 1, 2, 5, 10, 20, 32, 64, 128, min(256, L-1), L-1]:
+            if ell < L:
+                print(f"ell={ell:4d}  value={denom_post[ell]:.6e}")
+        print("min/max over ell with denom>0:", np.nanmin(denom_post[mask]), np.nanmax(denom_post[mask]))
+        print("===================================\n")
+    
+        # ---- pack into s2wav expected n-grid: (J, L, 2L-1), n=0 at mid ----
+        M = 2 * L - 1
+        mid = L - 1
+    
+        wav_jln = np.zeros((len(js), L, M), dtype=np.complex128)
+        wav_jln[:, :, mid] = kappa_jl.astype(np.complex128)
+    
+        return jnp.array(wav_jln), jnp.array(scal_l.astype(np.complex128))
