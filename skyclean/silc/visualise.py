@@ -13,7 +13,7 @@ from ..ml.inference import Inference
 class Visualise(): 
     def __init__(self, inference: Inference, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, 
-                 learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, 
+                 learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, nsamp: int = 1200, 
                  ):
         """
         Parameters:
@@ -35,6 +35,7 @@ class Visualise():
         self.epochs = epochs
         self.momentum = momentum
         self.chs = chs
+        self.nsamp = nsamp
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
@@ -261,8 +262,10 @@ class Visualise():
                                         epochs=self.epochs,
                                         lr=self.lr,
                                         momentum=self.momentum,
-                                        chs=chs,)
-            
+                                        chs=chs,
+                                        nsamp=self.nsamp,)
+                                    # TO DO: add 'mask/unmask' for file naming
+
             else:
                 spectrum_path = self.file_templates[spectrum_template_key].format(
                     realisation=self.realisation, 
@@ -325,12 +328,14 @@ class Visualise():
         if component in mw_components:
             # MW-format component - use the general MW power spectrum function
             map_path = self.file_templates[component].format(
+                mode='uncon',
                 extract_comp='cmb',
                 component='cfn',
                 frequencies="_".join(str(x) for x in frequencies),
                 realisation=self.realisation, 
                 lmax=self.lmax, 
-                lam=lam
+                lam=lam,
+                nsamp=1200
             )
             return self.compute_and_save_mw_power_spec(map_path, component, lam)
         else:
@@ -1064,15 +1069,18 @@ class Visualise():
                         lmax=lmax,
                         realisation=realisation,
                         lam=lam0,
+                        nsamp=1200,
                     )
                 elif component == "ilc_synth":
                     map_path = self.file_templates[component].format(
+                        mode='uncon',
                         extract_comp="cmb",
                         component="cfn",
                         frequencies="_".join(str(x) for x in frequencies),
                         lmax=lmax,
                         realisation=realisation,
                         lam=lam0,
+                        nsamp=1200
                     )
                 else:
                     raise ValueError(f"Unknown MW component '{component}'")

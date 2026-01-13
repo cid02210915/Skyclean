@@ -138,8 +138,9 @@ class FileTemplates():
 
         'ilc_improved': os.path.join(
             self.output_directories["ilc_improved_maps"], 
-            "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+            "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
+        # add mask/unmask option for ilc_improved
 
 
         # Optional: power spectrum
@@ -162,7 +163,7 @@ class FileTemplates():
         # Improved ILC power spectrum after ML
         'ilc_improved_spectrum': os.path.join(
             self.output_directories["ilc_improved_maps"], 
-            "ilc_improved_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+            "ilc_improved_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
 
 
@@ -170,7 +171,7 @@ class FileTemplates():
         "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-        "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
+        "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
 
         # ---------------- mask for ML ----------------
         "mask": os.path.join(directory, "HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits"),
