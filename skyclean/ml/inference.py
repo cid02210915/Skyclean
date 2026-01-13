@@ -21,7 +21,7 @@ class Inference:
     """Class for CMB prediction inference using trained models."""
     
     def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None,
-                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3, momentum: float = 0.9, ):
+                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3, momentum: float = 0.9, nsamp: int = 1200):
         """Initialize the CMB inference system.
         
         Parameters:
@@ -51,6 +51,7 @@ class Inference:
         self.epochs = epochs
         self.lr = learning_rate 
         self.momentum = momentum 
+        self.nsamp = nsamp
         
         # Initialize file templates
         self.file_templates = FileTemplates(directory)
@@ -379,22 +380,21 @@ class Inference:
         """
         try:
             # Create a model configuration string for the filename
-            #model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}"
             chs = "_".join(str(n) for n in self.chs)
-            model_config = f"r{realisation}_lmax{self.lmax}_lam{self.lam}_rn{self.rn}_batch{self.batch}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
+            #model_config = f"r{realisation}_lmax{self.lmax}_lam{self.lam}_nsamp{self.nsamp}_rn{self.rn}_batch{self.batch}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
 
             # Use FileTemplates to get the save path
             save_path = self.file_templates.file_templates["ilc_improved_map"].format(
                 realisation=realisation,
                 lmax=self.lmax,
                 lam=self.lam,
+                nsamp=self.nsamp,
                 rn=self.rn,
                 batch=self.batch,
                 epochs=self.epochs,
                 lr=self.lr,
                 momentum=self.momentum,
                 chs=chs,
-                model_config=model_config
             )
             
             # Save the prediction

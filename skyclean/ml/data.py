@@ -43,10 +43,11 @@ class CMBFreeILC():
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
+        self.download_templates = files.download_templates
         # retrieve shapes
         ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(
             mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
-            realisation=0, lmax=self.lmax, lam = self.lam, nsamp='1200.0'))
+            realisation=0, lmax=self.lmax, lam = self.lam, nsamp='1200'))
         self.H = ilc_map_temp.shape[0]+1
         self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
         self.produce_residuals()  # Create residual maps for all realisations
@@ -75,7 +76,7 @@ class CMBFreeILC():
             # load ilc (already in MW sampling)
             ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(
             mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
-            realisation=realisation, lmax=self.lmax, lam = self.lam, nsamp='1200.0'))
+            realisation=realisation, lmax=self.lmax, lam = self.lam, nsamp='1200'))
             #ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(realisation=realisation, lmax=lmax, lam=lam))
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
@@ -260,8 +261,11 @@ class CMBFreeILC():
             if fsky not in get_index:
                 raise ValueError(f"Unsupported f_sky={fsky}. Allowed values: {sorted(get_index.keys())}")
             field_index = get_index[fsky]
-
-            mask_path = self.file_templates["mask"].format(apodization=apodization)
+            if apodization == 0:
+                mask_path = self.file_templates["mask"].format(apodization=apodization) 
+                # TO DO: implement un-apodized mask option
+            else:
+                mask_path = self.file_templates["mask"].format(apodization=apodization)
 
             if not os.path.exists(mask_path):
                 import urllib.request
@@ -275,12 +279,12 @@ class CMBFreeILC():
             print(f"Mask with fsky={fsky} apodization={apodization} loaded from {mask_path}.")
             return mask
     
-    def mask_mwss(self,fsky=0.7) -> np.ndarray:
+    def mask_mwss(self,fsky=0.7, apodization=2) -> np.ndarray:
         '''
         Convert a healpix mask to mwss format.
         '''
         lmax = self.lmax
-        mask_hp = self.load_mask_hp(fsky=fsky)
+        mask_hp = self.load_mask_hp(fsky=fsky, apodization=apodization)
         mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp, lmax)
         L = lmax + 1
         mask_mwss = SamplingConverters.mw_map_2_mwss_map(mask_mw, L=L).astype(np.float32)
@@ -288,7 +292,7 @@ class CMBFreeILC():
         return mask_mwss
 
 
-    def mask_mwss_beamed(self, fsky=0.7) -> np.ndarray:
+    def mask_mwss_beamed(self, fsky=0.7, apodization=2) -> np.ndarray:
         """
         Proceed the mask by convolving and reducing, then converting to MWSS sampling.
         Return a mask in MWSS with shape (H, W, 1).
@@ -296,7 +300,7 @@ class CMBFreeILC():
         lmax = self.lmax
         nside = HPTools.get_nside_from_lmax(lmax)
         standard_fwhm_rad = np.radians(5/60)
-        mask_hp = self.load_mask_hp(fsky = fsky)
+        mask_hp = self.load_mask_hp(fsky = fsky, apodization=apodization)
         mask_hp_reduced = HPTools.convolve_and_reduce(
                 mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
             )
@@ -309,11 +313,11 @@ class CMBFreeILC():
         return mask_mwss
 
     
-    def mask_mw_beamed(self, fsky=0.7) -> np.ndarray:
+    def mask_mw_beamed(self, fsky=0.7, apodization=2) -> np.ndarray:
         lmax = self.lmax
         nside = HPTools.get_nside_from_lmax(lmax)
         standard_fwhm_rad = np.radians(5/60)
-        mask_hp = self.load_mask_hp(fsky)
+        mask_hp = self.load_mask_hp(fsky, apodization)
         mask_hp_reduced = HPTools.convolve_and_reduce(
             mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
         )

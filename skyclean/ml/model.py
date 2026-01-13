@@ -28,7 +28,6 @@ class S2_UNET(nnx.Module):
         """
         if chs is None:
             chs = [1, 16, 32, 32, 64]
-        #chs = [1, 64, 64, 256]
         gr = chs[1]//2
         Ls = [int(L / pow(2, i)) for i in range(len(chs) - 1)]
         print(Ls)

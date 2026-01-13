@@ -54,6 +54,7 @@ import functools
 import orbax.checkpoint as ocp
 import atexit
 import re
+from pathlib import Path
 
 from .model import S2_UNET
 from .data import CMBFreeILC
@@ -180,9 +181,9 @@ class Train:
         self.model_dir = os.path.abspath(files.output_directories["ml_models"])
 
 
-        self.save_dir = os.path.join(self.directory, "ML/model")
-        if not os.path.exists(self.save_dir):
-            create_dir(self.save_dir)
+        #self.save_dir = os.path.join(self.directory, "ML/model")
+        #if not os.path.exists(self.save_dir):
+        #    create_dir(self.save_dir)
         
         # Initialize Orbax checkpoint manager
         self.checkpointer = ocp.StandardCheckpointer()
@@ -211,10 +212,16 @@ class Train:
         """
         try:
             _, state = nnx.split(model)
-            checkpointer = ocp.StandardCheckpointer()
-
             checkpoint_path = os.path.abspath(os.path.join(self.model_dir, f"checkpoint_{epoch}"))
-            checkpointer.save(checkpoint_path, state)
+            os.makedirs(self.model_dir, exist_ok=True)
+            if os.path.exists(checkpoint_path):
+                # Remove stale or partial checkpoints before overwriting.
+                import shutil
+                shutil.rmtree(checkpoint_path)
+
+            self.checkpointer.save(checkpoint_path, state)
+            if hasattr(self.checkpointer, "wait_until_finished"):
+                self.checkpointer.wait_until_finished()
             # keep only latest checkpoint
             if epoch > 1:
                 prev_checkpoint_path = os.path.abspath(os.path.join(self.model_dir, f"checkpoint_{epoch-1}"))
@@ -610,7 +617,6 @@ class Train:
         _, state = nnx.split((model, optimizer, metrics))
         return state
 
-
     def eval_step(graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
                   norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
         """Evaluate the model on a batch of data.
@@ -637,7 +643,64 @@ class Train:
         return state
 
 
-    def execute_training_procedure(self, masked: bool = False, fsky: float = 0.7, apodisation: int = 2):
+    def _training_log_path(self) -> str:
+        return os.path.join(self.model_dir, "training_log.npy")
+
+    def _load_training_log(self) -> dict | None:
+        p = self._training_log_path()
+        if not os.path.exists(p):
+            return None
+        obj = np.load(p, allow_pickle=True).item()
+        if not isinstance(obj, dict):
+            return None
+        # expected keys
+        needed = {"train_loss", "train_accuracy", "eval_loss", "eval_accuracy"}
+        if not needed.issubset(set(obj.keys())):
+            return None
+        return obj
+
+    def _save_training_log(self, metrics_history: dict) -> None:
+        os.makedirs(self.model_dir, exist_ok=True)
+        np.save(self._training_log_path(), metrics_history)
+
+    def _find_latest_checkpoint_epoch(self) -> int:
+        """
+        Returns the largest epoch number found in save_dir checkpoint folders.
+        Expected folder format: checkpoint_<epoch>
+        Raises FileNotFoundError if save_dir does not exist or no checkpoint folders are found.
+        """
+        base = Path(self.model_dir)
+        if not base.exists():
+            raise FileNotFoundError(f"No existing checkpoints found: save_dir does not exist: {base}")
+        best = None
+        best_path = None
+        pat = re.compile(r"checkpoint_(\d+)$")
+        for p in base.iterdir():
+            if not p.is_dir():
+                continue
+            m = pat.search(p.name)
+            if m:
+                epoch = int(m.group(1))
+                if best is None or epoch > best:
+                    best = epoch
+                    best_path = p
+        if best is None:
+            raise FileNotFoundError(f"No existing checkpoints found in {base}. "
+            f"Expected folders named like 'checkpoint_<epoch>' (e.g. checkpoint_50).")
+        print(f"[Checkpoint] Latest checkpoint found: epoch {best} at {best_path}")
+        return best
+
+    def _trim_history_to_epoch(self, metrics_history: dict, epoch: int) -> dict:
+        """
+        Ensure lists are exactly length=epoch (or shorter if not available).
+        """
+        for k in ["train_loss", "train_accuracy", "eval_loss", "eval_accuracy"]:
+            if k in metrics_history and isinstance(metrics_history[k], list):
+                metrics_history[k] = metrics_history[k][:epoch]
+        return metrics_history
+
+
+    def execute_training_procedure(self, masked: bool = False, fsky: float = 0.7, apodization: int = 2):
         """Execute the training procedure for the CMB-Free ILC model.
 
         Parameters:
@@ -668,13 +731,43 @@ class Train:
         optimizer = nnx.Optimizer(model, optax.adam(learning_rate))
         print_gpu_usage("After optimizer creation")
         # Handle resume training
-        start_epoch = 1
         if self.resume_training:
-            start_epoch = self.load_model_for_training(model, optimizer) + 1
-            if start_epoch > 1:
-                print(f"Resuming training from epoch {start_epoch}")
-            else:
-                print("No checkpoint found, starting training from scratch")
+            try:
+                ckpt_epoch = self._find_latest_checkpoint_epoch()
+            except FileNotFoundError as e:
+                print(e)
+                print("No checkpoint found, starting training from scratch.")
+                ckpt_epoch = 0
+            # Load training log if exists; otherwise create empty
+            metrics_history = self._load_training_log()
+            if metrics_history is None:
+                metrics_history = {
+                    "train_loss": [],
+                    "train_accuracy": [],
+                    "eval_loss": [],
+                    "eval_accuracy": [],
+                }
+            if ckpt_epoch > 0: # trim if there is a checkpoint epoch > 0
+                metrics_history = self._trim_history_to_epoch(metrics_history, ckpt_epoch)
+            if ckpt_epoch == epochs and ckpt_epoch > 0: # saved ckpt == requested epochs => skip training
+                print(f"Checkpoint already at epoch {ckpt_epoch} (target epochs = {epochs}). Skipping training.")
+                self.plot_training_metrics(metrics_history)
+                return
+            if ckpt_epoch > epochs: # saved ckpt > requested epochs => error
+                raise ValueError(
+                    f"Requested epochs ({epochs}) is smaller than the latest saved checkpoint epoch ({ckpt_epoch}). "
+                    f"Increase self.epochs to >= {ckpt_epoch}, or delete/choose a different checkpoint directory.")
+            start_epoch = ckpt_epoch + 1 # resume training from ckpt+1
+
+        else: # not resume, fresh run
+            start_epoch = 1
+            # create metric history
+            metrics_history = {
+                "train_loss": [],
+                "train_accuracy": [],
+                "eval_loss": [],
+                "eval_accuracy": [],
+            }
 
         print("Configuring the metrics")
         # nnx metric setup
@@ -682,13 +775,12 @@ class Train:
             loss=nnx.metrics.Average("loss"),
             accuracy=nnx.metrics.Average("accuracy"),
         )
-        # Store metric history
-        metrics_history = {
-            "train_loss": [],
-            "train_accuracy": [],
-            "eval_loss": [],
-            "eval_accuracy": [],
-        }
+
+        if self.resume_training and start_epoch > 1:
+            loaded_epoch = self.load_model_for_training(model, optimizer)
+            if loaded_epoch != start_epoch - 1:
+                print(f"[WARN] Loaded epoch {loaded_epoch}, but latest checkpoint epoch is {start_epoch-1}.")
+            print(f"Resuming training from epoch {start_epoch}")
 
         # Select a single image for repeated testing
         test_batch = next(iter(test_ds))
@@ -698,15 +790,15 @@ class Train:
         # Split prior to training loop
         graphdef, state = nnx.split((model, optimizer, metrics))
         if not masked:
-            # same shape, all ones → effectively no masking
-            mask_mwss = jnp.ones_like(mask_mwss)
+            # Use a first sample to infer the mask shape
+            _, by0 = next(iter(tfds.as_numpy(train_ds.take(1))))
+            by0 = by0[0]
+            mask_mwss = jnp.ones_like(jnp.asarray(by0), dtype=jnp.float32)  # same shape as residuals
             print("Training WITHOUT mask (mask_mwss = 1 everywhere).")
         else:
-            print('Loading the mask')
-            mask_mwss = self.dataset.mask_mwss_beamed(fsky=fsky, apodisation=apodisation)   # (T, P, 1)
-            print('shape of mask_mwss loaded:', np.shape(mask_mwss))
+            mask_mwss = self.dataset.mask_mwss_beamed(fsky=fsky, apodization=apodization)   # (T, P, 1)
             mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
-            print("Training WITH MWSS mask (mask-weighted loss & accuracy).")
+            print(f"Training WITH mask (mask-weighted loss & accuracy), with shape {np.shape(mask_mwss)}.")
         
         print_gpu_usage("Before training.")
         print("Starting training")
@@ -743,7 +835,7 @@ class Train:
             metrics.reset()
 
             print(
-                "[Train/Test] epoch = {:03d}: train_loss = {:.03f}, eval_loss = {:.3f}, train_acc(1.1) = {:.3f}, eval_ac(1.1) = {:.3f}".format(
+                "[Train/Test] epoch = {:03d}: train_loss = {:.03f}, eval_loss = {:.3f}, train_acc = {:.3f}, eval_acc = {:.3f}".format(
                     epoch,
                     metrics_history["train_loss"][-1],
                     metrics_history["eval_loss"][-1],
@@ -757,60 +849,32 @@ class Train:
             # Save model checkpoint after each epoch (overwrites previous)
             self.save_model(model, epoch)
             
-            np.save(self.save_dir + "training_log.npy", metrics_history)
+            #np.save(self.model_dir + "training_log.npy", metrics_history)
+            outdir = os.path.join(self.model_dir, f"checkpoint_{epoch}")
+            os.makedirs(outdir, exist_ok=True)
+            np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
+            #np.save(os.path.join(self.model_dir, "training_log.npy"), metrics_history)
+
             
         # Plot training metrics and examples
         # on last epoch, plot metrics and examples
-        self.plot_training_metrics(metrics_history, epoch)
-        self.plot_examples(model, test_batch, epoch=epoch, n_examples=1)
+        self.plot_training_metrics(metrics_history)
+        self.plot_examples(metrics_history, model, test_batch, n_examples=self.batch_size)
 
         # make sure all async ops are done before exiting
         if hasattr(self, "checkpointer") and hasattr(self.checkpointer, "wait_until_finished"):
             self.checkpointer.wait_until_finished()
 
-    def plot_training_metrics(self, metrics_history, current_epoch):
+    def plot_training_metrics(self, metrics_history: dict) -> None:
         """Plot and save training metrics.
         
         Parameters:
             metrics_history (dict): Dictionary containing training and evaluation metrics history.
-            current_epoch (int): The current epoch number.
         """
-        # fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
         fig, ((ax1), (ax3)) = plt.subplots(1, 2, figsize=(10, 4))
+        total_epochs = len(metrics_history["train_loss"])
+        epochs = range(1, total_epochs + 1)
         
-        epochs = range(1, current_epoch + 1)
-        
-        '''
-        # Loss plots
-        ax1.plot(epochs, metrics_history["train_loss"], 'b-', label='Training Loss', linewidth=2)
-        ax1.set_title('Training Loss')
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Loss')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-        
-        ax2.plot(epochs, metrics_history["eval_loss"], 'r-', label='Validation Loss', linewidth=2)
-        ax2.set_title('Validation Loss')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('Loss')
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
-        
-        # Accuracy plots
-        ax3.plot(epochs, metrics_history["train_accuracy"], 'b-', label='Training Accuracy', linewidth=2)
-        ax3.set_title('Training Accuracy')
-        ax3.set_xlabel('Epoch')
-        ax3.set_ylabel('Accuracy')
-        ax3.grid(True, alpha=0.3)
-        ax3.legend()
-        
-        ax4.plot(epochs, metrics_history["eval_accuracy"], 'r-', label='Validation Accuracy', linewidth=2)
-        ax4.set_title('Validation Accuracy')
-        ax4.set_xlabel('Epoch')
-        ax4.set_ylabel('Accuracy')
-        ax4.grid(True, alpha=0.3)
-        ax4.legend()
-        '''
         ax1.plot(epochs, metrics_history["train_loss"], 'b-', label='Training', linewidth=2)
         ax1.plot(epochs, metrics_history["eval_loss"], 'r-', label='Validation', linewidth=2)
         ax1.set_title('Training Loss')
@@ -827,19 +891,20 @@ class Train:
         ax3.grid(True, alpha=0.3)
         ax3.legend()
         
-        title = f"lmax={self.lmax}, Realisations={self.realisations}, Batch Size={self.batch_size}, lr={self.learning_rate}, Momentum={self.momentum}, Lam={self.lam}, chs={self.chs}, loss_fc={self.loss_tag}"        
-        fig.suptitle(f"Epoch {epochs[-1]}\n{title}", fontsize=11, y=1.02)
+        title = f"lmax={self.lmax}, Lam={self.lam}, nsamp={1200}, Realisations={self.realisations}, Batch Size={self.batch_size}, lr={self.learning_rate}, Momentum={self.momentum}, Lam={self.lam}, chs={self.chs}, loss_fc={self.loss_tag}"        
+        fig.suptitle(f"Epoch {total_epochs}\n{title}", fontsize=11, y=1.02)
         plt.tight_layout()
-        plt.savefig(f'data/ML/models/checkpoint_{epochs[-1]}/training_metrics.png', bbox_inches='tight', dpi=150)
-        plt.show()
-        #plt.close()  # Close to save memory
+        outdir = os.path.join(self.model_dir, f"checkpoint_{total_epochs}")
+        os.makedirs(outdir, exist_ok=True)
+        plt.savefig(os.path.join(outdir, "training_metrics.png"), bbox_inches='tight', dpi=150)
+        plt.close()
 
-    def plot_examples(self, model, test_batch, epoch: int, n_examples: int = 1):
+    def plot_examples(self, metrics_history, model, test_batch, n_examples: int = 1):
         """Plot input, output, model prediction and residuals for sample examples.
         Parameters:
+            metrics_history (dict): Dictionary containing training and evaluation metrics history.
             model (nnx.Module): The trained model.
             test_batch (tuple): A batch of test data (input images and target residuals).
-            epoch (int): The current training epoch.
             n_examples (int): Number of examples to plot from the test batch.
         """ 
         # Plot sample input and predictions
@@ -893,9 +958,12 @@ class Train:
             ax[row, 4].legend()
         
         plt.tight_layout()
-        fig.suptitle(f"Epoch {epoch}", fontsize=16)
-        plt.savefig(f'data/ML/models/checkpoint_{epoch[-1]}/prediction.png', bbox_inches='tight', dpi=150)
-        plt.show()
+        total_epochs = len(metrics_history["train_loss"])
+        fig.suptitle(f"Epoch {total_epochs}", fontsize=16)
+        outdir = os.path.join(self.model_dir, f"checkpoint_{total_epochs}")
+        os.makedirs(outdir, exist_ok=True)
+        plt.savefig(os.path.join(outdir, 'prediction.png'), bbox_inches='tight', dpi=150)
+        plt.close()
 
 
 def main():
