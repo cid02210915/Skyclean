@@ -35,7 +35,7 @@ class Pipeline:
         constraint: bool = False,
         F = None,
         reference_vectors = None,
-        nsamp: float = 1200.0, 
+        nsamp: float = 1200, 
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -736,7 +736,6 @@ def main():
         constraint=args.constraint,
         nsamp=args.nsamp,
     )
-
     pipeline.run(steps=args.steps)
 
 if __name__ == "__main__": # Run main() only when the file is executed as a script, e.g. python3 -m skyclean.silc.pipeline
