@@ -1,4 +1,7 @@
 import numpy as np
+import jax
+jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 from .custom_s2wav_bandlimits import j_max_silc
@@ -244,6 +247,7 @@ class HRFigures:
         plt.ylim(0, 1)  
         plt.show()
 
+
 def cosine_taper(L, ell_taper, ell_max=None):
     """
     Raised-cosine taper in multipole l.
@@ -283,7 +287,6 @@ def cosine_taper(L, ell_taper, ell_max=None):
     w[mid] = 0.5 * (1.0 + np.cos(np.pi * (ells[mid] - ell_taper) /
                                  (ell_max - ell_taper)))
     return w
-
 
 
 def build_axisym_filter_bank(L, lam, J0=0):
@@ -333,7 +336,7 @@ class SimpleHarmonicWindows:
     """
     Build scale-discretised wavelet *and scaling* windows.
 
-    For each band j you provide:
+    For each band j provide:
       - ell_peaks[j] : desired wavelet peak ℓ_peak^j
       - lam_list[j]  : λ_j used in that band
 
@@ -354,7 +357,7 @@ class SimpleHarmonicWindows:
         self.g_per_j = [AxisymmetricGenerators(lam_j)
                         for lam_j in self.lam_list]
 
-        # --- scaling parameters (you choose these) ---
+        # --- scaling parameters ---
         # scal_ell_cut: multipole up to which scaling has support/peak
         # scal_lam:     λ used for scaling generator
         self.scal_ell_cut = scal_ell_cut if scal_ell_cut is not None else 64.0
@@ -370,17 +373,18 @@ class SimpleHarmonicWindows:
 
     def scaling_raw(self):
         """
-        Scaling window using eta, centred at ℓ_peak = 64.
+        Scaling window using eta:
+
+            Phi_raw[ell] = eta( ell / scal_ell_cut )
+
+        (control scal_ell_cut and scal_lam).
         """
-        ell_min, ell_peak, ell_max = self.scal_band
+        t   = self.ells / float(self.scal_ell_cut)
+        phi = self.g_scal.eta(t)      # <-- η: scaling
 
-        t   = self.ells / float(ell_peak)
-        phi = self.g_scal.eta(t)           # η: scaling kernel
-
-        # normalise so max = 1
         m = phi.max()
         if m > 0:
-            phi = phi / m
+            phi = phi
         return phi
 
     def scaling_band(self, truncate=True):
@@ -395,7 +399,6 @@ class SimpleHarmonicWindows:
             phi[mask_outside] = 0.0
         return phi
 
-
     # ---------- wavelets (kappa) ----------
 
     def wavelet_raw(self, j):
@@ -407,7 +410,7 @@ class SimpleHarmonicWindows:
 
         m = psi.max()
         if m > 0:
-            psi = psi / m
+            psi = psi
         return psi
 
     def band_edges(self, j):
@@ -431,7 +434,6 @@ class SimpleHarmonicWindows:
     
         return int(ell_min), int(ell_peak), int(ell_max)
 
-    
     def wavelet_band(self, j, truncate=True):
         psi = self.wavelet_raw(j)
         if truncate:
@@ -439,24 +441,6 @@ class SimpleHarmonicWindows:
             mask_outside = (self.ells < ell_min) | (self.ells > ell_max)
             psi[mask_outside] = 0.0
         return psi
-
-    # ---------- scaling (eta) ----------
-
-    def scaling_raw(self):
-        """
-        Scaling window using eta:
-
-            Phi_raw[ell] = eta( ell / scal_ell_cut )
-
-        (you control scal_ell_cut and scal_lam).
-        """
-        t   = self.ells / float(self.scal_ell_cut)
-        phi = self.g_scal.eta(t)      # <-- η: scaling
-
-        m = phi.max()
-        if m > 0:
-            phi = phi / m
-        return phi
 
     # ---------- plotting helper ----------
     def plot_all_wavelets(self, truncate=True):
@@ -532,7 +516,7 @@ class SimpleHarmonicWindows:
              plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
              plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
      
-         plt.xlim(0, self.L - 1)
+         #plt.xlim(0, self.L - 1)
          plt.ylim(0, 1.1)
      
          plt.xlabel(r"$\ell$", fontsize=axis_label_size)
