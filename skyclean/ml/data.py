@@ -57,7 +57,7 @@ class CMBFreeILC():
         self.H = lmax + 2
         self.W = 2 * (lmax + 1) # for MWSS sampling
         self.produce_residuals()  # Create residual maps for all realisations
-        self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
+        #self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
 
     def create_random_mwss_maps(self, realisation: int):
         """Generate and save random foreground and residual maps in MWSS sampling format for testing purposes.
