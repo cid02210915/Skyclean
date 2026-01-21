@@ -49,11 +49,13 @@ class CMBFreeILC():
         self.file_templates = files.file_templates
         self.download_templates = files.download_templates
         # retrieve shapes
-        ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(
-            mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
-            realisation=0, lmax=self.lmax, lam = self.lam, nsamp='1200'))
-        self.H = ilc_map_temp.shape[0]+1
-        self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
+        #ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(
+        #    mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
+        #    realisation=0, lmax=self.lmax, lam = self.lam, nsamp='1200'))
+        #self.H = ilc_map_temp.shape[0]+1
+        #self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
+        self.H = lmax + 2
+        self.W = 2 * (lmax + 1) # for MWSS sampling
         self.produce_residuals()  # Create residual maps for all realisations
         self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
 
