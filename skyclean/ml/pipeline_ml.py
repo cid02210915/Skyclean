@@ -88,8 +88,9 @@ def parse_args():
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64])
 
-    # ✅ seed option (explicitly included + used in step_train)
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument("--random", type=bool, default=False,
+                        help="Generate test maps or not: True/False")
 
     parser.add_argument("--directory", type=str, default="data/")
     parser.add_argument("--resume-training", action="store_true")
@@ -136,6 +137,7 @@ def step_train(args) -> str:
         directory=args.directory,
         resume_training=args.resume_training,
         loss_tag=args.loss_tag,
+        random_generator=args.random,
     )
 
     trainer.execute_training_procedure()
