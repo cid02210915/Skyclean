@@ -1,6 +1,7 @@
 # skyclean/ml/pipeline_ml.py
 
 import os
+import time
 
 from skyclean.silc.visualise import Visualise
 
@@ -235,6 +236,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
 
 def main():
+    start_time = time.perf_counter()
     jax.config.update("jax_enable_x64", False)
     print(f"JAX 64-bit mode: {jax.config.jax_enable_x64}")
 
@@ -287,6 +289,9 @@ def main():
         print("[evaluate] Done.")
 
     print("[done] Pipeline complete.")
+    elapsed_seconds = time.perf_counter() - start_time
+    elapsed_minutes = elapsed_seconds / 60.0
+    print(f"[time] Total pipeline time: {elapsed_minutes:.2f} minutes")
 
 
 if __name__ == "__main__":
