@@ -37,7 +37,9 @@ class FileTemplates():
             # ML 
             "ml_maps": os.path.join(directory, "ML/maps"),
             "ml_models": os.path.join(directory, "ML/models"),
-            "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps")
+            "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps"),
+            # ML maps for testing
+            "ml_test_maps": os.path.join(directory, "ML/test_maps"),
         }
 
         for key, value in self.output_directories.items():
@@ -172,6 +174,10 @@ class FileTemplates():
         "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
         "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
+        # ML test maps 
+        "test_foreground_estimate": os.path.join(self.output_directories["ml_test_maps"], "test_foreground_estimate_r{realisation:04d}_lmax{lmax}.npy"),
+        "test_ilc_residual":       os.path.join(self.output_directories["ml_test_maps"], "test_ilc_residual_r{realisation:04d}_lmax{lmax}.npy"),
+        "test_ilc_improved_map": os.path.join(self.output_directories["ml_test_maps"], "test_ilc_improved_map_r{realisation:04d}_lmax{lmax}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
 
         # ---------------- mask for ML ----------------
         "mask": os.path.join(directory, "HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits"),

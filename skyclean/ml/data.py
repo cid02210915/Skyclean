@@ -14,10 +14,10 @@ jax.config.update("jax_enable_x64", False)
 
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
-                 batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.2], directory: str = "data/", ):
+                 batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.2], directory: str = "data/", random: bool = False):
         """
         Parameters:
-            frequencies (list): List of frequencies for the maps.
+            frequencies (list): List of frequency channels for the maps.
             realisations (int): Number of realisations to process.
             lmax (int): Maximum multipole for the wavelet transform.    
             N_directions (int): Number of directions for the wavelet transform.
@@ -25,6 +25,9 @@ class CMBFreeILC():
             split (list): List of train/validation/test split ratios.
             shuffle (bool): Whether to shuffle the dataset.
             directory (str): Directory where data is stored / saved to.
+            component (str): cfn.
+            extract_comp (str): cmb.
+            random (bool): Whether to create random maps for testing purposes.
         """ 
         self.frequencies = frequencies
         self.n_channels_in = len(frequencies)
@@ -38,6 +41,7 @@ class CMBFreeILC():
         self.directory = directory
         self.component = component
         self.extract_comp = extract_comp
+        self.random = random
 
         self.a = 1E-5
 
@@ -53,6 +57,33 @@ class CMBFreeILC():
         self.produce_residuals()  # Create residual maps for all realisations
         self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
 
+    def create_random_mwss_maps(self, realisation: int):
+        """Generate and save random foreground and residual maps in MWSS sampling format for testing purposes.
+
+        Parameters:
+            realisation (int): The realisation number to process.
+
+        Returns:
+            foreground_estimate (np.ndarray): Random foreground estimate map of shape (H, W, N_freq).
+            ilc_residual (np.ndarray): Random ILC residual map of shape (H, W, 1).
+        """
+        H, W, lmax, N = self.H, self.W, self.lmax, self.n_channels_in
+        
+        if os.path.exists(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax)) and os.path.exists(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax)):
+            #print(f"Loading existing random test maps for realisation {realisation}...")
+            test_foreground_estimate = np.load(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax))
+            test_ilc_residual = np.load(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax))
+        else:
+            print(f"Creating random test maps for realisation {realisation}...")
+            np.random.seed(realisation)
+            test_foreground_estimate = np.random.randn(H, W, N).astype(np.float32)
+            test_ilc_residual = np.random.randn(H, W, 1).astype(np.float32)
+            # save the maps up to expected realisations 
+            np.save(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax), test_foreground_estimate)
+            np.save(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax), test_ilc_residual)
+        return test_foreground_estimate, test_ilc_residual
+        
+    
     def create_residual_mwss_maps(self, realisation: int): 
         """For a single realisation, create the ILC residual maps (CMB free) in MWSS sampling format. 
 
@@ -156,20 +187,24 @@ class CMBFreeILC():
         # Reverse signed-log transform
         return self.inverse_signed_log_transform(y)
     
-    def _data_generator(self, indices):
+    def _data_generator(self, indices, random):
         """Define a data generator for lazy loading of data.
         
         Parameters:
             indices (list): List of realisation indices to process.
         """
         for realisation in indices:
-            F, R, _ = self.create_residual_mwss_maps(realisation)
-            # Apply signed-log transform + z-score normalization + cast
-            F = self.transform(F).astype(np.float32)
-            R = self.transform(R).astype(np.float32)
-            yield F, R
+            if random:
+                F, R = self.create_random_mwss_maps(realisation)
+                yield F, R
+            else:
+                F, R, _ = self.create_residual_mwss_maps(realisation)
+                # Apply signed-log transform + z-score normalization + cast
+                F = self.transform(F).astype(np.float32)
+                R = self.transform(R).astype(np.float32)
+                yield F, R
 
-    def _make_dataset(self, indices):
+    def _make_dataset(self, indices, random):
         """Build a tf.data.Dataset from a data generator.
         This creates a lazy-loading dataset that processes only the specified indices when requested.
         
@@ -184,7 +219,7 @@ class CMBFreeILC():
             tf.TensorSpec((self.H, self.W, 1), tf.float32),
         ) # tell the generator the type of data it will yield
         ds = tf.data.Dataset.from_generator(
-            lambda: self._data_generator(indices),
+            lambda: self._data_generator(indices, random=random),
             output_signature=signature
         )
         if self.shuffle:
@@ -195,7 +230,10 @@ class CMBFreeILC():
     def produce_residuals(self):
         """Produce and save the residual maps for all realisations."""
         for realisation in range(self.realisations):
-            self.create_residual_mwss_maps(realisation)
+            if self.random == False:
+                self.create_residual_mwss_maps(realisation)
+            else:
+                self.create_random_mwss_maps(realisation)
 
     def prepare_data(self):
         """Split indices and return (train_ds, test_ds) generators.
@@ -204,11 +242,12 @@ class CMBFreeILC():
             tuple: A tuple containing the training and testing datasets.
         NOTE: It is recommended to run produce_residuals before running this in the training code.
         """
+        random = self.random
         idx = np.arange(self.realisations)
         cut = int(self.split[0] * self.realisations)
         train_idx, test_idx = idx[:cut], idx[cut:]
-        train_ds = self._make_dataset(train_idx)
-        test_ds  = self._make_dataset(test_idx)
+        train_ds = self._make_dataset(train_idx, random)
+        test_ds  = self._make_dataset(test_idx, random)
         print("Data generators prepared. Train size:", len(train_idx), "Test size:", len(test_idx))
         return train_ds, test_ds, len(train_idx), len(test_idx)
 
@@ -261,11 +300,7 @@ class CMBFreeILC():
             if fsky not in get_index:
                 raise ValueError(f"Unsupported f_sky={fsky}. Allowed values: {sorted(get_index.keys())}")
             field_index = get_index[fsky]
-            if apodization == 0:
-                mask_path = self.file_templates["mask"].format(apodization=apodization) 
-                # TO DO: implement un-apodized mask option
-            else:
-                mask_path = self.file_templates["mask"].format(apodization=apodization)
+            mask_path = self.file_templates["mask"].format(apodization=apodization)
 
             if not os.path.exists(mask_path):
                 import urllib.request
@@ -288,7 +323,9 @@ class CMBFreeILC():
         mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp, lmax)
         L = lmax + 1
         mask_mwss = SamplingConverters.mw_map_2_mwss_map(mask_mw, L=L).astype(np.float32)
-        print('Unbeamed mask MWSS shape: ', mask_mwss.shape)
+        # Ensure (H,W,1)
+        mask_mwss = mask_mwss[..., None]
+        print(f'MWSS (fsky={fsky}, apodization={apodization}) shape: ', mask_mwss.shape)
         return mask_mwss
 
 
