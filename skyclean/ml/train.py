@@ -134,7 +134,8 @@ class Train:
                  lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0), 
-                 directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = 'pixel'):
+                 directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = 'pixel', 
+                 random_generator: bool = False):
         """
         Parameters:
             frequencies (list): List of frequencies for the maps.
@@ -153,6 +154,7 @@ class Train:
             directory (str): Directory where data is stored / saved to.
             resume_training (bool): Whether to resume training from the last checkpoint.
             run_tag (str | None): Optional tag to identify the use of loss function.
+            random_generator (bool): Whether to use random generator for test maps.
         """ 
         self.component = component
         self.extract_comp = extract_comp
@@ -172,8 +174,9 @@ class Train:
         self.directory = directory
         self.resume_training = resume_training
         self.loss_tag = loss_tag
+        self.random_generator = random_generator
 
-        self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory)
+        self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory, random=random_generator)
         
         # Create model directory for checkpoints
         files = FileTemplates(directory)  # Pass directory to FileTemplates
@@ -295,84 +298,6 @@ class Train:
             print("Starting from scratch instead.")
             return 0
 
-    '''
-    def loss_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray,):
-        """Weighted MAE on the sphere loss function.
-        
-        Parameters:
-            model (nnx.Module): model.
-            images (jnp.ndarray): Input images.
-            residuals (jnp.ndarray): Target residuals.
-            norm_quad_weights (jnp.ndarray): Normalized quadrature weights.
-        
-        Returns:
-            jnp.ndarray: Computed loss value.
-        """
-        pred_residuals = model(images)
-        # errors = jnp.abs(residuals-pred_residuals) #L1 loss to penalise bigger errors
-        diff = pred_residuals - residuals # (b, t, p, c=1)
-        weighted_sum = jnp.einsum("btpc,t->", (diff **2), norm_quad_weights, optimize=True) # Weighted sum over (t, p, c), using norm_quad_weights[t]
-        return weighted_sum / residuals.shape[0] # Average over batch
-    
-        # mask = jnp.ones_like(errors)  # Create a mask of ones
-        # sin = jnp.sin(jnp.linspace(0, jnp.pi, errors.shape[1]))**5
-        # mask = mask * sin[None, :, None, None] 
-        # errors = jnp.abs(errors*mask).astype(pred_residuals.dtype)  # Apply the mask to the errors
-        #integrate error over theta using quadrature weights.  
-        #return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True,)
-        #        / (residuals.shape[0]))  # Average over batch
-        
-        
-        #return weighted_sum / residuals.shape[0] # Average over batch
-    
-    @staticmethod
-    def loss_fn_harmonic(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray):
-        L = 512
-        pred_residuals = model(images)
-        # broadcast out N_channels = 1 dimension
-        pred_maps = pred_residuals[..., 0]
-        target_maps = residuals[..., 0]
-
-        # edit s2ftt.forward to allow for batch processing
-        forward = functools.partial(s2fft.forward,
-                                        L=L,
-                                        method="jax_cuda")
-        forward_batch = jax.vmap(forward, in_axes=0, out_axes=0)
-
-        pred_spec = jnp.abs(forward_batch(pred_maps))     # shape (batch, l, m)
-        target_spec = jnp.abs(forward_batch(target_maps)) # same shape
-
-        losses = optax.l2_loss(target_spec, pred_spec) # squared
-
-        return jnp.mean(losses)
-
-
-
-    def acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray, threshold: float = 1.1,):
-        """Compute the accuracy of the model predictions.
-
-        Parameters:
-            model (nnx.Module): The model to evaluate.
-            images (jnp.ndarray): Input images.
-            residuals (jnp.ndarray): Target residuals.
-            norm_quad_weights (jnp.ndarray): Normalized quadrature weights.
-            threshold (float): Threshold for accuracy calculation.
-        
-        Returns:
-            jnp.ndarray: Accuracy metric.
-        """
-        pred_residuals = model(images)
-        errors = jnp.maximum(residuals / (pred_residuals + 1e-24), pred_residuals / (residuals + 1e-24))
-        errors = jnp.where(
-            errors < jnp.ones_like(errors) * threshold,
-            jnp.ones_like(errors),
-            jnp.zeros_like(errors),
-        )
-        # what fraction of sky is correctly predicted within 10% relative pixel value error
-        per_batch_acc = jnp.einsum("btpc,t->b", errors, norm_quad_weights, optimize=True,)
-        return jnp.mean(per_batch_acc) # average over batch
-        #return (jnp.einsum("btpc,t->", errors, norm_quad_weights, optimize=True)/ residuals.shape[0])
-    '''
 
     @staticmethod
     def pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss):
@@ -469,7 +394,6 @@ class Train:
         pred_residuals, residuals: (B, T, P, C=1)
         mask_mwss: (T, P) or (T, P, 1)
         """
-        #L=512
         # --- handle mask (same logic as pixel loss) ---
         mask = jnp.asarray(mask_mwss)
         if mask.ndim == 2:
@@ -510,7 +434,7 @@ class Train:
 
 
     @staticmethod
-    def harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=512):
+    def harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L):
         """
         Harmonic-space accuracy in the McCarthy+ sense:
             acc = 1 - MSE_clean / MSE_ILC
@@ -523,7 +447,6 @@ class Train:
         mask_mwss: (T, P) or (T, P, 1)
         L: band-limit for s2fft.forward
         """
-        L=512
         # aliases
         delta_ilc = residuals
         pred_delta_ilc = pred_residuals
@@ -572,8 +495,8 @@ class Train:
         acc = 1.0 - mse_clean / (mse_ilc + 1e-24)
         return acc
 
-    @staticmethod
-    def loss_and_acc_fn(model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
+
+    def loss_and_acc_fn(self, model: nnx.Module, images: jnp.ndarray, residuals: jnp.ndarray, norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
         """
         Forward pass returning:
             - loss: MSE on ΔT_ILC (for gradients)
@@ -581,14 +504,16 @@ class Train:
         """
         # Single forward pass
         pred_residuals = model(images)
-        loss = Train.pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
-        #loss = Train.harm_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
-        accuracy = Train.pix_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
-        #accuracy = Train.harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+        #loss = Train.pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+        loss = Train.harm_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=self.lmax+1)
+        #accuracy = Train.pix_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+        accuracy = Train.harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=self.lmax+1)
         return loss, accuracy # Return loss as main value, accuracy as aux
 
-    @jax.jit
-    def train_step(graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
+    #@jax.jit
+    @functools.partial(jax.jit, static_argnums=0) # self argument is treated as static
+    # 'static' means: treat that argument as compile-time constant, not a JAX value and JAX wont try to stage this.
+    def train_step(self, graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
                    norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
         """Perform a single training step on a batch of data.
 
@@ -607,17 +532,16 @@ class Train:
 
         # value_and_grad will see: (loss, accuracy)
         # loss is used for grads; accuracy is treated as "auxiliary" data
-        (loss, accuracy), grads = nnx.value_and_grad(Train.loss_and_acc_fn, 
+        (loss, accuracy), grads = nnx.value_and_grad(self.loss_and_acc_fn, 
                                                     has_aux=True)(model, images, residuals, norm_quad_weights, mask_mwss)
 
-        #loss, grads = nnx.value_and_grad(Train.loss_fn)(model, images, residuals, norm_quad_weights)
         optimizer.update(grads)
-        #accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
         metrics.update(loss=loss, accuracy=accuracy)
         _, state = nnx.split((model, optimizer, metrics))
         return state
 
-    def eval_step(graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
+    @functools.partial(jax.jit, static_argnums=0)
+    def eval_step(self, graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
                   norm_quad_weights: jnp.ndarray, mask_mwss: jnp.ndarray):
         """Evaluate the model on a batch of data.
 
@@ -633,10 +557,7 @@ class Train:
         """
         model, optimizer, metrics = nnx.merge(graphdef, state)
         model.eval()
-        #loss = Train.loss_fn_harmonic(model, images, residuals, norm_quad_weights)
-        #loss = Train.loss_fn(model, images, residuals, norm_quad_weights)
-        #accuracy = Train.acc_fn(model, images, residuals, norm_quad_weights)
-        loss, accuracy = Train.loss_and_acc_fn(
+        loss, accuracy = self.loss_and_acc_fn(
         model, images, residuals, norm_quad_weights, mask_mwss)
         metrics.update(loss=loss, accuracy=accuracy)
         _, state = nnx.split((model, optimizer, metrics))
@@ -794,7 +715,7 @@ class Train:
             _, by0 = next(iter(tfds.as_numpy(train_ds.take(1))))
             by0 = by0[0]
             mask_mwss = jnp.ones_like(jnp.asarray(by0), dtype=jnp.float32)  # same shape as residuals
-            print("Training WITHOUT mask (mask_mwss = 1 everywhere).")
+            print("Training WITHOUT mask (mask_mwss = 1 everywhere), with shape ", np.shape(mask_mwss))
         else:
             mask_mwss = self.dataset.mask_mwss_beamed(fsky=fsky, apodization=apodization)   # (T, P, 1)
             mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
@@ -808,7 +729,7 @@ class Train:
                 batch_x, batch_y = next(train_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
-                state = Train.train_step(graphdef, state, images, residuals, 
+                state = self.train_step(graphdef, state, images, residuals, 
                                          norm_quad_weights, mask_mwss)
                 # Print GPU usage for first batch of first epoch
                 if epoch == 1 and _ == 0:
@@ -826,7 +747,7 @@ class Train:
                 batch_x, batch_y = next(test_iter)
                 images = jnp.asarray(batch_x)
                 residuals = jnp.asarray(batch_y)
-                state = Train.eval_step(graphdef, state, images, residuals, 
+                state = self.eval_step(graphdef, state, images, residuals, 
                                         norm_quad_weights, mask_mwss)
             nnx.update((model, optimizer, metrics), state)  # Only updates metrics
             test_iter = iter(tfds.as_numpy(test_ds))
