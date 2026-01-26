@@ -205,14 +205,52 @@ class Train:
         # Synchronize to ensure all operations complete
         jax.block_until_ready(jnp.array([1.0]))
         print("[GPU Memory] Cache cleared")
-    
-    def save_model(self, model, epoch):
+
+    def save_model(self, model, epoch) -> bool:
         """Save the model state using Orbax.
 
         Parameters:
             model (nnx.Module): The model to save.
             epoch (int): Current epoch number.
         """
+        import os, shutil
+        from pathlib import Path
+
+        _, state = nnx.split(model)
+        ckpt_dir = Path(self.model_dir).resolve()
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        ckpt_path = ckpt_dir / f"checkpoint_{epoch}"
+        tmp_path  = ckpt_dir / f"checkpoint_{epoch}.orbax-checkpoint-tmp"
+
+        # Remove stale dirs
+        shutil.rmtree(ckpt_path, ignore_errors=True)
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+        try:
+            self.checkpointer.save(str(ckpt_path), state)
+            if hasattr(self.checkpointer, "wait_until_finished"):
+                self.checkpointer.wait_until_finished()
+
+            # Validate checkpoint is real
+            if not (ckpt_path / "_METADATA").exists():
+                raise RuntimeError(f"Orbax save produced no _METADATA in {ckpt_path}")
+
+            # Optional: delete previous checkpoint + its tmp
+            if epoch > 1:
+                shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
+                shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}.orbax-checkpoint-tmp", ignore_errors=True)
+
+            print(f"Model checkpoint saved at epoch {epoch} to {ckpt_path}")
+            return True
+
+        except Exception as e:
+            print(f"[ERROR] Orbax checkpoint save failed at epoch {epoch}: {e}")
+            # Clean up partial dirs so restore won't see fake checkpoints
+            shutil.rmtree(ckpt_path, ignore_errors=True)
+            shutil.rmtree(tmp_path, ignore_errors=True)
+            return False
+    """
         try:
             _, state = nnx.split(model)
             checkpoint_path = os.path.abspath(os.path.join(self.model_dir, f"checkpoint_{epoch}"))
@@ -236,7 +274,7 @@ class Train:
             
         except Exception as e:
             print(f"Warning: Failed to save model at epoch {epoch}: {str(e)}")
-    
+    """
 
     def load_model_for_training(self, model, optimizer):
         """
@@ -600,11 +638,14 @@ class Train:
             if not p.is_dir():
                 continue
             m = pat.search(p.name)
-            if m:
-                epoch = int(m.group(1))
-                if best is None or epoch > best:
-                    best = epoch
-                    best_path = p
+            if not m:
+                continue
+            if not (p / "_METADATA").exists():
+                continue  # skip fake/partial checkpoints
+            epoch = int(m.group(1))
+            if best is None or epoch > best:
+                best = epoch
+                best_path = p
         if best is None:
             raise FileNotFoundError(f"No existing checkpoints found in {base}. "
             f"Expected folders named like 'checkpoint_<epoch>' (e.g. checkpoint_50).")
@@ -768,13 +809,15 @@ class Train:
             print_gpu_usage(f"After epoch {epoch}")
 
             # Save model checkpoint after each epoch (overwrites previous)
-            self.save_model(model, epoch)
+            ok = self.save_model(model, epoch)
             
-            #np.save(self.model_dir + "training_log.npy", metrics_history)
-            outdir = os.path.join(self.model_dir, f"checkpoint_{epoch}")
-            os.makedirs(outdir, exist_ok=True)
-            np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
-            #np.save(os.path.join(self.model_dir, "training_log.npy"), metrics_history)
+            if ok:
+                outdir = os.path.join(self.model_dir, f"checkpoint_{epoch}")
+                os.makedirs(outdir, exist_ok=True)
+                np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
+            else:
+                # save logs somewhere else so you still keep progress
+                self._save_training_log(metrics_history)
 
             
         # Plot training metrics and examples
