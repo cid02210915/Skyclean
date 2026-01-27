@@ -7,7 +7,9 @@ geometric + bisection search.
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Tuple
@@ -18,6 +20,10 @@ OOM_MARKERS = (
     "oom",
     "resource_exhausted",
     "cuda_error_out_of_memory",
+)
+
+MEMORY_LINE_RE = re.compile(
+    r"\[GPU Memory\]\s+After epoch\s+(\d+):\s+([0-9.]+)%\s+\((\d+)/(\d+)\s+MB\)"
 )
 
 
@@ -92,9 +98,84 @@ def has_oom_marker(text: str) -> bool:
     return any(m in lowered for m in OOM_MARKERS)
 
 
+def parse_epoch_memory(text: str) -> list[dict]:
+    records = []
+    for line in text.splitlines():
+        match = MEMORY_LINE_RE.search(line)
+        if not match:
+            continue
+        epoch, percent, mb_used, mb_total = match.groups()
+        records.append(
+            {
+                "epoch": int(epoch),
+                "percent": float(percent),
+                "mb_used": float(mb_used),
+                "mb_total": float(mb_total),
+            }
+        )
+    records.sort(key=lambda r: r["epoch"])
+    return records
+
+
+def quantify_memory_growth(records: list[dict]) -> list[dict]:
+    if not records:
+        return []
+    base = records[0]["mb_used"]
+    prev = base
+    enriched = []
+    for rec in records:
+        delta = rec["mb_used"] - prev
+        delta_from_start = rec["mb_used"] - base
+        enriched.append({**rec, "delta_mb": delta, "delta_from_start_mb": delta_from_start})
+        prev = rec["mb_used"]
+    return enriched
+
+
+def write_memory_log(
+    log_dir: Path,
+    lmax: int,
+    realisations: int,
+    batch_size: int,
+    chs: list[int] | None,
+    records: list[dict],
+) -> None:
+    if not records:
+        return
+    log_dir.mkdir(parents=True, exist_ok=True)
+    chs_label = "none" if not chs else "-".join(str(c) for c in chs)
+    log_path = log_dir / f"mem_lmax{lmax}_reals{realisations}_bs{batch_size}_chs{chs_label}.csv"
+    with log_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "epoch",
+                "percent",
+                "mb_used",
+                "mb_total",
+                "delta_mb",
+                "delta_from_start_mb",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(records)
+
+
+def format_memory_summary(records: list[dict]) -> str:
+    if not records:
+        return ""
+    start = records[0]["mb_used"]
+    end = records[-1]["mb_used"]
+    peak = max(r["mb_used"] for r in records)
+    growth = end - start
+    return (
+        f"[probe] Memory growth: start={start:.0f}MB end={end:.0f}MB "
+        f"delta={growth:.0f}MB peak={peak:.0f}MB epochs={len(records)}"
+    )
+
+
 def write_log(log_dir: Path, lmax: int, realisations: int, text: str) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"probe_lmax{lmax}_{realisations}.log"
+    log_path = log_dir / f"probe_lmax{lmax}_r{realisations}.log"
     log_path.write_text(text)
 
 
@@ -122,6 +203,20 @@ def probe(
             last_success = (real, text)
         else:
             last_failure = (real, text)
+        mem_records = quantify_memory_growth(parse_epoch_memory(text))
+        if mem_records:
+            summary = format_memory_summary(mem_records)
+            if summary:
+                print(summary)
+            if args.mem_log_dir and not args.log_final_only:
+                write_memory_log(
+                    Path(args.mem_log_dir),
+                    lmax,
+                    real,
+                    batch_size,
+                    chs,
+                    mem_records,
+                )
         if args.log_dir and not args.log_final_only:
             write_log(Path(args.log_dir), lmax, real, text)
 
@@ -133,6 +228,17 @@ def probe(
         if args.log_dir and args.log_final_only:
             real, text = last_failure
             write_log(Path(args.log_dir), lmax, real, text)
+        if args.mem_log_dir and args.log_final_only:
+            real, text = last_failure
+            mem_records = quantify_memory_growth(parse_epoch_memory(text))
+            write_memory_log(
+                Path(args.mem_log_dir),
+                lmax,
+                real,
+                batch_size,
+                chs,
+                mem_records,
+            )
         return 0
 
     low = start_r
@@ -152,6 +258,17 @@ def probe(
                 if args.log_dir and args.log_final_only:
                     real, text = last_success
                     write_log(Path(args.log_dir), lmax, real, text)
+                if args.mem_log_dir and args.log_final_only:
+                    real, text = last_success
+                    mem_records = quantify_memory_growth(parse_epoch_memory(text))
+                    write_memory_log(
+                        Path(args.mem_log_dir),
+                        lmax,
+                        real,
+                        batch_size,
+                        chs,
+                        mem_records,
+                    )
                 return low
         else:
             high = candidate
@@ -179,6 +296,24 @@ def probe(
         elif last_failure:
             real, text = last_failure
             write_log(Path(args.log_dir), lmax, real, text)
+    if args.mem_log_dir and args.log_final_only:
+        if last_success:
+            real, text = last_success
+        elif last_failure:
+            real, text = last_failure
+        else:
+            real = None
+            text = ""
+        if real is not None:
+            mem_records = quantify_memory_growth(parse_epoch_memory(text))
+            write_memory_log(
+                Path(args.mem_log_dir),
+                lmax,
+                real,
+                batch_size,
+                chs,
+                mem_records,
+            )
 
     return low
 
@@ -217,6 +352,8 @@ def parse_args() -> argparse.Namespace:
                         help="Optional directory to write subprocess logs.")
     parser.add_argument("--log-final-only", action="store_true",
                         help="Only save the final probe log for each combo.")
+    parser.add_argument("--mem-log-dir", type=str, default="",
+                        help="Optional directory to write per-epoch memory logs as CSV.")
     parser.add_argument("pipeline_args", nargs=argparse.REMAINDER,
                         help="Extra args passed to pipeline_ml.py after '--'.")
     return parser.parse_args()
@@ -255,20 +392,21 @@ if __name__ == "__main__":
 """Usage:
 python -m skyclean.ml.oom_probe \
   --lmax 127 \
-  --min-realisations 2 \
-  --max-realisations 3 \
-  --batch-sizes 1 \
+  --epochs 10 \
+  --min-realisations 3 \
+  --max-realisations 4 \
+  --batch-sizes 2 \
   --chs-set 1,16,32,32,64 \
   --log-dir skyclean/data/ML/oom_logs \
   --mode train \
   --frequencies 030 044 070 100 143 217 353 545 857 \
   --lam 2.0 \
-  --epochs 1 \
   --learning-rate 1e-3 \
   --momentum 0.90 \
   --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \
   --seed 42 \
   --nsamp 1200 \
-  --random
+  --random \
+  --mem-log-dir skyclean/data/ML/oom_mem_logs
 
 """

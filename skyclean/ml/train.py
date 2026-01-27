@@ -10,6 +10,8 @@ import sys
 # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.9"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0" # remove this line because it forces the use of physical GPU 0, but Slurm may assign different GPU IDs
 
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
+
 import jax
 print("available JAX GPU devices:", jax.devices("gpu")) # check available GPUs
 
@@ -699,10 +701,15 @@ class Train:
         
         L = self.lmax + 1 
         print("Constructing the CMB-Free ILC dataset")
-        train_ds, test_ds, n_train, n_test= self.dataset.prepare_data()
+        train_ds, test_ds, n_train, n_test, drop_remainder_test = self.dataset.prepare_data()
         print_gpu_usage("After dataset creation")
+        if n_test == 0:
+            raise ValueError("Test set is empty. Increase realisations or adjust split.")
         training_batches_per_epoch = n_train // batch_size
-        testing_batches_per_epoch = n_test // batch_size
+        if drop_remainder_test:
+            testing_batches_per_epoch = n_test // batch_size
+        else:
+            testing_batches_per_epoch = (n_test + batch_size - 1) // batch_size
         train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
         print_gpu_usage("After dataset creation")
         print("Constructing the model")
@@ -892,14 +899,19 @@ class Train:
             test_batch (tuple): A batch of test data (input images and target residuals).
             n_examples (int): Number of examples to plot from the test batch.
         """ 
-        # Plot sample input and predictions
-        fig, ax = plt.subplots(n_examples, 5, figsize=(25, 5 * n_examples))
-        if n_examples == 1:
-            ax = ax.reshape(1, -1)  # Ensure 2D array for consistency
-        
         foreground, residual = test_batch
-        
-        for row in range(n_examples):
+        batch_n = int(foreground.shape[0])
+        n_plot = min(n_examples, batch_n)
+        if n_plot == 0:
+            print("[WARN] plot_examples: empty test batch; skipping plots.")
+            return
+
+        # Plot sample input and predictions
+        fig, ax = plt.subplots(n_plot, 5, figsize=(25, 5 * n_plot))
+        if n_plot == 1:
+            ax = ax.reshape(1, -1)  # Ensure 2D array for consistency
+
+        for row in range(n_plot):
             input_ex = jnp.asarray(foreground[row, :, :, 0])
             output_ex = jnp.asarray(residual[row, :, :, 0])
             pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]

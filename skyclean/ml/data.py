@@ -5,6 +5,8 @@ import healpy as hp
 import matplotlib.pyplot as plt
 
 from skyclean.silc import utils, HPTools, MWTools, SamplingConverters, FileTemplates
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
+
 import tensorflow as tf
 tf.config.set_visible_devices([], "GPU")
 
@@ -206,7 +208,7 @@ class CMBFreeILC():
                 R = self.transform(R).astype(np.float32)
                 yield F, R
 
-    def _make_dataset(self, indices, random):
+    def _make_dataset(self, indices, random, drop_remainder: bool):
         """Build a tf.data.Dataset from a data generator.
         This creates a lazy-loading dataset that processes only the specified indices when requested.
         
@@ -226,7 +228,7 @@ class CMBFreeILC():
         )
         if self.shuffle:
             ds = ds.shuffle(buffer_size=len(indices))
-        return ds.batch(self.batch_size, drop_remainder=True) \
+        return ds.batch(self.batch_size, drop_remainder=drop_remainder) \
                  .prefetch(tf.data.AUTOTUNE)
 
     def produce_residuals(self):
@@ -248,10 +250,14 @@ class CMBFreeILC():
         idx = np.arange(self.realisations)
         cut = int(self.split[0] * self.realisations)
         train_idx, test_idx = idx[:cut], idx[cut:]
-        train_ds = self._make_dataset(train_idx, random)
-        test_ds  = self._make_dataset(test_idx, random)
+        train_ds = self._make_dataset(train_idx, random, drop_remainder=True)
+        drop_remainder_test = len(test_idx) >= self.batch_size
+        if not drop_remainder_test:
+            print(f"[WARN] Test set size ({len(test_idx)}) < batch_size ({self.batch_size}); "
+                  "using drop_remainder=False for test dataset.")
+        test_ds = self._make_dataset(test_idx, random, drop_remainder=drop_remainder_test)
         print("Data generators prepared. Train size:", len(train_idx), "Test size:", len(test_idx))
-        return train_ds, test_ds, len(train_idx), len(test_idx)
+        return train_ds, test_ds, len(train_idx), len(test_idx), drop_remainder_test
 
     def find_dataset_mean_std(self): 
         """Compute the mean and standard deviation of the inputs (channel-wise) and outputs (single channel). 
