@@ -153,7 +153,7 @@ class Train:
             rngs (nnx.Rngs): Random number generators for the model.
             directory (str): Directory where data is stored / saved to.
             resume_training (bool): Whether to resume training from the last checkpoint.
-            run_tag (str | None): Optional tag to identify the use of loss function.
+            loss_tag (str | None): Which loss to use ('pixel' or 'harmonic').
             random_generator (bool): Whether to use random generator for test maps.
         """ 
         self.component = component
@@ -173,7 +173,9 @@ class Train:
         self.rngs = rngs
         self.directory = directory
         self.resume_training = resume_training
-        self.loss_tag = loss_tag
+        self.loss_tag = (loss_tag or "pixel").lower()
+        if self.loss_tag not in {"pixel", "harmonic"}:
+            raise ValueError(f"Unsupported loss_tag={self.loss_tag!r}. Use 'pixel' or 'harmonic'.")
         self.random_generator = random_generator
 
         self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory, random=random_generator)
@@ -558,10 +560,12 @@ class Train:
         """
         # Single forward pass
         pred_residuals = model(images)
-        #loss = Train.pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
-        loss = Train.harm_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=self.lmax+1)
-        #accuracy = Train.pix_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
-        accuracy = Train.harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=self.lmax+1)
+        if self.loss_tag == "pixel":
+            loss = Train.pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+            accuracy = Train.pix_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss)
+        else:
+            loss = Train.harm_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=self.lmax+1)
+            accuracy = Train.harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=self.lmax+1)
         return loss, accuracy # Return loss as main value, accuracy as aux
 
     #@jax.jit
@@ -1044,6 +1048,13 @@ def main():
         action='store_true',
         help='Resume training from the last checkpoint'
     )
+    parser.add_argument(
+        '--loss-tag',
+        type=str,
+        default='pixel',
+        choices=['pixel', 'harmonic'],
+        help='Loss to use: pixel or harmonic'
+    )
     
     args = parser.parse_args()
 
@@ -1068,6 +1079,7 @@ def main():
         rngs=rngs,
         directory=args.directory,
         resume_training=args.resume_training,
+        loss_tag=args.loss_tag,
     )
     
     trainer.execute_training_procedure()
