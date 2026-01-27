@@ -188,11 +188,22 @@ class Train:
         #if not os.path.exists(self.save_dir):
         #    create_dir(self.save_dir)
         
-        # Initialize Orbax checkpoint manager
-        self.checkpointer = ocp.StandardCheckpointer()
+        # Initialize Orbax checkpoint manager (prefer sync save to avoid event loop issues).
+        self.checkpointer = self._build_checkpointer()
 
         # ensure checkpoints are saved before exit
         atexit.register(lambda: getattr(self.checkpointer, "wait_until_finished", lambda: None)())
+
+    def _build_checkpointer(self):
+        """Create an Orbax checkpointer with async disabled if supported."""
+        try:
+            async_opts = ocp.AsyncOptions(async_save=False)
+            return ocp.StandardCheckpointer(async_options=async_opts)
+        except (AttributeError, TypeError):
+            try:
+                return ocp.StandardCheckpointer(use_async=False)
+            except TypeError:
+                return ocp.StandardCheckpointer()
 
 
     @staticmethod
@@ -205,6 +216,11 @@ class Train:
         # Synchronize to ensure all operations complete
         jax.block_until_ready(jnp.array([1.0]))
         print("[GPU Memory] Cache cleared")
+
+    @staticmethod
+    def _to_host_scalar(x):
+        """Convert a JAX/NumPy scalar to a Python float to avoid device memory retention."""
+        return float(np.asarray(x))
 
     def save_model(self, model, epoch) -> bool:
         """Save the model state using Orbax.
@@ -681,8 +697,8 @@ class Train:
         print("Constructing the CMB-Free ILC dataset")
         train_ds, test_ds, n_train, n_test= self.dataset.prepare_data()
         print_gpu_usage("After dataset creation")
-        training_batches_per_epoch = (n_train + batch_size - 1) // batch_size
-        testing_batches_per_epoch = (n_test + batch_size - 1) // batch_size
+        training_batches_per_epoch = n_train // batch_size
+        testing_batches_per_epoch = n_test // batch_size
         train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
         print_gpu_usage("After dataset creation")
         print("Constructing the model")
@@ -780,7 +796,7 @@ class Train:
 
             # Compute metrics for the current epoch
             for metric, value in metrics.compute().items():
-                metrics_history[f"train_{metric}"].append(value)
+                metrics_history[f"train_{metric}"].append(self._to_host_scalar(value))
             metrics.reset()
 
             # Evaluate at the end of the current epoch
@@ -793,7 +809,7 @@ class Train:
             nnx.update((model, optimizer, metrics), state)  # Only updates metrics
             test_iter = iter(tfds.as_numpy(test_ds))
             for metric, value in metrics.compute().items():
-                metrics_history[f"eval_{metric}"].append(value)
+                metrics_history[f"eval_{metric}"].append(self._to_host_scalar(value))
             metrics.reset()
 
             print(
@@ -805,7 +821,8 @@ class Train:
                     metrics_history["eval_accuracy"][-1],
                 )
             )
-            _ = jnp.asarray(metrics_history["eval_loss"][-1]).block_until_ready() # force sync by touching a device value
+            # Force sync on a host scalar (no device retention).
+            _ = np.asarray(metrics_history["eval_loss"][-1])
             print_gpu_usage(f"After epoch {epoch}")
 
             # Save model checkpoint after each epoch (overwrites previous)
@@ -1058,7 +1075,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-

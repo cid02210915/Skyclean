@@ -226,7 +226,7 @@ class CMBFreeILC():
         )
         if self.shuffle:
             ds = ds.shuffle(buffer_size=len(indices))
-        return ds.batch(self.batch_size, drop_remainder=False) \
+        return ds.batch(self.batch_size, drop_remainder=True) \
                  .prefetch(tf.data.AUTOTUNE)
 
     def produce_residuals(self):
