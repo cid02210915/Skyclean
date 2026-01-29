@@ -13,6 +13,8 @@ import sys
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
 
 import jax
+
+
 print("available JAX GPU devices:", jax.devices("gpu")) # check available GPUs
 
 jax.config.update("jax_enable_x64", False)  # Use 32-bit
@@ -39,10 +41,8 @@ else:
             print("GPU 0 bytes_limit:", bytes_limit / 1024**3, "GiB")
             if bytes_in_use is not None:
                 print("GPU 0 bytes_in_use:", bytes_in_use / 1024**3, "GiB")
-#gpu = jax.devices()[0]
-#info = gpu.memory_stats()
-#print('Initial GPU usage for device 0:', info["bytes_limit"] / 1024**3, "GiB")
 
+import subprocess # for nvidia-smi call for memory check
 import numpy as np
 import jax.numpy as jnp
 import optax
@@ -65,70 +65,52 @@ from skyclean.silc.file_templates import FileTemplates
 
 import matplotlib.pyplot as plt
 
-def get_gpu_memory_usage():
-    """Get current GPU memory usage as percentage and MB using JAX."""
-    devices = jax.devices()
-    gpu_devices = [d for d in devices]
-    
-    # Use the first GPU device
-    gpu = gpu_devices[0]
-    
-    # Get memory info through JAX backend
-    memory_info = gpu.memory_stats()
-    bytes_in_use = memory_info.get('bytes_in_use', 0)
-    bytes_limit = memory_info.get('bytes_limit', 1)
-    
-    mb_used = bytes_in_use / (1024 ** 2)
-    mb_total = bytes_limit / (1024 ** 2) 
-    percentage = (bytes_in_use / bytes_limit) * 100 if bytes_limit > 0 else 0
-    
-    return percentage, mb_used, mb_total
 
-def get_gpu_memory_usage(device_id: int = 0):
+def _get_physical_id(jax_device_id: int = 0) -> str:
+    """Map JAX device ID to physical GPU ID using CUDA_VISIBLE_DEVICES."""
+    vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if vis:
+        ids = [x.strip() for x in vis.split(",") if x.strip()]
+        return ids[min(jax_device_id, len(ids) - 1)]
+    return str(jax_device_id)
+
+
+def print_gpu_usage(stage_name: str, jax_device_id: int = 0):
     """
-    Return (percentage, mb_used, mb_total) for GPU device_id.
-    If not available, return (None, None, None).
+    Print GPU memory usage for a given stage.
+
+    Parameters:
+        stage_name (str): Name of the stage for logging.
+        jax_device_id (int): JAX device ID to query. We only see one visible GPU per job, so default 0.
     """
-    # Prefer actual GPU devices; fall back gracefully.
+    gpus = [d for d in jax.devices() if d.platform == "gpu"]
+    if not gpus:
+        print(f"[GPU Memory] {stage_name}: no GPU visible to JAX")
+        return
+    
+    jax_device_id = min(jax_device_id, len(gpus) - 1)
+    phys_id = _get_physical_id(jax_device_id)
+
     try:
-        gpus = jax.devices("gpu")
-    except Exception:
-        gpus = []
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                f"--id={phys_id}",
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        ).strip()
 
-    if not gpus: # No GPU backend visible to JAX
-        return None, None, None
+        used_mb, total_mb = [float(x) for x in out.split(",")]
+        used_gb  = used_mb / 1024.0
+        total_gb = total_mb / 1024.0
+        pct = (used_mb / total_mb) * 100.0 if total_mb > 0 else float("nan")
 
-    if device_id >= len(gpus):
-        device_id = 0
+        print(f"[GPU Memory] {stage_name}: {pct:.2f}% ({used_gb:.2f}/{total_gb:.2f} GB)")
 
-    gpu = gpus[device_id]
-    mem = gpu.memory_stats()
-
-    if mem is None: # Some backends return None
-        return None, None, None
-
-    # Keys can vary; use .get and guard division.
-    bytes_in_use = mem.get("bytes_in_use", None)
-    bytes_limit  = mem.get("bytes_limit", None)
-
-    if bytes_in_use is None or bytes_limit is None or bytes_limit == 0:
-        return None, None, None
-
-    mb_used = bytes_in_use / (1024 ** 2)
-    mb_total = bytes_limit / (1024 ** 2)
-    percentage = (bytes_in_use / bytes_limit) * 100.0
-
-    return percentage, mb_used, mb_total
-
-# def print_gpu_usage(stage_name):
-def print_gpu_usage(stage_name: str, device_id: int = 0):
-    """Print GPU memory usage for a given stage."""
-    # percentage, mb_used, mb_total = get_gpu_memory_usage()
-    percentage, mb_used, mb_total = get_gpu_memory_usage(device_id=device_id)
-    if percentage is not None:
-        print(f"[GPU Memory] {stage_name}: {percentage:.1f}% ({mb_used:.0f}/{mb_total:.0f} MB)")
-    else:
-        print(f"[GPU Memory] {stage_name}: Unable to query GPU memory via JAX memory_stats()")
+    except Exception as e:
+        print(f"[GPU Memory] {stage_name}: failed to query GPU memory ({e!r})")
 
 
 class Train: 
@@ -158,6 +140,7 @@ class Train:
             loss_tag (str | None): Which loss to use ('pixel' or 'harmonic').
             random_generator (bool): Whether to use random generator for test maps.
         """ 
+
         self.component = component
         self.extract_comp = extract_comp
         self.frequencies = frequencies
@@ -176,6 +159,7 @@ class Train:
         self.directory = directory
         self.resume_training = resume_training
         self.loss_tag = (loss_tag or "pixel").lower()
+
         if self.loss_tag not in {"pixel", "harmonic"}:
             raise ValueError(f"Unsupported loss_tag={self.loss_tag!r}. Use 'pixel' or 'harmonic'.")
         self.random_generator = random_generator
@@ -270,31 +254,7 @@ class Train:
             shutil.rmtree(ckpt_path, ignore_errors=True)
             shutil.rmtree(tmp_path, ignore_errors=True)
             return False
-    """
-        try:
-            _, state = nnx.split(model)
-            checkpoint_path = os.path.abspath(os.path.join(self.model_dir, f"checkpoint_{epoch}"))
-            os.makedirs(self.model_dir, exist_ok=True)
-            if os.path.exists(checkpoint_path):
-                # Remove stale or partial checkpoints before overwriting.
-                import shutil
-                shutil.rmtree(checkpoint_path)
 
-            self.checkpointer.save(checkpoint_path, state)
-            if hasattr(self.checkpointer, "wait_until_finished"):
-                self.checkpointer.wait_until_finished()
-            # keep only latest checkpoint
-            if epoch > 1:
-                prev_checkpoint_path = os.path.abspath(os.path.join(self.model_dir, f"checkpoint_{epoch-1}"))
-                if os.path.exists(prev_checkpoint_path):
-                    import shutil
-                    shutil.rmtree(prev_checkpoint_path)
-
-            print(f"Model checkpoint saved at epoch {epoch} to {checkpoint_path}")
-            
-        except Exception as e:
-            print(f"Warning: Failed to save model at epoch {epoch}: {str(e)}")
-    """
 
     def load_model_for_training(self, model, optimizer):
         """
@@ -700,6 +660,7 @@ class Train:
         N_freq = len(self.frequencies)
         
         L = self.lmax + 1 
+        print_gpu_usage("Before dataset creation")
         print("Constructing the CMB-Free ILC dataset")
         train_ds, test_ds, n_train, n_test, drop_remainder_test = self.dataset.prepare_data()
         print_gpu_usage("After dataset creation")
@@ -711,7 +672,7 @@ class Train:
         else:
             testing_batches_per_epoch = (n_test + batch_size - 1) // batch_size
         train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
-        print_gpu_usage("After dataset creation")
+        print_gpu_usage("After dataset iteration creation")
         print("Constructing the model")
         model = S2_UNET(L, N_freq, chs=self.chs, rngs = self.rngs)
         print_gpu_usage("After model creation")
@@ -850,6 +811,7 @@ class Train:
             
         # Plot training metrics and examples
         # on last epoch, plot metrics and examples
+        print_gpu_usage(f"Before plotting at epoch {epochs}")
         self.plot_training_metrics(metrics_history)
         self.plot_examples(metrics_history, model, test_batch, n_examples=self.batch_size)
 

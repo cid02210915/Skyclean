@@ -10,7 +10,7 @@ import argparse
 import csv
 from pathlib import Path
 import re
-import subprocess
+import subprocess #
 import sys
 from typing import Tuple
 
@@ -22,8 +22,9 @@ OOM_MARKERS = (
     "cuda_error_out_of_memory",
 )
 
+# to locate the line starts with [GPU Memory]
 MEMORY_LINE_RE = re.compile(
-    r"\[GPU Memory\]\s+After epoch\s+(\d+):\s+([0-9.]+)%\s+\((\d+)/(\d+)\s+MB\)"
+    r"\[GPU Memory\]\s+(.*?):\s+([0-9.]+)%\s+\(([0-9.]+)/([0-9.]+)\s+GB\)"
 )
 
 
@@ -99,36 +100,58 @@ def has_oom_marker(text: str) -> bool:
 
 
 def parse_epoch_memory(text: str) -> list[dict]:
+    """Parse memory usage records from the output text."""
     records = []
     for line in text.splitlines():
         match = MEMORY_LINE_RE.search(line)
         if not match:
             continue
-        epoch, percent, mb_used, mb_total = match.groups()
+        stage, percent, gb_used, gb_total = match.groups()
         records.append(
             {
-                "epoch": int(epoch),
+                "stage": stage.strip(),
                 "percent": float(percent),
-                "mb_used": float(mb_used),
-                "mb_total": float(mb_total),
+                "gb_used": float(gb_used),
+                "gb_total": float(gb_total),
             }
         )
-    records.sort(key=lambda r: r["epoch"])
     return records
 
 
+def parse_last_stage(text: str) -> str | None:
+    """Parse the last stage from the output text."""
+    last = None
+    for line in text.splitlines():
+        m = MEMORY_LINE_RE.search(line)
+        if m:
+            stage, _, _, _ = m.groups()
+            last = stage.strip()
+    return last
+
+
 def quantify_memory_growth(records: list[dict]) -> list[dict]:
+    """
+    Given a list of memory records with 'gb_used', add 'delta_gb' and
+    'delta_from_start_gb' fields to each record.
+    """
     if not records:
         return []
-    base = records[0]["mb_used"]
+    base = records[0]["gb_used"]
     prev = base
     enriched = []
     for rec in records:
-        delta = rec["mb_used"] - prev
-        delta_from_start = rec["mb_used"] - base
-        enriched.append({**rec, "delta_mb": delta, "delta_from_start_mb": delta_from_start})
-        prev = rec["mb_used"]
+        delta = rec["gb_used"] - prev
+        delta_from_start = rec["gb_used"] - base
+        enriched.append(
+            {
+                **rec,
+                "delta_gb": delta,
+                "delta_from_start_gb": delta_from_start,
+            }
+        )
+        prev = rec["gb_used"]
     return enriched
+
 
 
 def write_memory_log(
@@ -143,17 +166,17 @@ def write_memory_log(
         return
     log_dir.mkdir(parents=True, exist_ok=True)
     chs_label = "none" if not chs else "-".join(str(c) for c in chs)
-    log_path = log_dir / f"mem_lmax{lmax}_reals{realisations}_bs{batch_size}_chs{chs_label}.csv"
+    log_path = log_dir / f"mem_lmax{lmax}_r{realisations}_bs{batch_size}_chs{chs_label}.csv"
     with log_path.open("w", newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
-                "epoch",
+                "stage",
                 "percent",
-                "mb_used",
-                "mb_total",
-                "delta_mb",
-                "delta_from_start_mb",
+                "gb_used",
+                "gb_total",
+                "delta_gb",
+                "delta_from_start_gb",
             ],
         )
         writer.writeheader()
@@ -163,13 +186,13 @@ def write_memory_log(
 def format_memory_summary(records: list[dict]) -> str:
     if not records:
         return ""
-    start = records[0]["mb_used"]
-    end = records[-1]["mb_used"]
-    peak = max(r["mb_used"] for r in records)
+    start = records[0]["gb_used"]
+    end = records[-1]["gb_used"]
+    peak = max(r["gb_used"] for r in records)
     growth = end - start
     return (
-        f"[probe] Memory growth: start={start:.0f}MB end={end:.0f}MB "
-        f"delta={growth:.0f}MB peak={peak:.0f}MB epochs={len(records)}"
+        f"[probe] Memory growth: start={start:.2f}GB end={end:.2f}GB "
+        f"delta={growth:.2f}GB peak={peak:.2f}GB stages={len(records)}"
     )
 
 
@@ -203,6 +226,9 @@ def probe(
             last_success = (real, text)
         else:
             last_failure = (real, text)
+        last_stage = parse_last_stage(text)
+        if last_stage:
+            print(f"[probe] Last reached stage: {last_stage}")
         mem_records = quantify_memory_growth(parse_epoch_memory(text))
         if mem_records:
             summary = format_memory_summary(mem_records)
@@ -395,7 +421,7 @@ python -m skyclean.ml.oom_probe \
   --epochs 10 \
   --min-realisations 3 \
   --max-realisations 4 \
-  --batch-sizes 2 \
+  --batch-sizes 1 \
   --chs-set 1,16,32,32,64 \
   --log-dir skyclean/data/ML/oom_logs \
   --mode train \
