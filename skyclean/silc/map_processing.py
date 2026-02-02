@@ -137,7 +137,7 @@ class ProcessMaps():
                         )
                     noise_realisation = int(np.random.choice(sorted(set(available))))
                     filepath = self.file_templates[comp].format(
-                        frequency=frequency, realisation=noise_realisation
+                        frequency=frequency, realisation=realisation
                     )
                 else:
                     filepath = self.file_templates[comp].format(
