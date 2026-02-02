@@ -186,7 +186,7 @@ class SILCTools():
         ells = np.arange(L, dtype=float)
 
         ell_min = int(L0_j_silc(j))
-        ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=False))
+        ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
 
         # Clip to available harmonic support 0..L-1
         ell_min = max(0, min(ell_min, L - 1))
@@ -321,7 +321,7 @@ class SILCTools():
         ell_data_max = L - 1
 
         ell_min_bank = int(L0_j_silc(j))
-        ell_max_bank = int(wav_j_bandlimit_silc(L, j, multiresolution=False))
+        ell_max_bank = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
 
         if ell_min_bank > ell_data_max:
             return 0.0
@@ -533,7 +533,7 @@ class SILCTools():
             f_sky_eff_hp = float(info.get("f_sky_eff_hp", float("nan")))
 
             if int(scale) == 0:
-                Ls = scal_bandlimit_silc(L, multiresolution=False)
+                Ls = scal_bandlimit_silc(L, multiresolution=True)
                 tag = f"scal(ell=0..{Ls-1})"
 
                 gen = AxisymmetricGenerators(float(lam))
@@ -547,7 +547,7 @@ class SILCTools():
             else:
                 j = int(scale) - 1
                 ell_min = int(L0_j_silc(j))
-                ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=False))
+                ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
                 tag = f"wav(j={j}, ell={ell_min}..{ell_max})"
 
                 ells = np.arange(int(L), dtype=int)
