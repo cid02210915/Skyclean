@@ -105,8 +105,8 @@ class HarmonicWindows:
         self.J = int(j_max_silc(self.L, lam=self.lam))
 
     def scaling(self):
-        # Φ_{ℓ0} = sqrt((2ℓ+1)/(8π**2)) * η_λ(ℓ / λ^{J0})
-        return np.sqrt((2.0*self.ells + 1.0)/(8.0*np.pi**2)) * \
+        # Φ_{ℓ0} = sqrt((2ℓ+1)/(4π)) * η_λ(ℓ / λ^{J0})
+        return np.sqrt((2.0*self.ells + 1.0)/(4.0*np.pi)) * \
                self.g.eta(self.ells / (self.lam**self.J0))
 
     def wavelet(self, j):
@@ -385,9 +385,9 @@ class SimpleHarmonicWindows:
         m = phi.max()
         if m > 0:
             phi = phi
-        return phi
+        return np.sqrt((2.0*self.ells + 1.0)/(4.0*np.pi)) * phi
 
-    def scaling_band(self, truncate=True):
+    def scaling_band(self, truncate=False):
         """
         Scaling window, optionally truncated to [0, 64]
         like the 'Scal.' row in Table 1.
@@ -400,7 +400,6 @@ class SimpleHarmonicWindows:
         return phi
 
     # ---------- wavelets (kappa) ----------
-
     def wavelet_raw(self, j):
         ell_peak = self.ell_peaks[j]
         gen      = self.g_per_j[j]
@@ -411,7 +410,7 @@ class SimpleHarmonicWindows:
         m = psi.max()
         if m > 0:
             psi = psi
-        return psi
+        return np.sqrt((2.0*self.ells + 1.0)/(8.0*np.pi**2)) * psi
 
     def band_edges(self, j):
         ell_peak = float(self.ell_peaks[j])
@@ -434,7 +433,7 @@ class SimpleHarmonicWindows:
     
         return int(ell_min), int(ell_peak), int(ell_max)
 
-    def wavelet_band(self, j, truncate=True):
+    def wavelet_band(self, j, truncate=False):
         psi = self.wavelet_raw(j)
         if truncate:
             ell_min, ell_peak, ell_max = self.band_edges(j)
@@ -443,7 +442,7 @@ class SimpleHarmonicWindows:
         return psi
 
     # ---------- plotting helper ----------
-    def plot_all_wavelets(self, truncate=True):
+    def plot_all_wavelets(self, truncate=False):
         """
         Plot all bands j on one figure.
         Set truncate=False to see the raw κ-wavelets.
@@ -467,7 +466,7 @@ class SimpleHarmonicWindows:
             plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
     
         plt.xlim(0, self.L - 1)
-        plt.ylim(0, 1.1)
+        #plt.ylim(0, 1.1)
         plt.xlabel(r"$\ell$")
         plt.ylabel(r"$\Psi_{\ell j}$")
         plt.grid(True, alpha=0.3)
@@ -479,7 +478,7 @@ class SimpleHarmonicWindows:
         plt.tight_layout()
         plt.show()
 
-    def plot_scaling_and_wavelets(self, truncate=True):
+    def plot_scaling_and_wavelets(self, truncate=False):
          """
          Plot scaling + all wavelet bands on one figure.
          Legend on the right, larger axis/legend fonts.
@@ -516,9 +515,9 @@ class SimpleHarmonicWindows:
              plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
              plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
      
-         #plt.xlim(0, self.L - 1)
-         plt.ylim(0, 1.1)
-     
+         plt.xlim(0, self.L - 1)
+         #plt.ylim(0, 1.1)
+
          plt.xlabel(r"$\ell$", fontsize=axis_label_size)
          plt.ylabel("window", fontsize=axis_label_size)
          plt.xticks(fontsize=tick_size)
@@ -533,11 +532,9 @@ class SimpleHarmonicWindows:
              fontsize=legend_size,
              frameon=False
          )
-     
          plt.tight_layout()
          plt.show()
-
-
+         
     @staticmethod
     def build_s2wav_filters(
         L: int,
@@ -565,7 +562,6 @@ class SimpleHarmonicWindows:
         ).astype(np.float64)  # (J,L)
         
         #print("max |kappa_jl[j>=3, ell<=255]| =", np.max(np.abs(kappa_jl[3:, :256])))
-    
         scal_l = hw.scaling_band(truncate=truncate).astype(np.float64)  # (L,)
     
         # ============================================================
@@ -579,6 +575,7 @@ class SimpleHarmonicWindows:
         w_wav  = (8.0 * np.pi**2) / twoell1
     
         denom = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
+        print("min/max over ell (before norm):", np.min(denom), np.max(denom))
     
         alpha = np.ones_like(denom)
         mask = denom > 0
@@ -595,7 +592,32 @@ class SimpleHarmonicWindows:
                 print(f"ell={ell:4d}  value={denom_post[ell]:.6e}")
         print("min/max over ell with denom>0:", np.nanmin(denom_post[mask]), np.nanmax(denom_post[mask]))
         print("===================================\n")
-    
+
+        S = denom_post            # this is admissibility curve
+        ells = np.arange(L)
+
+        plt.figure(figsize=(7,4))
+        plt.plot(ells, S)
+        plt.axhline(1.0, linestyle="--")
+        plt.xlabel(r"$\ell$")
+        plt.ylabel(r"$S(\ell)$")
+        plt.title(f"Admissibility check up to L-1 (L={L})")
+        plt.grid(alpha=0.4)
+        plt.tight_layout()
+        plt.show()
+
+        # (optional) zoom near bandlimit, but still auto with L
+        k = min(50, L)  # show last k multipoles
+        plt.figure(figsize=(7,4))
+        plt.plot(ells[-k:], S[-k:], marker="o", markersize=3, linewidth=1)
+        plt.axhline(1.0, linestyle="--")
+        plt.xlabel(r"$\ell$")
+        plt.ylabel(r"$S(\ell)$")
+        plt.title(f"Admissibility tail (last {k} ells), L={L}")
+        plt.grid(alpha=0.4)
+        plt.tight_layout()
+        plt.show()
+
         # ---- pack into s2wav expected n-grid: (J, L, 2L-1), n=0 at mid ----
         M = 2 * L - 1
         mid = L - 1
@@ -604,3 +626,4 @@ class SimpleHarmonicWindows:
         wav_jln[:, :, mid] = kappa_jl.astype(np.complex128)
     
         return jnp.array(wav_jln), jnp.array(scal_l.astype(np.complex128))
+    

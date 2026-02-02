@@ -91,26 +91,25 @@ ELL_MAX = np.array(
     dtype=int,
 )
 
+ELL_PEAK = np.array(
+            [64, 128, 256, 512, 705, 917,
+             1192, 1550, 2015, 2539, 3047, 3600],
+             dtype=int,
+)
+
 
 # ----------------------------------------------------------------------
 # j_max: how many wavelet bands to use
 # ----------------------------------------------------------------------
-
 def j_max_silc(L: int, lam: float = 2.0) -> int:
     """
-    Custom maximum wavelet scale index j_max for the SILC filter bank.
-
-    Rule: include all bands whose LOWER edge ell_min[j] is below the
-    global harmonic band-limit L, so that every multipole ell < L is
-    covered by at least one filter.
-
-    The parameter lam is kept only for API compatibility and ignored.
+    Include every band whose support intersects the valid ell range [0, L-1].
+    I.e. keep bands with ell_min <= L-1.
     """
-    valid = np.where(ELL_MIN < L)[0]
+    valid = np.where(ELL_MIN < (L-1))[0]
     if valid.size == 0:
         raise ValueError("Band-limit L is too small for this filter bank.")
     return int(valid[-1])
-
 
 # ----------------------------------------------------------------------
 # scal_bandlimit: harmonic support of the scaling function
@@ -131,7 +130,7 @@ def scal_bandlimit_silc(
 
         L_s = min(64 + 1, L) = min(65, L)
 
-    when multiresolution=True.  For multiresolution=False we keep the
+    when multiresolution=True.  For multiresolution=True we keep the
     original behaviour (full band-limit L).
     """
     if multiresolution:
@@ -161,7 +160,7 @@ def wav_j_bandlimit_silc(
 
     if j < 0 or j >= len(ELL_MAX):
         raise IndexError(f"j={j} out of range for ELL_MAX")
-    return int(min(ELL_MAX[j], L))
+    return int(min(ELL_MAX[j]+1, L))
 
 
 def L0_j_silc(j: int, lam: float = 2.0) -> int:
