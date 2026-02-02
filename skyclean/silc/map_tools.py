@@ -398,7 +398,6 @@ class MWTools():
         return wavelet_coeffs, scaling_coeffs  
     '''
 
-
     @staticmethod
     def wavelet_transform_from_map(
         mw_map: jnp.ndarray,
@@ -481,102 +480,129 @@ class MWTools():
     
     
     @staticmethod
-    def wavelet_transform_from_alm(mw_alm: jnp.ndarray, L: int, N_directions: int, lam: float):
-        """
-        Performs a wavelet transform on MW alm using the S2WAV library.
-
-        Parameters:
-            mw_alm (jnp.ndarray): The input MW alm to be transformed.
-            L (int): Maximum multipole moment for the wavelet transform; lmax+1.
-            N_directions (int): Number of directions for the wavelet transform.
-            lam (float, optional): Wavelet parameter, default is 2.0.
-
-        Returns:
-            tuple: A tuple containing the wavelet coefficients and scaling coefficients.
-        """
-        #j_filter = filters.filters_directional_vectorised(L, N_directions, lam = lam)
-        j_filter = build_axisym_filter_bank(L, lam=lam)
-
-        wavelet_coeffs, scaling_coeffs = s2wav.flm_to_analysis(
-            mw_alm,
-            N       = N_directions,
-            L       = L,
-            lam     = lam,
-            filters = j_filter,
-            reality = True,
-        )
-        scaling_coeffs = np.expand_dims(scaling_coeffs, axis=0)  # Ensure scaling coefficients are in the same format as wavelet coefficients
-        scaling_coeffs = np.repeat(scaling_coeffs[np.newaxis, ...], 2*N_directions-1, axis=0)   
-        wavelet_coeffs.insert(0, scaling_coeffs) #include scaling coefficients at the first index
-        return wavelet_coeffs, scaling_coeffs
-
-
-    @staticmethod
     def wavelet_to_mw_alm(
-        wavelet_coeffs,
+        wavelet_coeffs,                # single band array (or list, see below)
         L: int,
         N_directions: int,
-        lam: float,
-        reality: bool = False,
+        lam: float,                    # kept for API symmetry; not used (lam_safe used instead)
+        reality: bool = True,          # inverse_wavelet_transform uses reality=True
         band_index: int | None = None,
+        template_wavelet_coeffs: list | None = None,  # OPTIONAL but recommended for exact shapes
+        debug: bool = False,
     ):
         """
-        Minimal version — accepts only a single wavelet band (not a list).
-        Reconstructs MW alm for that band by zeroing all others.
-        """
-        
-        # 1) Build filter bank
-        j_filter = filters.filters_directional_vectorised(L, N_directions, J_min=0, lam=float(lam))
-        #j_filter = build_axisym_filter_bank(L, lam=lam)
-        J = len(j_filter[0])  # number of expected wavelet bands
-        #print ("number of wavelet bands J:", J)
+        Consistent with inverse_wavelet_transform:
+          - uses SimpleHarmonicWindows.build_s2wav_filters with ell_peaks/lam_list
+          - uses lam_safe = max(lam_list)
+          - calls s2wav.synthesis(... sampling="mw", spin=0, reality=True, filters=(wav_jln, scal_l))
 
-        # --- Must have band_index if passing one band ---
+        Input:
+          - wavelet_coeffs: a SINGLE wavelet band array (directional: (N, Lj, 2Lj-1) or axisym: (Lj, 2Lj-1))
+          - band_index: which j (0-based) this band corresponds to in wav_jln
+          - template_wavelet_coeffs (optional): full coefficient list from a real forward transform
+            [f_scal_tiled, wav0, wav1, ...]. If provided, we create zero arrays with *exact* expected shapes.
+        """
+
         if band_index is None:
             raise ValueError("Must specify band_index (0-based) when passing a single wavelet band.")
 
-        # 2) Prepare the single wavelet band
+        # ---- same ell_peaks / lam_list as inverse_wavelet_transform ----
+        ell_peaks = [64, 128, 256, 512, 705, 917,
+                     1192, 1550, 2015, 2539, 3047, 3600]
+        lam_list  = [2.0,  2.0,  2.0, 1.377,
+                     1.3,  1.3,  1.3, 1.3,
+                     1.26005, 1.2001, 1.2, 1.1815]
+
+        wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(L, ell_peaks, lam_list)
+        filters = (wav_jln, scal_l)
+        lam_safe = float(np.max(lam_list))
+
+        # Jplus1 = number of wavelet bands implied by the filterbank
+        Jplus1 = int(np.asarray(wav_jln).shape[0])
+
+        if not (0 <= int(band_index) < Jplus1):
+            raise ValueError(f"band_index={band_index} out of range; filters imply J+1={Jplus1}")
+
+        # ---- prepare the passed band ----
         w_band = jnp.array(wavelet_coeffs)
 
-        # Axisymmetric (L, 2L-1) → add dir axis for N=1
-        if w_band.ndim == 2 and N_directions == 1:
-            assert w_band.shape == (L, 2 * L - 1), f"band shape {w_band.shape} != (L, 2L-1)"
+        # axisymmetric: (Lj, 2Lj-1) -> (1, Lj, 2Lj-1)
+        if w_band.ndim == 2:
+            if N_directions != 1:
+                raise ValueError(f"Got 2D band (axisymmetric), but N_directions={N_directions} != 1")
             w_band = w_band[jnp.newaxis, ...]
+        elif w_band.ndim == 3:
+            if w_band.shape[0] != N_directions:
+                raise ValueError(f"Directional band first axis must be N={N_directions}, got {w_band.shape[0]}")
         else:
-            # Directional case sanity check
-            assert w_band.shape[1:] == (L, 2 * L - 1), f"band shape {w_band.shape} incompatible with L={L}"
+            raise ValueError(f"wavelet_coeffs must be 2D or 3D, got ndim={w_band.ndim}")
 
-        # 3) Create 2D scaling (low-pass)
-        scaling = jnp.zeros((L, 2 * L - 1), dtype=w_band.dtype)
-        #print("scaling shape:", scaling.shape)
+        # ---- build full wav_coeffs list with correct shapes ----
+        if template_wavelet_coeffs is not None:
+            # template format should match inverse: [f_scal_tiled, wav0, wav1, ...]
+            if len(template_wavelet_coeffs) != (1 + Jplus1):
+                raise ValueError(
+                    f"template_wavelet_coeffs length must be 1+Jplus1={1+Jplus1}, got {len(template_wavelet_coeffs)}"
+                )
 
-        # 4) Build exactly J bands (others zero)
-        bands = [jnp.zeros_like(w_band) for _ in range(J)]
-        bands[band_index] = w_band                   
-        #print("band shape:", w_band.shape)      
-        #print("length of bands:", len(bands))
+            f_scal_tiled = jnp.zeros_like(jnp.array(template_wavelet_coeffs[0]))
 
-        # 5) Reconstruct MW map
-        f_mw = s2wav.synthesis(
-            bands,
-            f_scal=scaling,
+            wav_coeffs = []
+            for j in range(Jplus1):
+                tmpl = jnp.array(template_wavelet_coeffs[1 + j])
+                if j == int(band_index):
+                    if w_band.shape != tmpl.shape:
+                        raise ValueError(
+                            f"Your band shape {tuple(w_band.shape)} != template shape {tuple(tmpl.shape)} for j={j}"
+                        )
+                    wav_coeffs.append(w_band)
+                else:
+                    wav_coeffs.append(jnp.zeros_like(tmpl))
+
+        else:
+            # Fallback: assume all wavelet bands share the same shape as the provided band.
+            # This is OK for "minimal" use but not guaranteed if pipeline uses true multires shapes.
+            wav_coeffs = [jnp.zeros_like(w_band) for _ in range(Jplus1)]
+            wav_coeffs[int(band_index)] = w_band
+
+            # scaling tile: make something compatible-looking for synthesis
+            # (inverse passes f_scal=f_scal_tiled and expects tiled scaling)
+            f_scal_tiled = jnp.zeros((N_directions, L, 2 * L - 1), dtype=w_band.dtype)
+
+        if debug:
+
+            print("\n[DEBUG wavelet_to_mw_alm] L =", L, "N =", N_directions, "lam_safe =", lam_safe)
+            print("[DEBUG wavelet_to_mw_alm] wav_jln shape:", np.asarray(wav_jln).shape)
+            print("[DEBUG wavelet_to_mw_alm] scal_l shape:", np.asarray(scal_l).shape)
+            print("[DEBUG wavelet_to_mw_alm] Jplus1 =", Jplus1, "band_index =", int(band_index))
+            print("[DEBUG wavelet_to_mw_alm] f_scal_tiled shape:", np.asarray(f_scal_tiled).shape)
+            print("[DEBUG wavelet_to_mw_alm] wav_coeffs len:", len(wav_coeffs))
+            print("[DEBUG wavelet_to_mw_alm] selected band shape:", tuple(w_band.shape))
+
+        # ---- synthesis: consistent with inverse_wavelet_transform ----
+        mw_map = s2wav.synthesis(
+            wav_coeffs,
+            f_scal=f_scal_tiled,
             L=L,
-            lam=lam,
-            filters=j_filter,
-            reality=reality,
             N=N_directions,
+            lam=lam_safe,
+            spin=0,
+            sampling="mw",
+            nside=None,
+            reality=True,        
+            filters=filters,
         )
 
-        # 6) Map → alm (MW)
-        mw_alm = s2fft.forward(f_mw, L=L, reality=reality)
+        # MW map -> MW alm
+        mw_alm = s2fft.forward(mw_map, L=L, reality=True)
 
         # 7) (Optional) per-band spectra plot (kept as-is but using the normalized 'bands')
         ell_all, Dl_all = [], []
-        for j in range(J):
-            sc0 = jnp.zeros_like(scaling)
-            bands_j = [bands[k] if k == j else jnp.zeros_like(bands[k]) for k in range(J)]
+        for j in range(Jplus1):
+            sc0 = jnp.zeros_like(f_scal_tiled)
+            bands_j = [wav_coeffs[k] if k == j else jnp.zeros_like(wav_coeffs[k]) for k in range(Jplus1)]
             f_band = s2wav.synthesis(
-                bands_j, f_scal=sc0, L=L, lam=lam, filters=j_filter, reality=reality, N=N_directions
+                bands_j, f_scal=sc0, L=L, lam=lam, filters=filters, reality=reality, N=N_directions
             )
             alm_band = s2fft.forward(f_band, L=L, reality=reality)
             ell, Cl = PowerSpectrumTT.from_mw_alm(alm_band)
@@ -693,7 +719,6 @@ class MWTools():
             reality=True,     
             filters=filters,
         )
-
         return mw_map
     
     '''
@@ -823,8 +848,8 @@ class MWTools():
             #plt.xlim(0,2)            #check the removal of monopole and dipole
             plt.grid(ls=':')
         plt.show()
-
     '''
+
     @staticmethod
     def visualise_axisym_wavelets(
         L: int,
