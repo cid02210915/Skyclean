@@ -115,8 +115,7 @@ class CMBFreeILC():
             #ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(realisation=realisation, lmax=lmax, lam=lam))
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
-            #cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
-            cmb_map_hp = hp.read_map(self.file_templates["cmb"].format(realisation=realisation), dtype=np.float32)
+            cmb_map_hp = hp.read_map(self.file_templates["processed_cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
             cmb_map_mw = SamplingConverters.hp_map_2_mw_map(cmb_map_hp, lmax) # highly expensive? involves s2fft.forwards.
             cmb_map_mwss = SamplingConverters.mw_map_2_mwss_map(cmb_map_mw, L=L)
             # load cfn maps across frequencies and convert to MW sampling
@@ -202,6 +201,7 @@ class CMBFreeILC():
                 F, R = self.create_random_mwss_maps(realisation)
                 yield F, R
             else:
+                self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
                 F, R, _ = self.create_residual_mwss_maps(realisation)
                 # Apply signed-log transform + z-score normalization + cast
                 F = self.transform(F).astype(np.float32)
