@@ -143,7 +143,7 @@ class DownloadData():
         # Download foregrounds, which have only one realisation.
         print("Downloading foreground components...")
         for component in self.components:
-            if component == "cmb" or component == "noise":
+            if component == "cmb" or component == "noise" or component == "extra_feature":
                 continue
             else:
                 for frequency in self.frequencies:
