@@ -169,8 +169,10 @@ class SILCTools():
         ell_peak: list[float] | np.ndarray,  
         j: int,
         Nfreq: int,
+        lmax: int, 
         Ndeproj: int = 0,
-        b_tol: float = 0.01
+        b_tol: float = 0.01,
+
     ) -> float:
         """
         Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for WAVELET band j.
@@ -188,9 +190,11 @@ class SILCTools():
         ell_min = int(L0_j_silc(j))
         ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
 
-        # Clip to available harmonic support 0..L-1
-        ell_min = max(0, min(ell_min, L - 1))
-        ell_max = max(0, min(ell_max, L - 1))
+        lmax = int(lmax)
+        ell_data_max = min(L - 1, lmax)
+
+        ell_min = max(0, min(ell_min, ell_data_max))
+        ell_max = max(0, min(ell_max, ell_data_max))
         if ell_min > ell_max:
             return 0.0
 
@@ -203,6 +207,7 @@ class SILCTools():
         h = gen.kappa(x)
 
         mask = (ells >= ell_min) & (ells <= ell_max)
+        print(f"[fwhm_wavelet] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
         h = h * mask
 
         # Eq (42)
@@ -215,13 +220,13 @@ class SILCTools():
             fwhm_arcmin_dbg = SILCTools.fwhm_from_sigma2(sigma2_dbg) * (180.0/np.pi) * 60.0
         else:
             fwhm_arcmin_dbg = float("inf")
-
+        '''
         print(
             f"[band diag] L={L} j={j} "
             f"ell_min={ell_min} ell_max={ell_max} width={width} "
             f"S={S:.3e} fwhm~{fwhm_arcmin_dbg:.2f} arcmin"
         )
-
+        '''
         # Eq (43)
         A = abs(1 + int(Ndeproj) - int(Nfreq))
         sigma2 = 0.0 if S <= 0.0 else 2.0 * (A / (float(b_tol) * S))
@@ -304,6 +309,7 @@ class SILCTools():
         lam_list: list[float],
         band_j: int,
         fwhm_rad: float,
+        lmax: int,
         nside_nmodes: int = 2048
     ) -> float:
         """
@@ -318,7 +324,7 @@ class SILCTools():
             raise ValueError(f"band_j={j} out of range for lam_list (len={len(lam_list)})")
 
         ells = np.arange(L, dtype=float)
-        ell_data_max = L - 1
+        ell_data_max = min(L - 1, int(lmax))
 
         ell_min_bank = int(L0_j_silc(j))
         ell_max_bank = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
@@ -335,10 +341,11 @@ class SILCTools():
         gen = AxisymmetricGenerators(lam_j)
 
         # Dimensionless argument places the bump in the band; then we hard-mask to bank support.
-        x = ells / float(ell_peak[j]) if ell_max > 0 else ells
+        x = ells / float(ell_peak[j]) if ell_peak[j] > 0 else ells
         h = gen.kappa(x)
 
         mask = (ells >= ell_min) & (ells <= ell_max)
+        print(f"[n_modes_wavelet_band] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
         h = h * mask
 
         S = float(np.sum((2.0 * ells + 1.0) * (h * h)))
@@ -360,6 +367,7 @@ class SILCTools():
         return_info: bool = False,
         use_paper_fwhm: bool = False,  # kept for API compatibility; forced True below
         lam: float | None = None,
+        lmax: int,
         band_j: int | None = None,
         J_scal: int | None = None,   # kept for API compatibility, ignored for SILC
         scaling: bool = False,
@@ -385,6 +393,7 @@ class SILCTools():
             raise ValueError("Paper mode requires lam and Nfreq.")
 
         L = int(MW_Map1.shape[0])
+        lmax = int(lmax)
 
         # --- ensure MW sampling width=2L-1 only if needed ---
         exp = 2 * L - 1
@@ -421,8 +430,16 @@ class SILCTools():
             if band_j is None:
                 raise ValueError("Paper wavelet mode requires band_j.")
             fwhm_rad = SILCTools.fwhm_rad_wavelet(
-                L, lam_list, ell_peak, int(band_j), int(Nfreq), int(Ndeproj), float(b_tol)
+                L,
+                lam_list,
+                ell_peak,
+                int(band_j),
+                int(Nfreq),
+                lmax=int(lmax),
+                Ndeproj=int(Ndeproj),
+                b_tol=float(b_tol),
             )
+
             info["band"] = "wavelet"
             info["band_j"] = int(band_j)
 
@@ -494,7 +511,7 @@ class SILCTools():
         PAPER-ONLY:
           task: (i, fq, frequencies, scale, doubled_MW_wav_c_j, method, lam, Ndeproj, b_tol)
         """
-        i, fq, frequencies, scale, doubled_MW_wav_c_j, method, lam, Ndeproj, b_tol = task
+        i, fq, frequencies, scale, doubled_MW_wav_c_j, method, lam, lmax, Ndeproj, b_tol = task
 
         key_i  = (frequencies[i], scale)
         key_fq = (frequencies[fq], scale)
@@ -517,6 +534,7 @@ class SILCTools():
             return_info=True,
             use_paper_fwhm=True,
             lam=float(lam),
+            lmax=int(lmax), 
             Nfreq=len(frequencies),
             Ndeproj=int(Ndeproj),
             b_tol=float(b_tol),
@@ -534,36 +552,50 @@ class SILCTools():
 
             if int(scale) == 0:
                 Ls = scal_bandlimit_silc(L, multiresolution=True)
-                tag = f"scal(ell=0..{Ls-1})"
-
+                ell_max_clip = min(int(Ls) - 1, int(L) - 1)
+                tag = f"scal(ell=0..{ell_max_clip})"
+            
                 gen = AxisymmetricGenerators(float(lam))
                 ells = np.arange(int(L), dtype=float)
                 t = ells / 64.0
                 h = gen.eta(t)
-                h *= (ells <= float(min(64, L-1)))
-                N_modes_full = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-
+                h *= (ells <= float(min(64, L - 1)))
+            
+                N_modes_full  = float(np.sum((2.0 * ells + 1.0) * (h * h)))
                 N_modes_local = SILCTools.n_modes_scaling_band(L, float(lam), 0, fwhm_rad)
+            
             else:
                 j = int(scale) - 1
-                ell_min = int(L0_j_silc(j))
-                ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
-                tag = f"wav(j={j}, ell={ell_min}..{ell_max})"
-
-                ells = np.arange(int(L), dtype=int)
-                lam_j = float(lam_list[j])
-                gen = AxisymmetricGenerators(lam_j)
-
-                ell_peak_j = float(ell_peak[j])
-                x = ells / ell_peak_j if ell_peak_j > 0 else ells
-                h = gen.kappa(x)
-    
-                mask = (ells >= max(0, min(ell_min, L - 1))) & (ells <= max(0, min(ell_max, L - 1)))
-                h = h * mask
-                N_modes_full = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-    
-                N_modes_local = SILCTools.n_modes_wavelet_band(L, lam_list, j, fwhm_rad)
-
+            
+                # --- theoretical bank limits ---
+                ell_min_theory = int(L0_j_silc(j))
+                ell_max_theory = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
+            
+                # --- CLIP to what exists in this run (0..L-1) ---
+                ell_min_clip = max(0, min(ell_min_theory, L - 1))
+                ell_max_clip = max(0, min(ell_max_theory, L - 1))
+            
+                if ell_min_clip > ell_max_clip:
+                    tag = f"wav(j={j}, EMPTY in this run)"
+                    N_modes_full  = 0.0
+                    N_modes_local = 0.0
+                else:
+                    tag = f"wav(j={j}, ell={ell_min_clip}..{ell_max_clip})"
+            
+                    ells = np.arange(int(L), dtype=float)
+                    lam_j = float(lam_list[j])
+                    gen = AxisymmetricGenerators(lam_j)
+            
+                    ell_peak_j = float(ell_peak[j])
+                    x = ells / ell_peak_j if ell_peak_j > 0 else ells
+                    h = gen.kappa(x)
+            
+                    mask = (ells >= float(ell_min_clip)) & (ells <= float(ell_max_clip))
+                    h *= mask
+            
+                    N_modes_full  = float(np.sum((2.0 * ells + 1.0) * (h * h)))
+                    N_modes_local = SILCTools.n_modes_wavelet_band(L, lam_list, j, fwhm_rad, lmax=int(lmax))
+            
             print(
                 f"[locality] {tag}  "
                 f"FWHM={fwhm_arcmin:.3f} arcmin  "
@@ -579,7 +611,7 @@ class SILCTools():
     @staticmethod
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
                                     realisation: int, method: str, path_template: str, *,
-                                    component: str = "cfn", lmax: int = 64, lam: float | None = None,
+                                    component: str = "cfn", lmax: int, lam: float | None = None,
                                     nsamp: float = 1200, overwrite: bool = False,
                                     Ndeproj: int = 0, b_tol: float = 0.01,):
         
@@ -621,7 +653,7 @@ class SILCTools():
         full_array = np.zeros((total_frequency, total_frequency, n_rows, n_cols))
 
         tasks = [
-            (i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method, lam, int(Ndeproj), float(b_tol))
+            (i, fq, norm_freqs, scale_i, doubled_MW_wav_c_j, method, lam, lmax, int(Ndeproj), float(b_tol))
             for i in range(total_frequency)
             for fq in range(i, total_frequency)
         ]
@@ -719,9 +751,11 @@ class SILCTools():
         identity_vector = np.ones(subdim2, dtype=float)
         singular_matrices_location = []
         singular_matrices = []
+        
         for i in range(dim1):
             for j in range(dim2):
-                det = np.linalg.det(R_Pix[i, j])
+                det = np.linalg.det(R_Pix[i, j] ) 
+
                 if det == 0:
                     zeros = np.zeros((subdim1))
                     singular_matrices_location.append((i,j))
