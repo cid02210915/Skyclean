@@ -19,6 +19,7 @@ class FileTemplates():
             "cmb_realisations": os.path.join(directory, "CMB_realisations/"),
             # processed maps
             "cfn": os.path.join(directory, "CFN_realisations"),
+            "cfne": os.path.join(directory, "CFN_realisations"),
             "processed_maps": os.path.join(directory, "processed_maps"),
             # wavelet transforms
             "wavelet_coeffs": os.path.join(directory, "wavelet_transforms/wavelet_coeffs"),
@@ -38,7 +39,8 @@ class FileTemplates():
             "ml_maps": os.path.join(directory, "ML/maps"),
             "ml_models": os.path.join(directory, "ML/models"),
             "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps"),
-            # ML maps for testing
+            "ilc_improved_spec": os.path.join(directory, "SILC/ilc_improved_spec"),
+            # ML maps (randomly generated) for monitoring the pipeline memory usage
             "ml_test_maps": os.path.join(directory, "ML/test_maps"),
         }
 
@@ -74,6 +76,7 @@ class FileTemplates():
         "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
         "processed_cib":   os.path.join(self.output_directories["processed_maps"], "processed_cib_f{frequency}_lmax{lmax}.npy"),
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
+        "cfne":            os.path.join(self.output_directories["cfne"],           "cfne_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
         # ---------------- wavelet transforms ----------------
         "wavelet_coeffs": os.path.join(
@@ -140,9 +143,8 @@ class FileTemplates():
 
         'ilc_improved': os.path.join(
             self.output_directories["ilc_improved_maps"], 
-            "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+            "{mode}_{extract_comp}_from-{component}_improved_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
-        # add mask/unmask option for ilc_improved
 
 
         # Optional: power spectrum
@@ -164,17 +166,16 @@ class FileTemplates():
 
         # Improved ILC power spectrum after ML
         'ilc_improved_spectrum': os.path.join(
-            self.output_directories["ilc_improved_maps"], 
-            "ilc_improved_power_spectrum_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+            self.output_directories["ilc_improved_spec"], 
+            "{mode}_{extract_comp}_from-{component}_improved_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
 
 
-        # ---------------- ML (left unchanged) ----------------
-        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}.npy"),
-        "ilc_improved_map": os.path.join(self.output_directories["ilc_improved_maps"], "ilc_improved_map_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
-        # ML test maps 
+        # ---------------- ML ----------------
+        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        # ML test maps (randomly generated) for memory check
         "test_foreground_estimate": os.path.join(self.output_directories["ml_test_maps"], "test_foreground_estimate_r{realisation:04d}_lmax{lmax}.npy"),
         "test_ilc_residual":       os.path.join(self.output_directories["ml_test_maps"], "test_ilc_residual_r{realisation:04d}_lmax{lmax}.npy"),
         "test_ilc_improved_map": os.path.join(self.output_directories["ml_test_maps"], "test_ilc_improved_map_r{realisation:04d}_lmax{lmax}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),

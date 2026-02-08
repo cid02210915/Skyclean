@@ -13,7 +13,7 @@ import sys
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
 
 import jax
-
+jax.config.update("jax_default_matmul_precision", "float32")
 
 print("available JAX GPU devices:", jax.devices("gpu")) # check available GPUs
 
@@ -115,17 +115,21 @@ def print_gpu_usage(stage_name: str, jax_device_id: int = 0):
 
 class Train: 
     def __init__(self,  extract_comp: str, component: str, frequencies: list, realisations: int, 
-                 lmax: int = 1024, N_directions: int = 1, lam: float = 2.0,
+                 lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, nsamp: int = 1200, constraint: bool = False, 
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0), 
                  directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = 'pixel', 
                  random_generator: bool = False):
         """
         Parameters:
+            component (str): components to pass through silc pipeline. Options: 'cfn', 'cfne'
+            extract_comp (str): component to be extract.
             frequencies (list): List of frequencies for the maps.
             realisations (int): Number of realisations to process.
             lmax (int): Maximum multipole for the wavelet transform.
             N_directions (int): Number of directions for the wavelet transform.
+            nsamp (int)
+            constraint (bool): Mode for the constrainted ILC method. 
             lam (float): lambda factor (scaling) for the wavelet transform.
             batch_size (int): Size of the batches for training.
             shuffle (bool): Whether to shuffle the dataset.
@@ -148,6 +152,7 @@ class Train:
         self.lmax = lmax
         self.N_directions = N_directions
         self.lam = lam
+        self.nsamp = nsamp
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.split = split
@@ -164,7 +169,8 @@ class Train:
             raise ValueError(f"Unsupported loss_tag={self.loss_tag!r}. Use 'pixel' or 'harmonic'.")
         self.random_generator = random_generator
 
-        self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, batch_size, shuffle, split, directory, random=random_generator)
+        self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, 
+                                  nsamp, constraint, batch_size, shuffle, split, directory, random=random_generator)
         
         # Create model directory for checkpoints
         files = FileTemplates(directory)  # Pass directory to FileTemplates
@@ -935,7 +941,7 @@ def main():
     parser.add_argument(
         '--frequencies',
         nargs='+',
-        default=["030", "100", "353"],
+        default=["030", "044", "070"],
         help='List of frequencies to process'
     )
     parser.add_argument(
@@ -961,6 +967,18 @@ def main():
         type=float,
         default=2.0,
         help='Lambda factor (scaling) for the wavelet transform'
+    )
+    parser.add_argument(
+        '--nsamp',
+        type=int,
+        default=1200,
+        help='n sampling'
+    )
+    parser.add_argument(
+        '--constraint',
+        type=bool,
+        default=False,
+        help='Mode for the constrainted ILC method'
     )
     parser.add_argument(
         '--batch-size',
@@ -1029,7 +1047,13 @@ def main():
         choices=['pixel', 'harmonic'],
         help='Loss to use: pixel or harmonic'
     )
-    
+    parser.add_argument(
+        '--random',
+        type=bool,
+        default='False',
+        help='Generate test maps or not: True/False'
+    )
+        
     args = parser.parse_args()
 
     # Convert arguments to match Train class parameters
@@ -1043,6 +1067,8 @@ def main():
         lmax=args.lmax,
         N_directions=args.N_directions,
         lam=args.lam,
+        nsamp=args.nsamp,
+        constraint=args.constraint,
         batch_size=args.batch_size,
         shuffle=shuffle,
         split=args.split,
@@ -1054,6 +1080,7 @@ def main():
         directory=args.directory,
         resume_training=args.resume_training,
         loss_tag=args.loss_tag,
+        random_generator=args.random,
     )
     
     trainer.execute_training_procedure()

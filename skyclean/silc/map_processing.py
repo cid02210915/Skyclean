@@ -378,7 +378,10 @@ class ProcessMaps():
             i=0
             realisation += self.start_realisation  # Adjust for starting realisation
             for frequency in self.frequencies:
-                cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                if 'extra_feature' in self.components:
+                    cfn_output_path = self.file_templates["cfne"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                else:
+                    cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                 if os.path.exists(cfn_output_path) and self.overwrite == False:
                     print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                     continue

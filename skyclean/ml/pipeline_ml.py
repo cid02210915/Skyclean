@@ -79,6 +79,10 @@ def parse_args():
     parser.add_argument("--lmax", type=int, default=1023)
     parser.add_argument("--N-directions", type=int, default=1)
     parser.add_argument("--lam", type=float, default=2.0)
+    parser.add_argument("--nsamp", type=int, default=1200)
+
+    parser.add_argument("--constraint", action="store_true", help="Enable constraint")
+
 
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--no-shuffle", action="store_true")
@@ -100,7 +104,6 @@ def parse_args():
     # ----- inference controls -----
     parser.add_argument("--realisation-infer", type=int, default=0)
     parser.add_argument("--plot", action="store_true", default=False)
-    parser.add_argument("--nsamp", type=int, default=1200)
 
     parser.add_argument(
         "--model-dir",
@@ -127,6 +130,8 @@ def step_train(args) -> str:
         lmax=args.lmax,
         N_directions=args.N_directions,
         lam=args.lam,
+        nsamp=args.nsamp,
+        constraint=args.constraint,
         batch_size=args.batch_size,
         shuffle=shuffle,
         split=args.split,
@@ -140,7 +145,6 @@ def step_train(args) -> str:
         loss_tag=args.loss_tag,
         random_generator=args.random,
     )
-
     trainer.execute_training_procedure()
     return trainer.model_dir
 
@@ -161,6 +165,8 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         lmax=args.lmax,
         N_directions=args.N_directions,
         lam=args.lam,
+        nsamp=args.nsamp,
+        constraint=args.constraint,
         chs=args.chs,
         directory=args.directory,
         model_path=ckpt_dir,  # points directly to checkpoint_<epoch>
@@ -187,12 +193,20 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
         hp_map = SamplingConverters.mw_map_2_hp_map(cmb_improved, lmax=args.lmax)
         hp.mollview(hp_map, unit="K", cbar=True)
-        plt.title(f"Improved CMB (realisation {args.realisation_infer})")
+        if args.constraint == True:
+            mode="cILC"
+        else:
+            mode="ILC"
+        plt.title(f"Improved {mode} map\nlmax{args.lmax}, {args.extract_comp}, {args.frequencies}, r{args.realisation_infer}, lam{args.lam}, nsamp{args.nsamp})")
+        plt.tight_layout()
+        plt.savefig(f'{ckpt_dir}/ILC_improved.png', dpi=300)
         plt.show()
     
     print("Visualising power spectra...")
     visualiser = Visualise(
         inference = inference, 
+        extract_comp = args.extract_comp,
+        component = args.component,
         frequencies=args.frequencies,
         realisation=0,
         lmax=args.lmax,
@@ -216,7 +230,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         ilc_synth_over_processed_cmb=results['ilc_synth/processed_cmb'],
         ilc_improved_over_processed_cmb=results['ilc_improved/processed_cmb'],
     )
-
+    """
     fig, ax = plt.subplots(figsize=(8,6))
     data = np.load(f"{ckpt_dir}/component_ratio_spectra.npz")
     ax.plot(data["ell"], data["ilc_synth_over_processed_cmb"], label=f'ilc_synth / processed')
@@ -231,6 +245,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     fig.tight_layout()
     plt.savefig(f'{ckpt_dir}/spectrum.png', dpi=250)
     plt.close()
+    """
 
     return cmb_improved
 
@@ -269,6 +284,8 @@ def main():
             lmax=args.lmax,
             N_directions=args.N_directions,
             lam=args.lam,
+            nsamp=args.nsamp,
+            constraint=args.constraint,
             batch_size=args.batch_size,
             shuffle=shuffle,
             split=args.split,
@@ -299,4 +316,5 @@ if __name__ == "__main__":
 
 
 # Example usage:
-# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --frequencies 030 044 070 100 143 217 353 545 857 --realisations 3 --lmax 511 --lam 2.0 --batch-size 1 --epochs 3 --learning-rate 1e-3 --momentum 0.90 --directory /share/lustre/keir/Skyclean2026/Skyclean/skyclean/data/
+# 030 044 070 100 143 217 353 545 857
+# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfne" --frequencies 030 044 070 --realisations 100 --lmax 127 --N-directions 1 --lam 2.0 --batch-size 1 --nsamp 1200 --epochs 30 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --plot

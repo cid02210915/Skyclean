@@ -16,20 +16,24 @@ jax.config.update("jax_enable_x64", False)
 
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
+                 nsamp: int = 1200, constraint: bool = False, 
                  batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.2], directory: str = "data/", random: bool = False):
         """
         Parameters:
+            extract_comp (str): Component to be extracted. e.g. "cmb"
+            component (str): Maps with components before going to silc. e.g. "cfn", "cfne".
             frequencies (list): List of frequency channels for the maps.
             realisations (int): Number of realisations to process.
-            lmax (int): Maximum multipole for the wavelet transform.    
+            lmax (int): The maximum multipole for the wavelet transform.    
             N_directions (int): Number of directions for the wavelet transform.
+            lam (float): The lambda parameter for the wavelet transform.
+            nsamp (int)
+            constraint (bool): Mode for the constrainted ILC method. 
             batch_size (int): Size of the batches for training.
             split (list): List of train/validation/test split ratios.
             shuffle (bool): Whether to shuffle the dataset.
             directory (str): Directory where data is stored / saved to.
-            component (str): cfn.
-            extract_comp (str): cmb.
-            random (bool): Whether to create random maps for testing purposes.
+            random (bool): Whether to create random maps for testing purposes. True/False.
         """ 
         self.frequencies = frequencies
         self.n_channels_in = len(frequencies)
@@ -43,19 +47,19 @@ class CMBFreeILC():
         self.directory = directory
         self.component = component
         self.extract_comp = extract_comp
+        self.nsamp = nsamp
         self.random = random
+        if constraint == True:
+            self.mode = "con"
+        else: 
+            self.mode = "uncon"
 
         self.a = 1E-5
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
         self.download_templates = files.download_templates
-        # retrieve shapes
-        #ilc_map_temp = np.load(self.file_templates["ilc_synth"].format(
-        #    mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
-        #    realisation=0, lmax=self.lmax, lam = self.lam, nsamp='1200'))
-        #self.H = ilc_map_temp.shape[0]+1
-        #self.W = ilc_map_temp.shape[1]+1 # for MWSS sampling
+        # data shapes
         self.H = lmax + 2
         self.W = 2 * (lmax + 1) # for MWSS sampling
         self.produce_residuals()  # Create residual maps for all realisations
@@ -101,37 +105,36 @@ class CMBFreeILC():
         """
         H, W, lmax, lam = self.H, self.W, self.lmax, self.lam
         L = lmax + 1
-        frequencies = self.frequencies
-        if os.path.exists(self.file_templates["foreground_estimate"].format(realisation=realisation, lmax=lmax, lam=lam)) and os.path.exists(self.file_templates["ilc_residual"].format(realisation=realisation, lmax=lmax, lam=lam)):
-            foreground_estimate = np.load(self.file_templates["foreground_estimate"].format(realisation=realisation, lmax=lmax, lam=lam))
-            ilc_residual = np.load(self.file_templates["ilc_residual"].format(realisation=realisation, lmax=lmax, lam=lam))
-            ilc_map_mwss = np.load(self.file_templates["ilc_mwss"].format(realisation=realisation, lmax=lmax, lam=lam))
+        extract_comp, component, nsamp, mode = self.extract_comp, self.component, self.nsamp, self.mode
+        frequencies = '_'.join(self.frequencies)
+        if os.path.exists(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode)) and os.path.exists(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode)):
+            foreground_estimate = np.load(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode))
+            ilc_residual = np.load(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode))
+            ilc_map_mwss = np.load(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode))
         else:
             print(f"Creating residual maps for realisation {realisation}...")
             # load ilc (already in MW sampling)
             ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(
-            mode='uncon',extract_comp=self.extract_comp, component=self.component, frequencies="_".join(str(x) for x in self.frequencies), 
-            realisation=realisation, lmax=self.lmax, lam = self.lam, nsamp='1200'))
-            #ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(realisation=realisation, lmax=lmax, lam=lam))
+            extract_comp=extract_comp, mode=mode, component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp))
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
             cmb_map_hp = hp.read_map(self.file_templates["processed_cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
             cmb_map_mw = SamplingConverters.hp_map_2_mw_map(cmb_map_hp, lmax) # highly expensive? involves s2fft.forwards.
             cmb_map_mwss = SamplingConverters.mw_map_2_mwss_map(cmb_map_mw, L=L)
             # load cfn maps across frequencies and convert to MW sampling
-            cfn_maps_hp = [hp.read_map(self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=lmax), dtype=np.float32) for frequency in frequencies]
+            cfn_maps_hp = [hp.read_map(self.file_templates[component].format(frequency=frequency, realisation=realisation, lmax=lmax), dtype=np.float32) for frequency in self.frequencies]
             cfn_maps_mw = [SamplingConverters.hp_map_2_mw_map(cfn_map_hp, lmax) for cfn_map_hp in cfn_maps_hp]
             cfn_maps_mwss = [SamplingConverters.mw_map_2_mwss_map(cfn_map_mw, L=L) for cfn_map_mw in cfn_maps_mw]
             # create foreground estimate and ilc residual
             foreground_estimate = np.zeros((H, W, self.n_channels_in), dtype=np.float32)
             ilc_residual = np.zeros((H, W, 1), dtype=np.float32)
-            for i, _ in enumerate(frequencies):
+            for i, _ in enumerate(self.frequencies):
                 foreground_estimate[:, :, i] = cfn_maps_mwss[i] - ilc_map_mwss
                 ilc_residual[:, :, 0] = ilc_map_mwss - cmb_map_mwss
             # save the maps
-            np.save(self.file_templates["ilc_mwss"].format(realisation=realisation, lmax=lmax, lam=lam), ilc_map_mwss)
-            np.save(self.file_templates["foreground_estimate"].format(realisation=realisation, lmax=lmax, lam=lam), foreground_estimate)
-            np.save(self.file_templates["ilc_residual"].format(realisation=realisation, lmax=lmax, lam=lam), ilc_residual)
+            np.save(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode), ilc_map_mwss)
+            np.save(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode), foreground_estimate)
+            np.save(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode), ilc_residual)
         return foreground_estimate, ilc_residual, ilc_map_mwss
 
     def signed_log_transform(self, x: tf.Tensor):
@@ -145,6 +148,7 @@ class CMBFreeILC():
         Returns:
             tf.Tensor: Transformed and normalized tensor.
         """
+        self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
         # Apply signed-log transform
         signed_log_x = self.signed_log_transform(x)
         

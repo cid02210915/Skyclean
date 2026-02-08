@@ -691,8 +691,8 @@ def main():
     )
     parser.add_argument(
         '--nsamp',
-        type=float,
-        default=1200.0,
+        type=int,
+        default=1200,
         help="Number of Monte Carlo samples (nsamp) for constrained ILC."
     )
 

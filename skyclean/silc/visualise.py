@@ -11,8 +11,8 @@ from ..ml.inference import Inference
 
 
 class Visualise(): 
-    def __init__(self, inference: Inference, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
-                 rn: int = 30, batch_size: int = 32, epochs: int = 120, 
+    def __init__(self, inference: Inference, component: str, extract_comp: str, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
+                 rn: int = 30, N_directions: int = 1, constraint: bool = False, batch_size: int = 32, epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, nsamp: int = 1200, 
                  ):
         """
@@ -24,9 +24,12 @@ class Visualise():
             directory (str): Directory where data is stored / saved to.
         """
         self.inference = inference
+        self.component = component
+        self.extract_comp = extract_comp
         self.frequencies = frequencies
         self.realisation = realisation
         self.lmax = lmax
+        self.N_directions = N_directions
         self.directory = directory
         self.lam_list = lam_list
         self.lr = learning_rate
@@ -36,11 +39,13 @@ class Visualise():
         self.momentum = momentum
         self.chs = chs
         self.nsamp = nsamp
+        self.constraint = constraint
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
+        self.output_directories = files.output_directories
 
-        self.data_handler = CMBFreeILC('cmb', 'cfn', frequencies, rn, lmax, 1, lam_list[0], batch_size, False, [0.8, 0.2], directory)
+        self.data_handler = CMBFreeILC(extract_comp=extract_comp, component=component, frequencies=frequencies, realisations=rn, lmax=lmax, N_directions=N_directions, lam=lam_list[0], nsamp=nsamp, constraint=constraint, batch_size=batch_size, shuffle=False, split=[0.8, 0.2], directory=directory)
 
 
     def visualise_maps(self, comps: list):
@@ -249,21 +254,31 @@ class Visualise():
         # Create spectrum template key by joining component name with 'spectrum'
         spectrum_template_key = f"{component}_spectrum"
         
+        lmax = self.lmax
+
         # Check if the specific spectrum template exists, otherwise use a default path
         if spectrum_template_key in self.file_templates:
             if component == 'ilc_improved':
                 chs = "_".join(str(n) for n in self.chs)
+                if self.constraint == False:
+                    mode = "uncon"
+                else:
+                    mode = "con"
                 spectrum_path = self.file_templates[spectrum_template_key].format(
+                                        mode=mode,
+                                        extract_comp=self.extract_comp,
+                                        component=self.component,
                                         realisation=self.realisation, 
-                                        lmax=self.lmax,
+                                        frequencies="_".join(str(n) for n in self.frequencies),
+                                        lmax=lmax,
                                         lam=lam,
+                                        nsamp=self.nsamp,
                                         rn=self.rn,
                                         batch=self.batch_size,
                                         epochs=self.epochs,
                                         lr=self.lr,
                                         momentum=self.momentum,
-                                        chs=chs,
-                                        nsamp=self.nsamp,)
+                                        chs=chs,)
                                     # TO DO: add 'mask/unmask' for file naming
 
             else:
@@ -276,12 +291,12 @@ class Visualise():
             if component == 'ilc_improved':
                 chs = "_".join(str(n) for n in self.chs)
                 map_dir = os.path.dirname(map_path)
-                spectrum_filename = f"{component}_power_spectrum_r{self.realisation:04d}_lmax{self.lmax}_lam{lam}_rn{self.rn}_batch{self.batch_size}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
+                spectrum_filename = f"{component}_power_spectrum_r{self.realisation:04d}_lmax{lmax}_lam{lam}_rn{self.rn}_batch{self.batch_size}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
                 spectrum_path = os.path.join(map_dir, spectrum_filename)
             else:
                 # Fallback: create path in the same directory as the map
                 map_dir = os.path.dirname(map_path)
-                spectrum_filename = f"{component}_power_spectrum_r{self.realisation:04d}_lmax{self.lmax}_lam{lam}.npy"
+                spectrum_filename = f"{component}_power_spectrum_r{self.realisation:04d}_lmax{lmax}_lam{lam}.npy"
                 spectrum_path = os.path.join(map_dir, spectrum_filename)
             
         # Check if spectrum already exists
@@ -291,17 +306,21 @@ class Visualise():
         else:
             print(f"Computing {component} power spectrum from {map_path}...")
             
-            # Load MW map and convert to HEALPix
             mw_map = np.load(map_path)
-            hp_map = SamplingConverters.mw_map_2_hp_map(mw_map, self.lmax) * 1E6
+            #hp_map = SamplingConverters.mw_map_2_hp_map(mw_map, self.lmax) * 1E6
             
             # Compute power spectrum
-            cl = hp.sphtfunc.anafast(hp_map, lmax=self.lmax)
-            
-            # Apply pixel window function correction
-            #nside = HPTools.get_nside_from_lmax(self.lmax)
-            #cl /= hp.pixwin(nside, lmax=self.lmax)**2
-            
+            #cl = hp.sphtfunc.anafast(hp_map, lmax=self.lmax)
+
+            L = self.lmax + 1
+            arr = np.asarray(np.real(np.squeeze(mw_map)), dtype=np.float64, order="C")
+            alm_mw = s2fft.forward(arr, L=L)
+            print(alm_mw.shape)
+            cl = np.empty(L, dtype=np.float64)
+            for ell in range(L):
+                a = alm_mw[ell, lmax-ell : lmax+ell+1]     # m in [-ell, ell]
+                cl[ell] = (a.real*a.real + a.imag*a.imag).sum() / (2*ell + 1)
+
             # Save the computed spectrum
             np.save(spectrum_path, cl)
             print(f"Saved {component} power spectrum to {spectrum_path}")
@@ -566,407 +585,6 @@ class Visualise():
             plt.show()
 
 
-    '''
-    def visualise_component_ratio_power_spectra(
-        self,
-        comp_a,
-        comp_b: str,
-        include_cross_correlation: bool = False,
-        ratio: bool = True,
-        all_freq: bool = False,
-    ):
-        """
-        Visualise the ratio or residual of power spectra between components and a reference
-        component across frequencies, with two modes:
-
-        - all_freq=True  (default): one subplot per frequency (current behaviour, single comp_a).
-        - all_freq=False: a single figure, no subplots. Supports multiple comp_a values,
-                        e.g. ['ilc_synth', 'ilc_improved'] vs 'cmb', plotted as multiple lines.
-
-        Parameters:
-            comp_a: str or list/tuple of str
-                Component(s) to compare against comp_b.
-                - If all_freq=True, only a single string is supported.
-                - If all_freq=False, can be a list/tuple of components, each plotted as a line.
-            comp_b (str): Reference component to compare with. e.g. 'processed_cmb'
-            include_cross_correlation (bool): Only used when all_freq=True.
-            ratio (bool): If True, compute D_ell(comp_a)/D_ell(comp_b).
-                        If False, compute D_ell(comp_b) - D_ell(comp_a).
-            all_freq (bool): 
-                - True  → subplots per frequency (original behaviour).
-                - False → single figure (no subplots), single frequency.
-        """
-        frequencies = self.frequencies
-        realisation = self.realisation
-        lmax = self.lmax
-        ell = np.arange(lmax + 1)
-        rn = self.rn
-        batch = self.batch_size
-        epochs = self.epochs
-        lr = self.lr
-        momentum = self.momentum
-        chs = chs="_".join(str(n) for n in self.chs)
-
-        # Normalise comp_a into a list
-        if isinstance(comp_a, str):
-            comp_list = [comp_a]
-        else:
-            comp_list = list(comp_a)
-
-        # MW-format components that require special handling
-        mw_components = ['ilc_synth', 'ilc_improved']
-
-        # -------------------------------------------------------------------------
-        # MODE 1: all_freq = True  → one subplot per frequency (original behaviour)
-        # -------------------------------------------------------------------------
-        if all_freq:
-            if len(comp_list) != 1:
-                raise ValueError(
-                    "When all_freq=True, only a single comp_a is supported. "
-                    "For multiple components (e.g. ['ilc_synth', 'ilc_improved'] vs 'cmb'), "
-                    "use all_freq=False."
-                )
-
-            comp_a_single = comp_list[0]
-            lam = self.lam_list[0]  # used for cross-correlations in MW case
-
-            # Figure layout
-            n_freq = len(frequencies)
-            ncols = min(3, n_freq)
-            nrows = int(np.ceil(n_freq / ncols))
-            fig, axes = plt.subplots(
-                nrows, ncols,
-                figsize=(5 * ncols, 4 * nrows),
-                squeeze=False
-            )
-            axes_flat = axes.flatten()
-
-            for idx, freq in enumerate(frequencies):
-                ax = axes_flat[idx]
-
-                # Store loaded maps for cross-correlation computation
-                loaded_maps = {}
-
-                # Decide if we need lambda loop (ILC/MW components)
-                if (comp_a_single in mw_components) or (comp_b in mw_components):
-                    # Loop over lambda values when MW components are involved
-                    for j, lam_val in enumerate(self.lam_list):
-                        # --- load/compute spectrum for comp_a_single ---
-                        if comp_a_single in mw_components:
-                            fp_a = self.file_templates[comp_a_single].format(
-                                frequency=freq,
-                                lmax=lmax,
-                                realisation=realisation,
-                                lam=lam_val
-                            )
-                            cl_a = self.compute_and_save_mw_power_spec(
-                                fp_a, component=comp_a_single, lam=lam_val
-                            )
-
-                            # Store map for cross-correlation (only first lambda)
-                            if include_cross_correlation and j == 0:
-                                mw_map = np.load(fp_a)
-                                hp_map = SamplingConverters.mw_map_2_hp_map(
-                                    mw_map, lmax
-                                ) * 1E6
-                                loaded_maps[comp_a_single] = hp_map
-                        else:
-                            fp_a = self.file_templates[comp_a_single].format(
-                                frequency=freq,
-                                lmax=lmax,
-                                realisation=realisation
-                            )
-                            map_a = hp.read_map(fp_a) * 1E6
-                            cl_a = hp.sphtfunc.anafast(map_a, lmax=lmax)
-
-                            if include_cross_correlation and j == 0:
-                                loaded_maps[comp_a_single] = map_a
-
-                        # --- load/compute spectrum for comp_b ---
-                        if comp_b in mw_components:
-                            fp_b = self.file_templates[comp_b].format(
-                                frequency=freq,
-                                lmax=lmax,
-                                realisation=realisation,
-                                lam=lam_val
-                            )
-                            cl_b = self.compute_and_save_mw_power_spec(
-                                fp_b, component=comp_b, lam=lam_val
-                            )
-
-                            if include_cross_correlation and j == 0:
-                                mw_map = np.load(fp_b)
-                                hp_map = SamplingConverters.mw_map_2_hp_map(
-                                    mw_map, lmax
-                                ) * 1E6
-                                loaded_maps[comp_b] = hp_map
-                        else:
-                            fp_b = self.file_templates[comp_b].format(
-                                frequency=freq,
-                                lmax=lmax,
-                                realisation=realisation
-                            )
-                            map_b = hp.read_map(fp_b, verbose=False) * 1E6
-                            cl_b = hp.sphtfunc.anafast(map_b, lmax=lmax)
-
-                            if include_cross_correlation and j == 0:
-                                loaded_maps[comp_b] = map_b
-
-                        # --- Auto-correlation ratio/residual ---
-                        D_ell_a = (ell * (ell + 1) * cl_a) / (2 * np.pi)
-                        D_ell_b = (ell * (ell + 1) * cl_b) / (2 * np.pi)
-
-                        if ratio:
-                            result = D_ell_a / D_ell_b
-                            if len(self.lam_list) > 1:
-                                label = f"Auto: λ={lam_val}"
-                            else:
-                                label = f"Auto: ({comp_a_single}×{comp_a_single})/({comp_b}×{comp_b})"
-                        else:
-                            result = D_ell_b - D_ell_a
-                            if len(self.lam_list) > 1:
-                                label = f"Residual: λ={lam_val}"
-                            else:
-                                label = f"({comp_b}-{comp_a_single})"
-
-                        ax.plot(ell, result, linewidth=2.0, label=label, linestyle='-')
-
-                else:
-                    # Neither component is in MW: no lambda loop needed
-                    freq = frequencies[idx]
-
-                    fp_a = self.file_templates[comp_a_single].format(
-                        frequency=freq,
-                        lmax=lmax,
-                        realisation=realisation
-                    )
-                    map_a = hp.read_map(fp_a) * 1E6
-                    cl_a = hp.sphtfunc.anafast(map_a, lmax=lmax)
-
-                    fp_b = self.file_templates[comp_b].format(
-                        frequency=freq,
-                        lmax=lmax,
-                        realisation=realisation
-                    )
-                    map_b = hp.read_map(fp_b, verbose=False) * 1E6
-                    cl_b = hp.sphtfunc.anafast(map_b, lmax=lmax)
-
-                    D_ell_a = (ell * (ell + 1) * cl_a) / (2 * np.pi)
-                    D_ell_b = (ell * (ell + 1) * cl_b) / (2 * np.pi)
-
-                    if ratio:
-                        result = D_ell_a / D_ell_b
-                        label = f"Auto: ({comp_a_single}×{comp_a_single})/({comp_b}×{comp_b})"
-                    else:
-                        result = D_ell_b - D_ell_a
-                        label = f"({comp_b}-{comp_a_single})"
-
-                    ax.plot(ell, result, linewidth=2.0, label=label, linestyle='-')
-
-                    # Store maps for cross-correlation
-                    if include_cross_correlation:
-                        loaded_maps[comp_a_single] = map_a
-                        loaded_maps[comp_b] = map_b
-
-                # Cross-correlation ratio/residual, if requested
-                if include_cross_correlation:
-                    map_a_cross = loaded_maps[comp_a_single]
-                    map_b_cross = loaded_maps[comp_b]
-
-                    cl_cross = hp.sphtfunc.anafast(
-                        map_a_cross, map2=map_b_cross, lmax=lmax
-                    )
-
-                    # Auto-correlation of comp_b
-                    if comp_b in mw_components:
-                        fp_b_auto = self.file_templates[comp_b].format(
-                            frequency=freq,
-                            lmax=lmax,
-                            realisation=realisation,
-                            lam=lam
-                        )
-                        cl_b_auto = self.compute_and_save_mw_power_spec(
-                            fp_b_auto, component=comp_b, lam=lam
-                        )
-                    else:
-                        cl_b_auto = hp.sphtfunc.anafast(map_b_cross, lmax=lmax)
-
-                    # Auto-correlation of comp_a_single
-                    if comp_a_single in mw_components:
-                        fp_a_auto = self.file_templates[comp_a_single].format(
-                            frequency=freq,
-                            lmax=lmax,
-                            realisation=realisation,
-                            lam=lam
-                        )
-                        cl_a_auto = self.compute_and_save_mw_power_spec(
-                            fp_a_auto, component=comp_a_single, lam=lam
-                        )
-                    else:
-                        cl_a_auto = hp.sphtfunc.anafast(map_a_cross, lmax=lmax)
-
-                    D_ell_cross = (ell * (ell + 1) * cl_cross) / (2 * np.pi)
-                    D_ell_b_auto = (ell * (ell + 1) * cl_b_auto) / (2 * np.pi)
-                    D_ell_a_auto = (ell * (ell + 1) * cl_a_auto) / (2 * np.pi)
-
-                    if ratio:
-                        cross_result = D_ell_cross / D_ell_b_auto
-                        cross_label = f"Cross: ({comp_a_single}×{comp_b})/({comp_b}×{comp_b})"
-                    else:
-                        cross_result = D_ell_cross - D_ell_a_auto
-                        cross_label = f"Cross residual: ({comp_a_single}×{comp_b})-({comp_a_single}×{comp_a_single})"
-
-                    ax.plot(
-                        ell, cross_result, linewidth=2.0,
-                        label=cross_label, linestyle='--', color='red'
-                    )
-
-                ax.set_xlim(1, lmax)
-                if ratio:
-                    ax.set_ylim(0.7, 1.2)
-                    ax.set_ylabel("Ratio of $D_{\\ell}$", fontsize=14)
-                    ax.axhline(1, ls=':', color='red')
-                else:
-                    ax.set_ylabel(r'$\Delta D_{\ell}$ ($\mu K^2$)', fontsize=14)
-                    ax.axhline(0, ls=':', color='black', alpha=0.7)
-
-                ax.set_xlabel(r'$\ell$', fontsize=14)
-                ax.set_title(f"{freq} GHz")
-                ax.grid(True, which='both', linestyle=':', linewidth=0.5)
-                ax.legend(fontsize=9)
-
-            # Hide any unused subplots
-            for ax in axes_flat[n_freq:]:
-                ax.set_visible(False)
-
-            plt.tight_layout()
-            filename = 'component_ratio_power_spectra.pdf' if ratio else 'component_residual_power_spectra.pdf'
-            plt.savefig(filename)
-            plt.show()
-            return
-
-        # -------------------------------------------------------------------------
-        # MODE 2: all_freq = False  → single figure, multiple comp_a vs comp_b
-        # -------------------------------------------------------------------------
-
-        # Use a single representative frequency (you can change this if you want)
-        freq = frequencies[0]
-        lam0 = self.lam_list[0]
-
-        colours = plt.rcParams['axes.prop_cycle'].by_key()['color']
-
-        fig, ax = plt.subplots(figsize=(8, 6))
-
-        for i, comp_ai in enumerate(comp_list):
-            color = colours[i % len(colours)]
-
-            # --- compute cl for comp_ai ---
-            if comp_ai in mw_components:
-                if comp_ai == 'ilc_improved':
-                    fp_a = self.file_templates[comp_ai].format(
-                        rn=rn,
-                        batch=batch,
-                        epochs=epochs,
-                        lr=lr,
-                        momentum=momentum,
-                        chs=chs,
-                        lmax=lmax,
-                        realisation=realisation,
-                        lam=lam0,
-                    )
-                elif comp_ai == 'ilc_synth':
-                    frequencies = self.frequencies
-
-                    fp_a = self.file_templates[comp_ai].format(
-                        extract_comp="cmb",
-                        component="cfn",
-                        frequencies="_".join(str(x) for x in frequencies),
-                        lmax=lmax,
-                        realisation=realisation,
-                        lam=lam0,)
-
-                cl_a = self.compute_and_save_mw_power_spec(
-                    fp_a, component=comp_ai, lam=lam0
-                )
-            else: # hp
-                if comp_ai == 'processed_cmb':
-                    fp_a = self.file_templates[comp_ai].format(
-                        lmax=lmax,
-                        realisation=realisation,
-                    )
-                map_a = hp.read_map(fp_a) * 1E6
-                cl_a = hp.sphtfunc.anafast(map_a, lmax=lmax)
-
-            # --- compute cl for comp_b ---
-            if comp_b in mw_components:
-                if comp_b == 'ilc_improved':
-                    fp_b = self.file_templates[comp_b].format(
-                        rn=rn,
-                        batch=batch,
-                        epochs=epochs,
-                        lr=lr,
-                        momentum=momentum,
-                        chs=chs,
-                        lmax=lmax,
-                        realisation=realisation,
-                        lam=lam0,
-                        )
-                elif comp_b == 'ilc_synth':
-                    frequencies = self.frequencies
-
-                    fp_b = self.file_templates[comp_b].format(
-                        extract_comp="cmb",
-                        component="cfn",
-                        frequencies="_".join(str(x) for x in frequencies),
-                        lmax=lmax,
-                        realisation=realisation,
-                        lam=lam0,)
-                
-                cl_b = self.compute_and_save_mw_power_spec(
-                    fp_b, component=comp_b, lam=lam0
-                )
-            else:
-                if comp_b == 'processed_cmb':
-                    fp_b = self.file_templates[comp_b].format(
-                        lmax=lmax,
-                        realisation=realisation,)
-                map_b = hp.read_map(fp_b, verbose=False) * 1E6
-                cl_b = hp.sphtfunc.anafast(map_b, lmax=lmax)
-
-            D_ell_a = (ell * (ell + 1) * cl_a) / (2 * np.pi)
-            D_ell_b = (ell * (ell + 1) * cl_b) / (2 * np.pi)
-
-            if ratio:
-                result = D_ell_a / D_ell_b
-                label = f"{comp_ai}/{comp_b}"
-            else:
-                result = D_ell_b - D_ell_a
-                label = f"{comp_b}-{comp_ai}"
-
-            ax.plot(
-                ell, result,
-                linewidth=2.0,
-                label=label,
-                linestyle='-',
-                color=color,
-            )
-
-        ax.set_xlim(1, lmax)
-        if ratio:
-            ax.set_ylim(0.5, 1.5)
-            ax.set_ylabel("Ratio of $D_{\\ell}$", fontsize=14)
-            ax.axhline(1, ls=':', color='red')
-        else:
-            ax.set_ylabel(r'$\Delta D_{\ell}$ ($\mu K^2$)', fontsize=14)
-            ax.axhline(0, ls=':', color='black', alpha=0.7)
-
-        ax.set_xlabel(r'$\ell$', fontsize=14)
-        ax.set_title(f"Processed CMB vs cILC-synth ratio (lam={lam0})")
-        ax.grid(True, which='both', linestyle=':', linewidth=0.5)
-        ax.legend(fontsize=14)
-        fig.tight_layout()
-        plt.show()
-    '''
     def visualise_component_ratio_power_spectra(
         self,
         comp_a,
@@ -1008,16 +626,23 @@ class Visualise():
         if all_freq:
             raise NotImplementedError("This version handles only all_freq=False.")
 
+        extract_comp = self.extract_comp
+        comp = self.component
         frequencies = self.frequencies
         realisation = self.realisation
         lmax = self.lmax
         ell = np.arange(lmax + 1)
         rn = self.rn
+        nsamp = self.nsamp
         batch = self.batch_size
         epochs = self.epochs
         lr = self.lr
         momentum = self.momentum
         chs = "_".join(str(n) for n in self.chs)
+        if self.constraint == True:
+            mode = "con"
+        else:
+            mode = "uncon"
 
         # Normalise comp_a into a list
         if isinstance(comp_a, str):
@@ -1060,27 +685,31 @@ class Visualise():
             if component in mw_components:
                 if component == "ilc_improved":
                     map_path = self.file_templates[component].format(
+                        mode=mode,
+                        extract_comp=extract_comp,
+                        component=comp,
+                        frequencies="_".join(str(x) for x in frequencies),
+                        realisation=realisation,
+                        lmax=lmax,
+                        lam=lam0,
+                        nsamp=nsamp,
                         rn=rn,
                         batch=batch,
                         epochs=epochs,
                         lr=lr,
                         momentum=momentum,
                         chs=chs,
-                        lmax=lmax,
-                        realisation=realisation,
-                        lam=lam0,
-                        nsamp=1200,
                     )
                 elif component == "ilc_synth":
                     map_path = self.file_templates[component].format(
-                        mode='uncon',
-                        extract_comp="cmb",
-                        component="cfn",
+                        mode=mode,
+                        extract_comp=extract_comp,
+                        component=comp,
                         frequencies="_".join(str(x) for x in frequencies),
-                        lmax=lmax,
                         realisation=realisation,
+                        lmax=lmax,
                         lam=lam0,
-                        nsamp=1200
+                        nsamp=nsamp,
                     )
                 else:
                     raise ValueError(f"Unknown MW component '{component}'")
@@ -1096,6 +725,8 @@ class Visualise():
                     cl = self.compute_and_save_mw_power_spec(
                         map_path, component=component, lam=lam0
                     )
+                    if component == "ilc_improved":
+                        cl *= 1e6 
                 return cl
 
             # HEALPix components
@@ -1111,7 +742,7 @@ class Visualise():
                     realisation=realisation,
                 )
 
-            hp_map = hp.read_map(map_path, verbose=False) * 1e6
+            hp_map = hp.read_map(map_path, verbose=False) * 1e12
             if masked:
                 hp_map *= mask_hp
             cl = hp.sphtfunc.anafast(hp_map, lmax=lmax)
@@ -1148,7 +779,7 @@ class Visualise():
 
         ax.set_xlim(1, lmax)
         if ratio:
-            ax.set_ylim(0.5, 1.5)
+            ax.set_ylim(0.8, 1.2)
             ax.set_ylabel(r"Ratio of $D_{\ell}$", fontsize=14)
             ax.axhline(1, ls=":", color="red")
         else:
@@ -1158,15 +789,32 @@ class Visualise():
         ax.set_xlabel(r"$\ell$", fontsize=14)
         if masked and f_sky is not None:
             ax.set_title(
-                f"Processed CMB vs cILC-synth ratio (lam={lam0}, pseudo, f_sky={f_sky:.3f})"
+                f"Processed CMB vs cILC-synth ratio (pseudo, f_sky={f_sky:.3f})", fontsize=17
             )
         else:
-            ax.set_title(f"Processed CMB vs cILC-synth ratio (lam={lam0})")
+            ax.set_title(f"Processed CMB vs cILC-synth ratio", fontsize=15)
 
         ax.grid(True, which="both", linestyle=":", linewidth=0.5)
         ax.legend(fontsize=14)
         fig.tight_layout()
-        plt.show()
+        file_name = self.file_templates["ilc_improved_spectrum"].format(
+                        mode=mode,
+                        extract_comp=extract_comp,
+                        component=comp,
+                        frequencies="_".join(str(x) for x in frequencies),
+                        realisation=realisation,
+                        lmax=lmax,
+                        lam=lam0,
+                        nsamp=nsamp,
+                        rn=rn,
+                        batch=batch,
+                        epochs=epochs,
+                        lr=lr,
+                        momentum=momentum,
+                        chs=chs,
+                        )
+        plt.savefig(f'{file_name[:-4]}.png', dpi=300)
+        plt.close()
 
         # return data used for plotting
         return ell, results

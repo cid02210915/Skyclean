@@ -21,7 +21,7 @@ class Inference:
     """Class for CMB prediction inference using trained models."""
     
     def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None,
-                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3, momentum: float = 0.9, nsamp: int = 1200):
+                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3, momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False):
         """Initialize the CMB inference system.
         
         Parameters:
@@ -34,6 +34,8 @@ class Inference:
             directory (str): Base data directory.
             seed (int): Random seed for model initialization.
             model_path (str, optional): Specific path to model checkpoint. If None, loads the latest model.
+            nsamp (int)
+            constraint (bool): Mode for the constrainted ILC method. 
         """
         self.extract_comp = extract_comp
         self.component = component
@@ -52,6 +54,7 @@ class Inference:
         self.lr = learning_rate 
         self.momentum = momentum 
         self.nsamp = nsamp
+        self.constraint = constraint
         
         # Initialize file templates
         self.file_templates = FileTemplates(directory)
@@ -66,6 +69,8 @@ class Inference:
                 realisations=self.realisations,
                 lmax=self.lmax,
                 N_directions=self.N_directions,
+                nsamp=self.nsamp,
+                constraint=self.constraint,
                 lam=self.lam,
                 batch_size=1,  # Not used for inference
                 directory=self.directory
@@ -383,8 +388,17 @@ class Inference:
             chs = "_".join(str(n) for n in self.chs)
             #model_config = f"r{realisation}_lmax{self.lmax}_lam{self.lam}_nsamp{self.nsamp}_rn{self.rn}_batch{self.batch}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
 
+            if self.constraint == True:
+                mode = "con"
+            else:
+                mode = "uncon"
+            frequencies = '_'.join(self.frequencies)
             # Use FileTemplates to get the save path
-            save_path = self.file_templates.file_templates["ilc_improved_map"].format(
+            save_path = self.file_templates.file_templates["ilc_improved"].format(
+                mode=mode,
+                extract_comp=self.extract_comp,
+                frequencies=frequencies,
+                component=self.component,
                 realisation=realisation,
                 lmax=self.lmax,
                 lam=self.lam,
