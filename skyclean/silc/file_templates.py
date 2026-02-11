@@ -57,6 +57,11 @@ class FileTemplates():
             'tsz':  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "cib":  "http://pla.esac.esa.int/pla/aio/product-action?MAP.MAP_ID=COM_CompMap_CIB-GNILC-F{frequency}_2048_R2.00.fits",
             "mask": "https://irsa.ipac.caltech.edu/data/Planck/release_2/ancillary-data/masks/HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits",
+            "strongirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_strongirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "strongradiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_strongradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "faintirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "faintradiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "clusterirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_clusterirps-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
         }
 
         self.file_templates = {
@@ -67,6 +72,11 @@ class FileTemplates():
         "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
         "tsz":   os.path.join(self.output_directories["cmb_realisations"], "tsz_f{frequency}.fits"),
         "cib":   os.path.join(self.output_directories["cmb_realisations"], "cib_f{frequency}.fits"),
+        "strongirps": os.path.join(self.output_directories["cmb_realisations"], "strongirps_f{frequency}.fits"),
+        "strongradiops": os.path.join(self.output_directories["cmb_realisations"], "strongradiops_f{frequency}.fits"),
+        "faintirps": os.path.join(self.output_directories["cmb_realisations"], "faintirps_f{frequency}.fits"),
+        "faintradiops": os.path.join(self.output_directories["cmb_realisations"], "faintradiops_f{frequency}.fits"),
+        "clusterirps": os.path.join(self.output_directories["cmb_realisations"], "clusterirps_f{frequency}.fits"),
 
         # ---------------- processed maps ----------------
         "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
@@ -75,6 +85,8 @@ class FileTemplates():
         "processed_noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
         "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
         "processed_cib":   os.path.join(self.output_directories["processed_maps"], "processed_cib_f{frequency}_lmax{lmax}.npy"),
+        "processed_strongirps":   os.path.join(self.output_directories["processed_maps"], "processed_strongirps_f{frequency}_lmax{lmax}.npy"),
+        "processed_strongradiops":   os.path.join(self.output_directories["processed_maps"], "processed_strongradiops_f{frequency}_lmax{lmax}.npy"),
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
         "cfne":            os.path.join(self.output_directories["cfne"],           "cfne_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 

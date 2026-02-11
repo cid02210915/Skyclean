@@ -36,6 +36,11 @@ class Pipeline:
         F = None,
         reference_vectors = None,
         nsamp: float = 1200, 
+        feature_center_lon_deg: list = [45, 60], 
+        feature_center_lat_deg: list = [10, 30], 
+        feature_radius_deg: list = [5, 5], 
+        feature_value: list = [700e-6, 700e-6], 
+        feature_sed: list = [[2, 0, 1], [1, 2, 0]]
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -58,6 +63,12 @@ class Pipeline:
         #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
         self.nsamp = nsamp
+        # arguements for adding extra features
+        self.feature_center_lon_deg = feature_center_lon_deg
+        self.feature_center_lat_deg = feature_center_lat_deg
+        self.feature_radius_deg = feature_radius_deg
+        self.feature_value = feature_value
+        self.feature_sed = feature_sed
 
     # -------------------------
     # Steps
@@ -103,7 +114,7 @@ class Pipeline:
             method=self.method,
             overwrite=self.overwrite,
         )
-        processor.produce_and_save_maps()
+        processor.produce_and_save_maps(self.feature_center_lon_deg, self.feature_center_lat_deg, self.feature_radius_deg, self.feature_value, self.feature_sed)
 
     def step_wavelets(self):
         print("--- PRODUCING WAVELET TRANSFORMS ---")
@@ -671,6 +682,18 @@ def main():
                         help="If set, overwrite existing files.")
     parser.add_argument('--directory', type=str, default='/Scratch/agnes/data',
                         help="Base directory for input/output data.")
+    parser.add_argument('--feature-lon', type=list,
+                        help="list of positions (longitude in degree) for extra features in a single map.")
+    parser.add_argument('--feature-lat', type=list,
+                        help="list of positions (latitude in degree) for extra features in a single map.")
+    parser.add_argument('--feature-radius', type=list,
+                        help="list of radius (radius in degree) for extra features in a single map.")
+    parser.add_argument('--feature-vals', type=list,
+                        help="list of radius (vals in K) for extra features in a single map.")
+    parser.add_argument('--feature-sed', type=list,
+                        help="SED of extra features.")
+    
+    
     
     # GPU selection
     parser.add_argument('--gpu', type=int, default=0,
@@ -735,6 +758,11 @@ def main():
         directory=args.directory,
         constraint=args.constraint,
         nsamp=args.nsamp,
+        feature_center_lon_deg=args.feature_lon,
+        feature_center_lat_deg=args.feature_lat,
+        feature_radius_deg=args.feature_radius,
+        feature_value=args.feature_vals,
+        feature_sed=args.feature_sed
     )
     pipeline.run(steps=args.steps)
 

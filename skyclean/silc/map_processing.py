@@ -85,18 +85,21 @@ class ProcessMaps():
             raise ValueError(f"Could not parse realisation numbers for frequency {frequency}.")
 
 
-    def add_filled_circle_hp(self, hp_map, center_lon_deg, center_lat_deg, radius_deg, value):
+    def add_filled_circle_hp(self, hp_map, n_side, center_lon_deg, center_lat_deg, radius_deg, value):
         """
         Add a filled circle to a HEALPix map (lon/lat in degrees).
         Returns a copy with the circle applied.
         """
         # healpy uses colatitude theta = 90 - lat
-        n_side = hp.get_nside(hp_map)
-        vec = hp.ang2vec(np.deg2rad(90.0 - center_lat_deg), np.deg2rad(center_lon_deg))
+        print(f'center = ({center_lon_deg}, {center_lat_deg}), radius = {radius_deg}˚, value = {value} K')
+        theta = np.deg2rad(90.0 - center_lat_deg)
+        phi   = np.deg2rad(center_lon_deg)
+        vec = hp.ang2vec(theta, phi)
         pix = hp.query_disc(n_side, vec, np.deg2rad(radius_deg))
-        out = np.array(hp_map, copy=True)
-        out[pix] = value
-        return out
+        hp_map[pix] = value
+        #out = np.array(hp_map, copy=True)
+        #out[pix] = value
+        #return out
     
 
     def create_cfn(self, frequency: str, realisation: int, save=True):
@@ -195,7 +198,7 @@ class ProcessMaps():
         return cfn
 
     def create_cfn_with_extra_features(self, frequency: str, realisation: int, 
-                                      center_lon_deg: float, center_lat_deg: float, radius_deg: float, value: float, 
+                                      center_lon_deg: list, center_lat_deg: list, radius_deg: list, value: list, sed_factors: np.array,
                                       save=True):
         """
         Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
@@ -208,10 +211,11 @@ class ProcessMaps():
             realisation (int): The realisation number for which to create the CFN.
             lmax (int): The maximum multipole desired for the CFN map.
             save (bool): Whether to save each processed component.
-            center_lon_deg (float | 45.0): Longitude of the center of the extra feature in degrees.
-            center_lat_deg (float | 10.0): Latitude of the center of the extra feature in degrees
-            radius_deg (float | 5.0): Radius of the extra feature in degrees.
-            value (float | 3.0): Temperature value to fill the extra feature with.
+            center_lon_deg (float): Longitude of the center of the extra feature in degrees.
+            center_lat_deg (float): Latitude of the center of the extra feature in degrees
+            radius_deg (float): Radius of the extra feature in degrees.
+            value (float): Temperature value to fill the extra feature with.
+            sed_factors (array): Normalised SED factor at a specific frequency for n features. Shape = (n features,)
         
         Returns:
             np.ndarray: The CFN map in HP format.
@@ -270,18 +274,10 @@ class ProcessMaps():
                     beam_path = None
                     if frequency not in {"030","044","070"}:
                         beam_path = self.templates.hfi_beam_path(frequency)
-                    # visualise the original map
-                    hp.mollview(hp_map, title="Original Noise Map @ " + frequency + " GHz")
-                    print(f"Feature Center: ({center_lon_deg}, {center_lat_deg}), Radius: {radius_deg} deg, Value: {value} K")
-                    hp_map_featured = self.add_filled_circle_hp(
-                        hp_map, center_lon_deg, center_lat_deg, radius_deg, value)
-                    # visualise the modified map
-                    hp.mollview(hp_map_featured, title="Noise Map with Injected Feature @ " + frequency + " GHz")
                     hp_map_reduced = HPTools.deconvolve_and_convolve_and_reduce(
-                        hp_map_featured, lmax=desired_lmax, nside=nside, frequency=frequency,
+                        hp_map, lmax=desired_lmax, nside=nside, frequency=frequency,
                         standard_fwhm_rad=standard_fwhm_rad, beam_path=beam_path
                     )
-                    hp.mollview(hp_map_reduced, title=f"Processed Noise Map @ " + frequency + " GHz")
                 elif comp == "cib":
                     # CIB GNILC already has 5' arcmin beam:
                     # (https://irsa.ipac.caltech.edu/data/Planck/release_2/all-sky-maps/previews/COM_CompMap_CIB-GNILC-F353_2048_R2.00/header.txt)
@@ -290,15 +286,32 @@ class ProcessMaps():
                     hp_map_reduced, _ = HPTools.reduce_hp_map_resolution(
                         hp_map_noP, lmax=desired_lmax, nside=nside
                     )
-                elif comp != "extra_feature":
+                elif comp == "extra_feature":
+                    len_lon = len(center_lon_deg)
+                    len_lat = len(center_lon_deg)
+                    len_rad = len(radius_deg)
+                    len_val = len(value)
+                    if len_lon == len_lat == len_rad == len_val:
+                        hp_map = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+                        for i in range(len_lon):
+                            #print(f"Feature {i} @ {frequency}GHz: center = ({center_lon_deg[i]}, {center_lat_deg[i]}), radius = {radius_deg[i]}˚, value = {value[i]*1e6} uK")
+                            self.add_filled_circle_hp(hp_map, nside, center_lon_deg[i], center_lat_deg[i], radius_deg[i], value[i]*sed_factors[i])
+                            hp_map_reduced = HPTools.convolve_and_reduce(
+                                hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                            )
+                    else:
+                        raise ValueError(f"Shape mismatch: center_lon_deg={len_lon}, center_lat_deg={len_lat}, radius={radius_deg}, value={len_val}")
+                    
+                else: 
                     hp_map_reduced = HPTools.convolve_and_reduce(
                         hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
                     )
-                    
+                
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
             cfn += hp_map_reduced
         return cfn
+    
     
     def process_single_component(self, comp: str, frequency: str, realisation: int,
                              save: bool = True, noise_realisation: int | None = None):
@@ -366,47 +379,46 @@ class ProcessMaps():
         return hp_map_reduced
 
 
-    def produce_and_save_maps(self, feature_frequency: str = "030", center_lon_deg: float = 45, center_lat_deg: float = 10, radius_deg: float = 5, value: float = 0.0005):
+    def produce_and_save_maps(self, center_lon_deg: list, center_lat_deg: list, 
+                                radius_deg: list, value: list, sed: list):
         """
         Produce CFN maps across realisations and frequencies.
+        center_lon_deg (list): list for longitudgnal positions (in degree) of n features on a single frequency map. With shape = (n features,)
+
+        sed (list): list for spectral dependence factor for each features on a map across different channels. Shape = (n features, m frequenceis)
 
         Returns:
             None
         """
         desired_lmax = self.desired_lmax
+        frequencies = self.frequencies
         for realisation in range(self.realisations):
             i=0
             realisation += self.start_realisation  # Adjust for starting realisation
-            for frequency in self.frequencies:
+            for (i, frequency) in enumerate(frequencies):
                 if 'extra_feature' in self.components:
+                    if np.shape(sed)[1] != len(frequencies):
+                        raise ValueError(f"Frequencies length mismatch. SED shape ={np.shape(sed)} = (N features, M frequencies). freq = {len(frequencies)}")
                     cfn_output_path = self.file_templates["cfne"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                    #if sed[:, i] == 0: 
+                    #    cfn_map = self.create_cfn(frequency, realisation, save=True)
+                    #    hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz without injected feature, realisation {realisation}")
+                    #else:
+                    print(f'Creating CFN with injected feature at {frequency} GHz...')
+                    sed_array = np.array(sed)
+                    cfn_map = self.create_cfn_with_extra_features(frequency, realisation, save=True, 
+                                                                    center_lon_deg = center_lon_deg,
+                                                                    center_lat_deg = center_lat_deg,
+                                                                    radius_deg = radius_deg,
+                                                                    value = value, 
+                                                                    sed_factors = sed_array[:, i]/sed_array[:, 0])
+                    # visualise the map to check
+                    hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
                 else:
                     cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                 if os.path.exists(cfn_output_path) and self.overwrite == False:
                     print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                     continue
-                if "extra_feature" in self.components and "noise" not in self.components:
-                    raise ValueError("extra_feature component requires 'noise' to be included in components.")
-                if "extra_feature" in self.components and "noise" in self.components:
-                    if frequency in feature_frequency.split(','):
-
-                        print(f'Creating CFN with injected feature at {frequency} GHz...')
-                        if i > 0:
-                            center_lon_deg += 10  # shift the feature for each frequency
-                            center_lat_deg += 5
-                            radius_deg += 2
-                            value += 0.0004
-                        cfn_map = self.create_cfn_with_extra_features(frequency, realisation, save=True, 
-                                                                    center_lon_deg=center_lon_deg,
-                                                                    center_lat_deg=center_lat_deg,
-                                                                    radius_deg=radius_deg,
-                                                                    value=value)
-                        # visualise the map to check
-                        hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
-                        i += 1
-                    else:
-                        cfn_map = self.create_cfn(frequency, realisation, save=True)
-                        hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz without injected feature, realisation {realisation}")
                 else:
                     cfn_map = self.create_cfn(frequency, realisation, save=True)
                 hp.write_map(cfn_output_path, cfn_map, overwrite=True)
