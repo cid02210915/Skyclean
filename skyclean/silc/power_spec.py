@@ -128,7 +128,11 @@ class MapAlmConverter:
                 raise ValueError("ilc_synth needs extract_comp, realisation, lmax, lam, and frequencies")
 
             lam_str = lam if isinstance(lam, str) else f"{float(lam):.1f}"
-            nsamp_str = "" if nsamp is None else str(int(nsamp))
+
+            if nsamp is None:
+                nsamp = 1200  
+            nsamp_str = str(int(nsamp))
+
             mode = "con" if constraint else "uncon"
 
             kw = dict(
@@ -311,97 +315,160 @@ class PowerSpectrumCrossTT:
 
     @staticmethod
     def from_mw_alm(alm_X: np.ndarray, alm_Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Cross C_ell from MW layout alms shaped (L, 2L-1); columns m = -(L-1)..(L-1)."""
-        aX = np.asarray(alm_X); aY = np.asarray(alm_Y)
-        if aX.shape != aY.shape or aX.ndim != 2 or aX.shape[1] != 2*aX.shape[0]-1:
+        """Cross C_ell from MW layout alms shaped (L, 2L-1); columns m = -(L-1)..+(L-1)."""
+        aX = np.asarray(alm_X)
+        aY = np.asarray(alm_Y)
+        if aX.shape != aY.shape or aX.ndim != 2 or aX.shape[1] != 2 * aX.shape[0] - 1:
             raise ValueError("Expected matching MW alms of shape (L, 2L-1).")
+
         L = aX.shape[0]
         m0 = L - 1
         Cl = np.empty(L, dtype=np.float64)
         for l in range(L):
             sl = slice(m0 - l, m0 + l + 1)  # m = -l..+l
-            Cl[l] = np.real(np.dot(aX[l, sl], np.conj(aY[l, sl]))) / (2*l + 1)
+            Cl[l] = np.real(np.dot(aX[l, sl], np.conj(aY[l, sl]))) / (2 * l + 1)
         return np.arange(L, dtype=int), Cl
 
     @staticmethod
-    def from_healpy_alm(alm_X: np.ndarray, alm_Y: np.ndarray, lmax: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    def from_healpy_alm(
+        alm_X: np.ndarray,
+        alm_Y: np.ndarray,
+        lmax: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Cross C_ell from healpy-packed alms; lmax inferred if not provided."""
+        aX = np.asarray(alm_X)
+        aY = np.asarray(alm_Y)
         if lmax is None:
-            lmax = hp.Alm.getlmax(np.asarray(alm_X).size)
-        Cl = hp.alm2cl(alm_X, alm_Y, lmax=int(lmax))
+            lmax = min(hp.Alm.getlmax(aX.size), hp.Alm.getlmax(aY.size))
+        Cl = hp.alm2cl(aX, aY, lmax=int(lmax))
         return np.arange(Cl.size, dtype=int), Cl
+
+    # --------------------------
+    # Direct MW -> healpy converter
+    # --------------------------
+    @staticmethod
+    def mw_to_healpy_alm(alm_mw: np.ndarray, lmax: int | None = None) -> np.ndarray:
+        """
+        Convert MW alm layout (L, 2L-1) with m=-(L-1)..+(L-1)
+        to healpy packed alm (m>=0 only).
+
+        We only need m>=0 because healpy stores that convention.
+        """
+        a = np.asarray(alm_mw)
+        if a.ndim != 2 or a.shape[1] != 2 * a.shape[0] - 1:
+            raise ValueError("Expected MW alm shape (L, 2L-1).")
+
+        L = int(a.shape[0])
+        lmax_used = (L - 1) if lmax is None else int(lmax)
+        if lmax_used > L - 1:
+            raise ValueError(f"Requested lmax={lmax_used} exceeds MW L-1={L-1}.")
+
+        out = np.empty(hp.Alm.getsize(lmax_used), dtype=np.complex128)
+        m0 = L - 1  # column for m=0 in MW layout
+
+        for l in range(lmax_used + 1):
+            for m in range(l + 1):
+                out[hp.Alm.getidx(lmax_used, l, m)] = a[l, m0 + m]  # pick m>=0 column
+
+        return out
+
+    # --------------------------
+    # Direct dispatcher: works for MW×MW, healpy×healpy, MW×healpy
+    # --------------------------
+    @staticmethod
+    def from_any_alms(
+        alm_X: np.ndarray,
+        fmt_X: str,
+        alm_Y: np.ndarray,
+        fmt_Y: str,
+        *,
+        lmax: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Compute cross C_ell^{XY} given alms + format tags.
+
+        fmt_X/fmt_Y must be either:
+          - "mw"
+          - "healpy"  (or "hp")
+
+        If mixed, convert MW -> healpy packed and use healpy cross.
+        """
+        fx = str(fmt_X).lower()
+        fy = str(fmt_Y).lower()
+        if fx == "hp":
+            fx = "healpy"
+        if fy == "hp":
+            fy = "healpy"
+
+        if fx == "mw" and fy == "mw":
+            return PowerSpectrumCrossTT.from_mw_alm(alm_X, alm_Y)
+
+        # mixed or both healpy -> do healpy cross (convert MW if needed)
+        if fx == "mw":
+            ax = PowerSpectrumCrossTT.mw_to_healpy_alm(alm_X, lmax=lmax)
+        elif fx == "healpy":
+            ax = np.asarray(alm_X)
+        else:
+            raise ValueError(f"Unknown fmt_X='{fmt_X}' (expected 'mw' or 'healpy').")
+
+        if fy == "mw":
+            ay = PowerSpectrumCrossTT.mw_to_healpy_alm(alm_Y, lmax=lmax)
+        elif fy == "healpy":
+            ay = np.asarray(alm_Y)
+        else:
+            raise ValueError(f"Unknown fmt_Y='{fmt_Y}' (expected 'mw' or 'healpy').")
+
+        # infer lmax if needed
+        if lmax is None:
+            lmax = min(hp.Alm.getlmax(ax.size), hp.Alm.getlmax(ay.size))
+
+        return PowerSpectrumCrossTT.from_healpy_alm(ax, ay, lmax=int(lmax))
 
     @staticmethod
     def cl_to_Dl(ell: np.ndarray, cl: np.ndarray, input_unit: str = "K") -> np.ndarray:
         """D_ell = ell(ell+1) C_ell / (2π); returns µK² if input_unit=='K'."""
-        Dl = ell * (ell + 1) * np.asarray(cl) / (2.0 * np.pi)
+        ell = np.asarray(ell)
+        cl = np.asarray(cl)
+        Dl = ell * (ell + 1) * cl / (2.0 * np.pi)
         return Dl * (1e12 if str(input_unit).lower() in ("k", "kelvin") else 1.0)
-    
 
     @staticmethod
     def r_ell(Cl_xy: np.ndarray, Cl_xx: np.ndarray, Cl_yy: np.ndarray) -> np.ndarray:
-        """
-        ratio per multipole:
-            r_ell = C_ell^{xy} / sqrt(C_ell^{xx} * C_ell^{yy})
-
-        Parameters:
-        Cl_xy : np.ndarray
-            Cross spectrum C_ell^{xy}.
-        Cl_xx : np.ndarray
-            Auto spectrum C_ell^{xx}.
-        Cl_yy : np.ndarray
-            Auto spectrum C_ell^{yy}.
-
-        Returns:
-        np.ndarray
-            r_ell array (same length as inputs). Entries are NaN where the
-            denominator is zero or invalid.
-        """
-        Cl_xy = np.asarray(Cl_xy); Cl_xx = np.asarray(Cl_xx); Cl_yy = np.asarray(Cl_yy)
+        """r_ell = C_ell^{xy} / sqrt(C_ell^{xx} C_ell^{yy})"""
+        Cl_xy = np.asarray(Cl_xy)
+        Cl_xx = np.asarray(Cl_xx)
+        Cl_yy = np.asarray(Cl_yy)
         denom = np.sqrt(Cl_xx * Cl_yy)
-        r = Cl_xy / denom
-        return r
+        return Cl_xy / denom
 
     @staticmethod
-    def plot_r_ell(ell: np.ndarray,
-                   Cl_xy: np.ndarray,
-                   Cl_xx: np.ndarray,
-                   Cl_yy: np.ndarray,
-                   *,
-                   save_path: str | None = None,
-                   show: bool = True,
-                   label: str | None = None,
-                   style: str = '-') -> np.ndarray:
-        """
-        Plot per-ℓ r_ell.
-
-        Parameters:
-        ell : np.ndarray
-            Multipole array (same length as spectra).
-        Cl_xy : np.ndarray
-            Cross spectrum C_ell^{xy}.
-        Cl_xx : np.ndarray
-            Auto spectrum C_ell^{xx}.
-        Cl_yy : np.ndarray
-            Auto spectrum C_ell^{yy}.
-
-        Returns:
-        np.ndarray
-            The computed r_ell values (NaN for invalid entries).
-        """
-
+    def plot_r_ell(
+        ell: np.ndarray,
+        Cl_xy: np.ndarray,
+        Cl_xx: np.ndarray,
+        Cl_yy: np.ndarray,
+        *,
+        save_path: str | None = None,
+        show: bool = True,
+        label: str | None = None,
+        style: str = "-"
+    ) -> np.ndarray:
+        """Plot per-ℓ r_ell and return it."""
         ell = np.asarray(ell)
         r = PowerSpectrumCrossTT.r_ell(Cl_xy, Cl_xx, Cl_yy)
         m = np.isfinite(r)
 
         plt.figure(figsize=(7, 4))
         plt.plot(ell[m], r[m], style, label=label)
-        plt.axhline(0.0, ls=':', lw=1)
-        plt.xlabel(r'$\ell$')
-        plt.ylabel(r'$r_\ell = C_\ell^{xy}/\sqrt{C_\ell^{xx} C_\ell^{yy}}$')
-        plt.legend()
+        plt.axhline(0.0, ls=":", lw=1)
+        plt.xlabel(r"$\ell$")
+        plt.ylabel(r"$r_\ell = C_\ell^{xy}/\sqrt{C_\ell^{xx} C_\ell^{yy}}$")
+        if label:
+            plt.legend()
         plt.grid(True, alpha=0.5)
         plt.tight_layout()
-        plt.show()
-        if save_path: plt.savefig(save_path, dpi=200)
+        if save_path:
+            plt.savefig(save_path, dpi=200)
+        if show:
+            plt.show()
         return r

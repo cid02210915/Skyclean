@@ -158,6 +158,7 @@ class HPTools():
         alm = hp.map2alm(hp_map, lmax=lmax )
 
         # Gaussian beam
+        from healpy import sphtfunc
         bl = hp.sphtfunc.gauss_beam(standard_fwhm_rad, lmax=lmax, pol=False)
 
         # Fermi taper in ℓ
