@@ -2,6 +2,7 @@ import os, glob
 import healpy as hp
 from .file_templates import FileTemplates
 from .map_tools import *
+from .add_point_source import PointSource
 
 
 class ProcessMaps():
@@ -17,6 +18,14 @@ class ProcessMaps():
                  directory: str = "data/", 
                  method = "jax_cuda", 
                  overwrite: bool = False, 
+                 ps_component: str = 'faintradiops',
+                 n_points: int = 10,
+                 lon_range: tuple = None,
+                 lat_range: tuple = (20.0, 90.0),
+                 brightness_percentile: tuple = (75.0, 100.0),
+                 mode: str = "random",
+                 random_seed: int = 1,
+                 factor: int | float = 50.0,
                 ): 
         """
         Parameters: 
@@ -41,11 +50,60 @@ class ProcessMaps():
         self.directory = directory
         self.overwrite = overwrite
         self.templates = FileTemplates(directory=directory)
-
         files = FileTemplates(directory)
+
         self.file_templates = files.file_templates
-        # file_template, file_templates
-        
+
+        if 'extra_feature' in components:
+            self.ps_component = ps_component
+            self.n_points = n_points
+            self.lon_range = lon_range
+            self.lat_range = lat_range
+            self.brightness_percentile = brightness_percentile
+            self.mode = mode
+            self.random_seed = random_seed
+            self.factor = factor
+
+            #self.pointsource = PointSource(directory=directory)
+            self.ps_lon = None
+            self.ps_lat = None
+            self.ps_rad = None
+            self.ps_val = None
+            self.ps_sed_lists = None
+            
+    
+    def build_point_sources(self):
+        """
+        Build a point-source catalogue (positions, sizes, amplitudes, and SEDs)
+
+        Returns:
+        lon_deg (array): 1D array of longitudes in degrees, shapeshape = (N,). N = number of features per frequency map.
+        lat_deg (array): 1D array of latitudes in degrees, shape shape = (N,).
+        rad_deg (array): 1D array of (possibly enlarged) equivalent radii in degrees, shape = (N,).
+                                 If a size-enlargement factor is used, this corresponds to rad_deg_original * factor.
+        val_ref (array): 1D array of summed component values in the reference frequency (usually the first frequency), shape = (N,).
+        sed_lists (list): List of length N; each entry is a list of length N_freq containing per-frequency summed values in the order of the frequencies list.
+        """
+        ps = PointSource(
+            ps_component=self.ps_component,
+            frequencies=self.frequencies,
+            n_points=self.n_points,
+            lon_range=self.lon_range,
+            lat_range=self.lat_range,
+            brightness_percentile=self.brightness_percentile,
+            mode=self.mode,
+            random_seed=self.random_seed,
+            factor=self.factor,
+            directory=self.directory,
+        )
+        lon, lat, rad, val, sed_lists = ps.create_and_output_catalogue()
+        self.ps_lon = lon
+        self.ps_lat = lat
+        self.ps_rad = rad
+        self.ps_val = val
+        self.ps_sed_lists = sed_lists
+        return lon, lat, rad, val, sed_lists
+    
 
     def _find_max_noise_realisation(self, frequency: str):
         """
@@ -287,21 +345,12 @@ class ProcessMaps():
                         hp_map_noP, lmax=desired_lmax, nside=nside
                     )
                 elif comp == "extra_feature":
-                    len_lon = len(center_lon_deg)
-                    len_lat = len(center_lon_deg)
-                    len_rad = len(radius_deg)
-                    len_val = len(value)
-                    if len_lon == len_lat == len_rad == len_val:
-                        hp_map = np.zeros(hp.nside2npix(nside), dtype=np.float64)
-                        for i in range(len_lon):
-                            #print(f"Feature {i} @ {frequency}GHz: center = ({center_lon_deg[i]}, {center_lat_deg[i]}), radius = {radius_deg[i]}˚, value = {value[i]*1e6} uK")
-                            self.add_filled_circle_hp(hp_map, nside, center_lon_deg[i], center_lat_deg[i], radius_deg[i], value[i]*sed_factors[i])
-                            hp_map_reduced = HPTools.convolve_and_reduce(
-                                hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
-                            )
-                    else:
-                        raise ValueError(f"Shape mismatch: center_lon_deg={len_lon}, center_lat_deg={len_lat}, radius={radius_deg}, value={len_val}")
-                    
+                    hp_map = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+                    for i in range(len(center_lon_deg)):
+                        self.add_filled_circle_hp(hp_map, nside, center_lon_deg[i], center_lat_deg[i], radius_deg[i], value[i]*sed_factors[i])
+                        hp_map_reduced = HPTools.convolve_and_reduce(
+                            hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                        )
                 else: 
                     hp_map_reduced = HPTools.convolve_and_reduce(
                         hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
@@ -379,8 +428,7 @@ class ProcessMaps():
         return hp_map_reduced
 
 
-    def produce_and_save_maps(self, center_lon_deg: list, center_lat_deg: list, 
-                                radius_deg: list, value: list, sed: list):
+    def produce_and_save_maps(self):
         """
         Produce CFN maps across realisations and frequencies.
         center_lon_deg (list): list for longitudgnal positions (in degree) of n features on a single frequency map. With shape = (n features,)
@@ -397,13 +445,8 @@ class ProcessMaps():
             realisation += self.start_realisation  # Adjust for starting realisation
             for (i, frequency) in enumerate(frequencies):
                 if 'extra_feature' in self.components:
-                    if np.shape(sed)[1] != len(frequencies):
-                        raise ValueError(f"Frequencies length mismatch. SED shape ={np.shape(sed)} = (N features, M frequencies). freq = {len(frequencies)}")
+                    center_lon_deg, center_lat_deg, radius_deg, value, sed = self.build_point_sources()
                     cfn_output_path = self.file_templates["cfne"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
-                    #if sed[:, i] == 0: 
-                    #    cfn_map = self.create_cfn(frequency, realisation, save=True)
-                    #    hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz without injected feature, realisation {realisation}")
-                    #else:
                     print(f'Creating CFN with injected feature at {frequency} GHz...')
                     sed_array = np.array(sed)
                     cfn_map = self.create_cfn_with_extra_features(frequency, realisation, save=True, 
@@ -419,7 +462,7 @@ class ProcessMaps():
                 if os.path.exists(cfn_output_path) and self.overwrite == False:
                     print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                     continue
-                else:
+                if 'extra_feature' not in self.components:
                     cfn_map = self.create_cfn(frequency, realisation, save=True)
                 hp.write_map(cfn_output_path, cfn_map, overwrite=True)
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")

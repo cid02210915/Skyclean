@@ -5,6 +5,7 @@ import numpy as np
 import jax
 import subprocess, sys
 import s2wav.filters as filters
+from typing import Literal
 
 from .download import DownloadData
 from .map_processing import ProcessMaps
@@ -36,11 +37,19 @@ class Pipeline:
         F = None,
         reference_vectors = None,
         nsamp: float = 1200, 
-        feature_center_lon_deg: list = [45, 60], 
-        feature_center_lat_deg: list = [10, 30], 
-        feature_radius_deg: list = [5, 5], 
-        feature_value: list = [700e-6, 700e-6], 
-        feature_sed: list = [[2, 0, 1], [1, 2, 0]]
+        ps_component: str = "faintradiops",
+        n_points: int = 10,
+        lon_range: tuple[float, float] | None = None,
+        lat_range: tuple[float, float] = (20.0, 90.0),
+        brightness_percentile: tuple[float, float] | None = (75.0, 100.0),
+        mode: Literal["random", "brightest"] = "random",
+        random_seed: int = 1,
+        factor: int | float = 50.0,
+        #feature_center_lon_deg: list = [45, 60], 
+        #feature_center_lat_deg: list = [10, 30], 
+        #feature_radius_deg: list = [5, 5], 
+        #feature_value: list = [700e-6, 700e-6], 
+        #feature_sed: list = [[2, 0, 1], [1, 2, 0]]
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -64,11 +73,23 @@ class Pipeline:
         self.lam_str = f"{lam:.1f}" 
         self.nsamp = nsamp
         # arguements for adding extra features
-        self.feature_center_lon_deg = feature_center_lon_deg
-        self.feature_center_lat_deg = feature_center_lat_deg
-        self.feature_radius_deg = feature_radius_deg
-        self.feature_value = feature_value
-        self.feature_sed = feature_sed
+        #self.feature_center_lon_deg = feature_center_lon_deg
+        #self.feature_center_lat_deg = feature_center_lat_deg
+        #self.feature_radius_deg = feature_radius_deg
+        #self.feature_value = feature_value
+        #self.feature_sed = feature_sed
+        self.ps_component = ps_component
+        self.n_points = int(n_points)
+        self.lon_range = lon_range
+        self.lat_range = lat_range
+        self.brightness_percentile = brightness_percentile
+        self.mode = mode
+        self.random_seed = int(random_seed)
+        self.factor = factor
+
+        print(self.ps_component)
+
+        
 
     # -------------------------
     # Steps
@@ -113,8 +134,18 @@ class Pipeline:
             directory=self.directory,
             method=self.method,
             overwrite=self.overwrite,
+            ps_component = self.ps_component, 
+            n_points = self.n_points,
+            lon_range = self.lon_range,
+            lat_range = self.lat_range,
+            brightness_percentile = self.brightness_percentile,
+            mode = self.mode,
+            random_seed = self.random_seed,
+            factor = self.factor,
+
         )
-        processor.produce_and_save_maps(self.feature_center_lon_deg, self.feature_center_lat_deg, self.feature_radius_deg, self.feature_value, self.feature_sed)
+        #processor.produce_and_save_maps(self.feature_center_lon_deg, self.feature_center_lat_deg, self.feature_radius_deg, self.feature_value, self.feature_sed)
+        processor.produce_and_save_maps()
 
     def step_wavelets(self):
         print("--- PRODUCING WAVELET TRANSFORMS ---")
@@ -136,6 +167,14 @@ class Pipeline:
             directory=self.directory,
             method=self.method,
             overwrite=self.overwrite,
+            ps_component = self.ps_component, 
+            n_points = self.n_points,
+            lon_range = self.lon_range,
+            lat_range = self.lat_range,
+            brightness_percentile = self.brightness_percentile,
+            mode = self.mode,
+            random_seed = self.random_seed,
+            factor = self.factor,
         )
         processor.produce_and_save_wavelet_transforms(
             self.N_directions,
@@ -648,7 +687,29 @@ class Pipeline:
 # when not using multi-processing 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the SILC pipeline with configurable parameters and GPU selection."
+        description="Run the SILC pipeline with configurable parameters and GPU selection.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "Example usage:\n"
+            "  python -m skyclean.silc.pipeline \\\n"
+            "    --components cmb tsz extra_feature \\\n"
+            "    --wavelet-components cfne \\\n"
+            "    --ilc-components cmb \\\n"
+            "    --frequencies 030 044 \\\n"
+            "    --realisations 1 \\\n"
+            "    --start-realisation 1 \\\n"
+            "    --lmax 511 \\\n"
+            "    --method jax_cuda \\\n"
+            "    --ps-component faintradiops \\\n"
+            "    --n-points 10 \\\n"
+            "    --lat-range 20 90 \\\n"
+            "    --brightness-percentile 75 100 \\\n"
+            "    --mode random \\\n"
+            "    --random-seed 1 \\\n"
+            "    --factor 60 \\\n"
+            "    --overwrite \\\n"
+            "    --steps process"
+        ),
     )
     parser.add_argument('--components', nargs='+',
                         default=["cmb", "sync", "dust", "noise", "tsz"],
@@ -682,16 +743,22 @@ def main():
                         help="If set, overwrite existing files.")
     parser.add_argument('--directory', type=str, default='/Scratch/agnes/data',
                         help="Base directory for input/output data.")
-    parser.add_argument('--feature-lon', type=list,
-                        help="list of positions (longitude in degree) for extra features in a single map.")
-    parser.add_argument('--feature-lat', type=list,
-                        help="list of positions (latitude in degree) for extra features in a single map.")
-    parser.add_argument('--feature-radius', type=list,
-                        help="list of radius (radius in degree) for extra features in a single map.")
-    parser.add_argument('--feature-vals', type=list,
-                        help="list of radius (vals in K) for extra features in a single map.")
-    parser.add_argument('--feature-sed', type=list,
-                        help="SED of extra features.")
+    parser.add_argument('--ps-component', type=str, default='faintradiops',
+                        help="Point-source component template key used for injected extra features.")
+    parser.add_argument('--n-points', type=int, default=10,
+                        help="Number of point sources to inject.")
+    parser.add_argument('--lon-range', nargs=2, type=float, default=None, metavar=('LON_MIN', 'LON_MAX'),
+                        help="Longitude range in degrees for source selection. Omit to use full range.")
+    parser.add_argument('--lat-range', nargs=2, type=float, default=(20.0, 90.0), metavar=('LAT_MIN', 'LAT_MAX'),
+                        help="Latitude range in degrees for source selection.")
+    parser.add_argument('--brightness-percentile', nargs=2, type=float, default=(75.0, 100.0), metavar=('PCT_MIN', 'PCT_MAX'),
+                        help="Brightness percentile range used to preselect candidate sources.")
+    parser.add_argument('--mode', type=str, choices=['random', 'brightest'], default='random',
+                        help="Source selection mode.")
+    parser.add_argument('--random-seed', type=int, default=1,
+                        help="Random seed used when mode='random'.")
+    parser.add_argument('--factor', type=float, default=50.0,
+                        help="Feature size enlargement factor.")
     
     
     
@@ -758,11 +825,14 @@ def main():
         directory=args.directory,
         constraint=args.constraint,
         nsamp=args.nsamp,
-        feature_center_lon_deg=args.feature_lon,
-        feature_center_lat_deg=args.feature_lat,
-        feature_radius_deg=args.feature_radius,
-        feature_value=args.feature_vals,
-        feature_sed=args.feature_sed
+        ps_component=args.ps_component,
+        n_points=args.n_points,
+        lon_range=tuple(args.lon_range) if args.lon_range is not None else None,
+        lat_range=tuple(args.lat_range),
+        brightness_percentile=tuple(args.brightness_percentile),
+        mode=args.mode,
+        random_seed=args.random_seed,
+        factor=args.factor,
     )
     pipeline.run(steps=args.steps)
 
