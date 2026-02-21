@@ -924,9 +924,9 @@ class SILCTools():
                         weight_vectors[i, j] = numerator / denominator
 
         if len(singular_matrices_location) > 0:
-            #print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
+            print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
         if len(singular_constraints_location) > 0:
-            #print("Discovered ", len(singular_constraints_location),
+            print("Discovered ", len(singular_constraints_location),
               "constraint singularities (F^T R^{-1} F) at scale", scale, "realisation", realisation)
 
         # save final weight vector matrix
