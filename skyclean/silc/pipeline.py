@@ -684,7 +684,7 @@ class Pipeline:
 # when not using multi-processing 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the SILC pipeline with configurable parameters and GPU selection.",
+        description="Run the SILC pipeline with configurable parameters.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "Example usage:\n"
@@ -757,18 +757,7 @@ def main():
     parser.add_argument('--factor', type=float, default=50.0,
                         help="Feature size enlargement factor.")
     
-    
-    
-    # GPU selection
-    parser.add_argument('--gpu', type=int, default=0,
-                        help="Index of the GPU to use (e.g. 0 or 1).")
-    parser.add_argument(
-        '--mem-fraction',
-        type=float,
-        default=0.7,
-        help="GPU memory fraction to use (0–1, default: 0.7). "
-             "Used to limit JAX/XLA GPU memory usage."
-    )
+
 
     # Constrained ILC options (pipeline already supports these)
     parser.add_argument(
@@ -799,11 +788,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    # GPU environment setup
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-    os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(args.mem_fraction)
-    print(f"Using GPU {args.gpu} with memory fraction {args.mem_fraction} for computation.")
 
     pipeline = Pipeline(
         components=args.components,
