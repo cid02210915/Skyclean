@@ -479,14 +479,14 @@ class ProcessMaps():
                                                                     value = value, 
                                                                     sed_factors = sed_array[:, i]/sed_array[:, 0])
                     # visualise the map to check
-                    hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
+                    # hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
                 else:
                     cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                     if os.path.exists(cfn_output_path) and self.overwrite == False:
                         print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                         continue
                     cfn_map = self.create_cfn(frequency, realisation, save=True)
-                    hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz, realisation {realisation}")
+                    # hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz, realisation {realisation}")
                 hp.write_map(cfn_output_path, cfn_map, overwrite=True)
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
 

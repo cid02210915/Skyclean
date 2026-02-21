@@ -207,7 +207,7 @@ class SILCTools():
         h = gen.kappa(x)
 
         mask = (ells >= ell_min) & (ells <= ell_max)
-        print(f"[fwhm_wavelet] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
+        # print(f"[fwhm_wavelet] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
         h = h * mask
 
         # Eq (42)
@@ -345,7 +345,7 @@ class SILCTools():
         h = gen.kappa(x)
 
         mask = (ells >= ell_min) & (ells <= ell_max)
-        print(f"[n_modes_wavelet_band] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
+        # print(f"[n_modes_wavelet_band] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
         h = h * mask
 
         S = float(np.sum((2.0 * ells + 1.0) * (h * h)))
@@ -520,8 +520,8 @@ class SILCTools():
         
         if (i == 0) and (fq == 0):
             a = doubled_MW_wav_c_j[key_i]
-            print(f"[cov input] scale={scale} map shape={a.shape} -> "
-                  f"L={a.shape[0]} expected nphi={2*a.shape[0]-1} actual nphi={a.shape[1]}")
+            #print(f"[cov input] scale={scale} map shape={a.shape} -> "
+            #      f"L={a.shape[0]} expected nphi={2*a.shape[0]-1} actual nphi={a.shape[1]}")
 
         L = int(doubled_MW_wav_c_j[key_i].shape[0])
         
@@ -596,14 +596,14 @@ class SILCTools():
                     N_modes_full  = float(np.sum((2.0 * ells + 1.0) * (h * h)))
                     N_modes_local = SILCTools.n_modes_wavelet_band(L, lam_list, j, fwhm_rad, lmax=int(lmax))
             
-            print(
-                f"[locality] {tag}  "
-                f"FWHM={fwhm_arcmin:.3f} arcmin  "
-                f"f_sky(paper)={f_sky_paper:.3e}  "
-                f"f_sky(eff_hp,diag)={f_sky_eff_hp:.3e}  "
-                f"N_modes(full)={N_modes_full:.3e}  "
-                f"N_modes(local,paper)={N_modes_local:.3e}"
-            )
+            #print(
+            #    f"[locality] {tag}  "
+            #    f"FWHM={fwhm_arcmin:.3f} arcmin  "
+            #    f"f_sky(paper)={f_sky_paper:.3e}  "
+            #    f"f_sky(eff_hp,diag)={f_sky_eff_hp:.3e}  "
+            #    f"N_modes(full)={N_modes_full:.3e}  "
+            #    f"N_modes(local,paper)={N_modes_local:.3e}"
+            #)
 
         return i, fq, smoothed
 
@@ -832,7 +832,7 @@ class SILCTools():
         else:
             # Unconstrained ILC uses the all-ones vector; no F/extract_comp needed
             identity_vector = np.ones(N_freq, dtype=float)
-            print (identity_vector)   
+            # print (identity_vector)   
 
             # ----------------------------------------------------------
 
@@ -924,9 +924,9 @@ class SILCTools():
                         weight_vectors[i, j] = numerator / denominator
 
         if len(singular_matrices_location) > 0:
-            print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
+            #print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
         if len(singular_constraints_location) > 0:
-            print("Discovered ", len(singular_constraints_location),
+            #print("Discovered ", len(singular_constraints_location),
               "constraint singularities (F^T R^{-1} F) at scale", scale, "realisation", realisation)
 
         # save final weight vector matrix
@@ -1148,7 +1148,7 @@ class SILCTools():
         # 3) build filters and synthesise
         L = int(lmax) + 1
         
-        print('shapes:',[w.shape for w in trimmed_maps])
+        # print('shapes:',[w.shape for w in trimmed_maps])
         MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=int(1), lam=float(lam))
 
         # 4) Save
