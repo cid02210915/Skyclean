@@ -87,8 +87,6 @@ class Pipeline:
         self.random_seed = int(random_seed)
         self.factor = factor
 
-        print(self.ps_component)
-
         
 
     # -------------------------
@@ -144,7 +142,6 @@ class Pipeline:
             factor = self.factor,
 
         )
-        #processor.produce_and_save_maps(self.feature_center_lon_deg, self.feature_center_lat_deg, self.feature_radius_deg, self.feature_value, self.feature_sed)
         processor.produce_and_save_maps()
 
     def step_wavelets(self):
@@ -659,7 +656,7 @@ class Pipeline:
             steps = ["download", "process", "wavelets", "ilc"]
 
         start_time = time.perf_counter()
-        print(f"==== RUN for lam={self.lam}, realisation={self.start_realisation + self.realisations} ====")
+        print(f"==== RUN for lam={self.lam}, realisation {self.start_realisation} to {self.start_realisation + self.realisations} ====")
 
         if "download" in steps:
             self.step_download()

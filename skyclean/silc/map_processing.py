@@ -5,6 +5,13 @@ from .map_tools import *
 from .add_point_source import PointSource
 
 
+def read_map_with_known_order(path: str, comp: str | None = None, frequency: str | int | None = None):
+    # Only low-frequency noise maps are stored in NESTED ordering.
+    freq = str(frequency).zfill(3) if frequency is not None else None
+    nest = (comp == "noise") and (freq in {"030", "044", "070"})
+    return hp.read_map(path, verbose=False, nest=nest)
+
+
 class ProcessMaps():
     """Process downloaded maps."""
     def __init__(self, 
@@ -53,6 +60,7 @@ class ProcessMaps():
         files = FileTemplates(directory)
 
         self.file_templates = files.file_templates
+        self.download_templates = files.download_templates
 
         if 'extra_feature' in components:
             self.ps_component = ps_component
@@ -155,9 +163,8 @@ class ProcessMaps():
         vec = hp.ang2vec(theta, phi)
         pix = hp.query_disc(n_side, vec, np.deg2rad(radius_deg))
         hp_map[pix] = value
-        #out = np.array(hp_map, copy=True)
-        #out[pix] = value
-        #return out
+        if pix.size == 0:
+            print(f"Warning: No pixels found for circle at ({center_lon_deg}, {center_lat_deg}) with radius {radius_deg}˚.")
     
 
     def create_cfn(self, frequency: str, realisation: int, save=True):
@@ -181,7 +188,19 @@ class ProcessMaps():
         nside = HPTools.get_nside_from_lmax(desired_lmax)
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
 
-        for comp in self.components:
+        if 'all' in self.components:
+            # load all components in download_templates except for 'extra_feature', 'cib', and 'mask' 
+            components = ['cmb']
+            for comp in self.download_templates.keys():
+                if comp == "extra_feature" or comp == "cib" or comp == "mask":
+                    continue
+                else:
+                    components.append(comp)
+            print(f"Loading all components for CFN creation: {components}")
+        else: 
+            components = self.components
+        
+        for comp in components:
          
             if comp == "cib" and frequency not in {"353", "545", "857"}:
                 continue
@@ -194,7 +213,7 @@ class ProcessMaps():
             )
     
             if os.path.exists(output_path) and self.overwrite is False:
-                hp_map_reduced = hp.read_map(output_path)
+                hp_map_reduced = read_map_with_known_order(output_path)
             else:
                 if comp == "noise":
                     # Choose an existing noise realisation ID from disk
@@ -221,7 +240,8 @@ class ProcessMaps():
                         frequency=frequency, realisation=realisation
                     )
     
-                hp_map = hp.read_map(filepath)
+                #hp_map = hp.read_map(filepath)
+                hp_map = read_map_with_known_order(filepath, comp=comp, frequency=frequency)
 
                 if comp == "cib":
                     hp_map = HPTools.unit_convert_cib(hp_map, frequency)
@@ -294,7 +314,7 @@ class ProcessMaps():
             )
     
             if os.path.exists(output_path) and self.overwrite is False:
-                hp_map_reduced = hp.read_map(output_path)
+                hp_map_reduced = read_map_with_known_order(output_path)
             else:
                 if comp == "noise":
                     # Choose an existing noise realisation ID from disk
@@ -321,7 +341,7 @@ class ProcessMaps():
                         frequency=frequency, realisation=realisation
                     )
     
-                hp_map = hp.read_map(filepath)
+                hp_map = read_map_with_known_order(filepath, comp=comp, frequency=frequency)
 
                 if comp == "cib":
                     hp_map = HPTools.unit_convert_cib(hp_map, frequency)
@@ -394,7 +414,7 @@ class ProcessMaps():
 
         # Fast path: reuse if exists and not overwriting
         if (not self.overwrite) and os.path.exists(out_path):
-            return hp.read_map(out_path)
+            return read_map_with_known_order(out_path)
 
         # Build input path
         if comp == "noise":
@@ -409,7 +429,7 @@ class ProcessMaps():
             )
 
         # Load, convert units, and process
-        hp_map = hp.read_map(in_path)
+        hp_map = read_map_with_known_order(in_path, comp=comp, frequency=frequency)
         if comp != "cmb":  
             hp_map = HPTools.unit_convert(hp_map, frequency)
         
@@ -445,8 +465,11 @@ class ProcessMaps():
             realisation += self.start_realisation  # Adjust for starting realisation
             for (i, frequency) in enumerate(frequencies):
                 if 'extra_feature' in self.components:
-                    center_lon_deg, center_lat_deg, radius_deg, value, sed = self.build_point_sources()
                     cfn_output_path = self.file_templates["cfne"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                    if os.path.exists(cfn_output_path) and self.overwrite == False:
+                        print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
+                        continue
+                    center_lon_deg, center_lat_deg, radius_deg, value, sed = self.build_point_sources()
                     print(f'Creating CFN with injected feature at {frequency} GHz...')
                     sed_array = np.array(sed)
                     cfn_map = self.create_cfn_with_extra_features(frequency, realisation, save=True, 
@@ -459,11 +482,11 @@ class ProcessMaps():
                     hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
                 else:
                     cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
-                if os.path.exists(cfn_output_path) and self.overwrite == False:
-                    print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
-                    continue
-                if 'extra_feature' not in self.components:
+                    if os.path.exists(cfn_output_path) and self.overwrite == False:
+                        print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
+                        continue
                     cfn_map = self.create_cfn(frequency, realisation, save=True)
+                    hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz, realisation {realisation}")
                 hp.write_map(cfn_output_path, cfn_map, overwrite=True)
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
 
@@ -496,7 +519,7 @@ class ProcessMaps():
             # test if scale 0 exists; this means the transform has already been created
             print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation} already exist. Skipping generation.")
             return None
-        hp_map = hp.read_map(filepath)
+        hp_map = read_map_with_known_order(filepath)
         L = lmax + 1
         mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method = method)
         MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)

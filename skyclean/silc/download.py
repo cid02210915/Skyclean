@@ -58,6 +58,10 @@ class DownloadData():
 
             # Format the URL with the current frequency and realisation
             url = template.format(frequency=frequency, realisation=realisation)
+            # --- special case: stronguchii @ 070 is "_full.f" on PLA, but we want to save as ".fits" locally ---
+            if component == "stronguchii" and frequency == "070":
+                url = url.replace("_full.fits", "_full.f") 
+
             # Send a GET request to the URL
             response = requests.get(url)
             # Check if the request was successful
@@ -142,28 +146,38 @@ class DownloadData():
         """
         # Download foregrounds, which have only one realisation.
         print("Downloading foreground components...")
-        for component in self.components:
-            if component == "cmb" or component == "noise" or component == "extra_feature":
-                continue
-            else:
-                for frequency in self.frequencies:
+        if 'all' in self.components:
+            for component in self.download_templates:
+                if component == "cmb" or component == "noise" or component == "extra_feature" or component == "cib" or component == "mask":
+                    continue
+                else:
+                    for frequency in self.frequencies:
+                        self.download_foreground_component(component, frequency)
 
-                    # minimal CIB guard
-                    if component == "cib" and frequency not in {"353", "545", "857"}:
-                        continue
+        else:
+            for component in self.components:
+                if component == "cmb" or component == "noise" or component == "extra_feature":
+                    continue
+                else:
+                    for frequency in self.frequencies:
 
-                    self.download_foreground_component(component, frequency)
+                        # minimal CIB guard
+                        if component == "cib" and frequency not in {"353", "545", "857"}:
+                            continue
+
+                        self.download_foreground_component(component, frequency)
 
         # now download CMB and noise, which are realisation dependent.
         for realisation in range(self.realisations):
             realisation += self.start_realisation  # Adjust for starting realisation
             print(realisation)
-            print(f"Downloading CMB & noise for realisation {realisation}...")
+            print(f"Downloading CMB for realisation {realisation}...")
             self.generate_and_save_cmb_realisation(realisation)
-            if 'noise' in self.components:
+            if 'noise' in self.components or 'all' in self.components:
                 if realisation > 299: 
                     continue # there are only ffp10 300 noise realisations
                 else:
+                    print(f"Downloading noise for realisation {realisation}...")
                     for frequency in self.frequencies:
                         self.download_foreground_component("noise", frequency, realisation)
 

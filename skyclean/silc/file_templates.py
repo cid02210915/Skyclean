@@ -61,7 +61,13 @@ class FileTemplates():
             "strongradiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_strongradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
             "faintirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
             "faintradiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
-            "clusterirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_clusterirps-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            #"clusterirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_clusterirps-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            #"co": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_co-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "freefree": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_freefree-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "ksz": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_kineticsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "spindust": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_spindust-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "stronguchii": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_stronguchii-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+
         }
 
         self.file_templates = {
@@ -76,7 +82,12 @@ class FileTemplates():
         "strongradiops": os.path.join(self.output_directories["cmb_realisations"], "strongradiops_f{frequency}.fits"),
         "faintirps": os.path.join(self.output_directories["cmb_realisations"], "faintirps_f{frequency}.fits"),
         "faintradiops": os.path.join(self.output_directories["cmb_realisations"], "faintradiops_f{frequency}.fits"),
-        "clusterirps": os.path.join(self.output_directories["cmb_realisations"], "clusterirps_f{frequency}.fits"),
+        #"clusterirps": os.path.join(self.output_directories["cmb_realisations"], "clusterirps_f{frequency}.fits"),
+        #"co": os.path.join(self.output_directories["cmb_realisations"], "co_f{frequency}.fits"),
+        "freefree": os.path.join(self.output_directories["cmb_realisations"], "freefree_f{frequency}.fits"),
+        "ksz": os.path.join(self.output_directories["cmb_realisations"], "ksz_f{frequency}.fits"),
+        "spindust": os.path.join(self.output_directories["cmb_realisations"], "spindust_f{frequency}.fits"),
+        "stronguchii": os.path.join(self.output_directories["cmb_realisations"], "stronguchii_f{frequency}.fits"),
 
         # ---------------- processed maps ----------------
         "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
@@ -87,6 +98,16 @@ class FileTemplates():
         "processed_cib":   os.path.join(self.output_directories["processed_maps"], "processed_cib_f{frequency}_lmax{lmax}.npy"),
         "processed_strongirps":   os.path.join(self.output_directories["processed_maps"], "processed_strongirps_f{frequency}_lmax{lmax}.npy"),
         "processed_strongradiops":   os.path.join(self.output_directories["processed_maps"], "processed_strongradiops_f{frequency}_lmax{lmax}.npy"),
+        "processed_faintirps":   os.path.join(self.output_directories["processed_maps"], "processed_faintirps_f{frequency}_lmax{lmax}.npy"),
+        "processed_faintradiops":   os.path.join(self.output_directories["processed_maps"], "processed_faintradiops_f{frequency}_lmax{lmax}.npy"),
+        "processed_clusterirps":   os.path.join(self.output_directories["processed_maps"], "processed_clusterirps_f{frequency}_lmax{lmax}.npy"),
+        "processed_strongradiops":   os.path.join(self.output_directories["processed_maps"], "processed_strongradiops_f{frequency}_lmax{lmax}.npy"),
+        "processed_co":   os.path.join(self.output_directories["processed_maps"], "processed_co_f{frequency}_lmax{lmax}.npy"),
+        "processed_freefree":   os.path.join(self.output_directories["processed_maps"], "processed_freefree_f{frequency}_lmax{lmax}.npy"),
+        "processed_ksz":   os.path.join(self.output_directories["processed_maps"], "processed_ksz_f{frequency}_lmax{lmax}.npy"),
+        "processed_spindust":   os.path.join(self.output_directories["processed_maps"], "processed_spindust_f{frequency}_lmax{lmax}.npy"),
+        "processed_stronguchii":   os.path.join(self.output_directories["processed_maps"], "processed_stronguchii_f{frequency}_lmax{lmax}.npy"),
+
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
         "cfne":            os.path.join(self.output_directories["cfne"],           "cfne_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
@@ -165,8 +186,8 @@ class FileTemplates():
             "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"
         ),
 
-        "ilc_spectrum": os.path.join(
-            self.output_directories["ilc_synthesised_maps"],
+        "ilc_synth_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_spec"],
             "{mode}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 

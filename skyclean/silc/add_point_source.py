@@ -285,7 +285,6 @@ class PointSource:
         self.file_templates = self.templates.file_templates
 
     def _path_for_freq(self, fre: str) -> str:
-        print(self.ps_component)
         tmpl = self.file_templates[self.ps_component]
         return tmpl.format(frequency=fre)
 
