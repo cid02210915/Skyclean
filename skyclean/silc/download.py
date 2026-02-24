@@ -45,6 +45,14 @@ class DownloadData():
             Returns:
                 None
             """ 
+            freq = str(frequency).zfill(3)
+
+            # FFP10 CO has no signal maps at 30/44/70 GHz.
+            # Skip download here; map_processing injects zeros for these channels.
+            if component == "co" and freq in {"030", "044", "070", "217"}:
+                print(f"Skipping CO download at {freq} GHz (no CO signal map for this channel).")
+                return None
+
             template, file_template = self.download_templates[component], self.file_templates[component]
             if realisation is None: 
                 # foreground components same across realisations
@@ -56,9 +64,22 @@ class DownloadData():
                 print(f"File {filename} already exists. Skipping download.")
                 return None
 
-            # Format the URL with the current frequency and realisation
-            url = template.format(frequency=frequency, realisation=realisation)
-            # --- special case: stronguchii @ 070 is "_full.f" on PLA, but we want to save as ".fits" locally ---
+            # PLA has a naming inconsistency for clusterirps: 44 GHz is published as 040.
+            remote_frequency = "040" if (component == "clusterirps" and freq == "044") else frequency
+
+            # PLA provides exactly 300 noise maps: mc_00000 ... mc_00299.
+            # Reuse cyclically so r00300 -> mc_00000, r00301 -> mc_00001, etc.
+            remote_realisation = realisation
+            if component == "noise" and realisation is not None:
+                remote_realisation = int(realisation) % 300
+                if int(realisation) != remote_realisation:
+                    print(
+                        f"Noise realisation rollover: requested r{int(realisation):05d}, "
+                        f"reusing source mc_{remote_realisation:05d}."
+                    )
+            url = template.format(frequency=remote_frequency, realisation=remote_realisation)
+            
+            # stronguchii @ 070 is "_full.f" on PLA, but we want to save as ".fits" locally ---
             if component == "stronguchii" and frequency == "070":
                 url = url.replace("_full.fits", "_full.f") 
 
@@ -174,12 +195,9 @@ class DownloadData():
             print(f"Downloading CMB for realisation {realisation}...")
             self.generate_and_save_cmb_realisation(realisation)
             if 'noise' in self.components or 'all' in self.components:
-                if realisation > 299: 
-                    continue # there are only ffp10 300 noise realisations
-                else:
-                    print(f"Downloading noise for realisation {realisation}...")
-                    for frequency in self.frequencies:
-                        self.download_foreground_component("noise", frequency, realisation)
+                print(f"Downloading noise for realisation {realisation}...")
+                for frequency in self.frequencies:
+                    self.download_foreground_component("noise", frequency, realisation)
 
 
 # components = ["sync", "dust"]

@@ -165,6 +165,11 @@ class ProcessMaps():
         hp_map[pix] = value
         if pix.size == 0:
             print(f"Warning: No pixels found for circle at ({center_lon_deg}, {center_lat_deg}) with radius {radius_deg}˚.")
+
+    @staticmethod
+    def _co_is_missing_channel(comp: str, frequency: str | int) -> bool:
+        """CO is absent in FFP10 at 30/44/70 GHz; treat as exact zero."""
+        return (comp == "co") and (str(frequency).zfill(3) in {"030", "044", "070", "217"})
     
 
     def create_cfn(self, frequency: str, realisation: int, save=True):
@@ -215,6 +220,14 @@ class ProcessMaps():
             if os.path.exists(output_path) and self.overwrite is False:
                 hp_map_reduced = read_map_with_known_order(output_path)
             else:
+                if self._co_is_missing_channel(comp, frequency):
+                    hp_map_reduced = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+                    if save:
+                        save_map(output_path, hp_map_reduced, self.overwrite)
+                    print(f"Using zero CO map at {frequency} GHz (no CO signal for this channel).")
+                    cfn += hp_map_reduced
+                    continue
+
                 if comp == "noise":
                     # Choose an existing noise realisation ID from disk
                     noise_dir = os.path.join(self.directory, "CMB_realisations")
@@ -272,6 +285,12 @@ class ProcessMaps():
                     
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
+            hp.mollview(
+                hp_map_reduced,
+                title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)"
+            )
+            print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
+            print(f"Shape of component '{comp}': {hp_map_reduced.shape}")
             cfn += hp_map_reduced
         return cfn
 
@@ -316,6 +335,14 @@ class ProcessMaps():
             if os.path.exists(output_path) and self.overwrite is False:
                 hp_map_reduced = read_map_with_known_order(output_path)
             else:
+                if self._co_is_missing_channel(comp, frequency):
+                    hp_map_reduced = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+                    if save:
+                        save_map(output_path, hp_map_reduced, self.overwrite)
+                    print(f"Using zero CO map at {frequency} GHz (no CO signal for this channel).")
+                    cfn += hp_map_reduced
+                    continue
+
                 if comp == "noise":
                     # Choose an existing noise realisation ID from disk
                     noise_dir = os.path.join(self.directory, "CMB_realisations")
@@ -378,6 +405,11 @@ class ProcessMaps():
                 
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
+            hp.mollview(
+                hp_map_reduced,
+                title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)"
+            )
+            print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
             cfn += hp_map_reduced
         return cfn
     
@@ -415,6 +447,12 @@ class ProcessMaps():
         # Fast path: reuse if exists and not overwriting
         if (not self.overwrite) and os.path.exists(out_path):
             return read_map_with_known_order(out_path)
+
+        if self._co_is_missing_channel(comp, frequency):
+            hp_map_reduced = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+            if save:
+                save_map(out_path, hp_map_reduced, self.overwrite)
+            return hp_map_reduced
 
         # Build input path
         if comp == "noise":
