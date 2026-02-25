@@ -3,45 +3,6 @@
 # License: MIT
 
 import argparse
-import os
-import sys
-
-# GPU configuration
-# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.9"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0" # remove this line because it forces the use of physical GPU 0, but Slurm may assign different GPU IDs
-
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
-
-import jax
-jax.config.update("jax_default_matmul_precision", "float32")
-
-print("available JAX GPU devices:", jax.devices("gpu")) # check available GPUs
-
-jax.config.update("jax_enable_x64", False)  # Use 32-bit
-try:
-    gpus = jax.devices("gpu")
-except Exception:
-    gpus = []
-if not gpus:
-    print("No GPU visible to JAX. devices() =", jax.devices())
-else:
-    gpu = gpus[0]
-    info = gpu.memory_stats()
-
-    if info is None:
-        print("JAX memory_stats() not available on this backend.")
-        print("Device:", gpu)
-    else:
-        bytes_limit = info.get("bytes_limit", None)
-        bytes_in_use = info.get("bytes_in_use", None)
-
-        if bytes_limit is None:
-            print("memory_stats() returned keys:", list(info.keys()))
-        else:
-            print("GPU 0 bytes_limit:", bytes_limit / 1024**3, "GiB")
-            if bytes_in_use is not None:
-                print("GPU 0 bytes_in_use:", bytes_in_use / 1024**3, "GiB")
-
 import subprocess # for nvidia-smi call for memory check
 import numpy as np
 import jax.numpy as jnp
@@ -57,13 +18,14 @@ import orbax.checkpoint as ocp
 import atexit
 import re
 from pathlib import Path
+import os
+import shutil
 
 from .model import S2_UNET
 from .data import CMBFreeILC
 from skyclean.silc.utils import create_dir
 from skyclean.silc.file_templates import FileTemplates
 
-import matplotlib.pyplot as plt
 
 
 def _get_physical_id(jax_device_id: int = 0) -> str:
@@ -119,7 +81,8 @@ class Train:
                  batch_size: int = 32, shuffle: bool = True, split: list = [0.8,0.2], epochs: int = 120, 
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0), 
                  directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = 'pixel', 
-                 random_generator: bool = False):
+                 random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
+                 prefetch: bool = False):
         """
         Parameters:
             component (str): components to pass through silc pipeline. Options: 'cfn', 'cfne'
@@ -143,6 +106,7 @@ class Train:
             resume_training (bool): Whether to resume training from the last checkpoint.
             loss_tag (str | None): Which loss to use ('pixel' or 'harmonic').
             random_generator (bool): Whether to use random generator for test maps.
+            prefetch (bool): Whether to enable tf.data prefetching.
         """ 
 
         self.component = component
@@ -164,9 +128,14 @@ class Train:
         self.directory = directory
         self.resume_training = resume_training
         self.loss_tag = (loss_tag or "pixel").lower()
+        self.eval_every = eval_every
+        self.eval_steps = eval_steps
+        self.prefetch = prefetch
 
         if self.loss_tag not in {"pixel", "harmonic"}:
             raise ValueError(f"Unsupported loss_tag={self.loss_tag!r}. Use 'pixel' or 'harmonic'.")
+        if self.eval_every < 1:
+            raise ValueError(f"eval_every must be >= 1, got {self.eval_every}.")
         self.random_generator = random_generator
 
         self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, 
@@ -187,6 +156,52 @@ class Train:
 
         # ensure checkpoints are saved before exit
         atexit.register(lambda: getattr(self.checkpointer, "wait_until_finished", lambda: None)())
+
+    @staticmethod
+    def _is_valid_checkpoint_dir(path: Path) -> bool:
+        """Return True only for fully materialized Orbax checkpoints."""
+        if not path.is_dir():
+            return False
+        if (path / "_METADATA").exists() or (path / "_CHECKPOINT_METADATA").exists():
+            return True
+        # Some Orbax/fs combinations may not emit metadata marker reliably.
+        # Accept as checkpoint only when folder is not just plotting artifacts.
+        ignore = {"prediction.png", "training_metrics.png", "training_log.npy", "spectrum.png"}
+        names = {p.name for p in path.iterdir()}
+        return any(name not in ignore for name in names)
+
+    @staticmethod
+    def _cleanup_temp_dirs(base: Path, epoch: int | None = None) -> None:
+        """Remove stale Orbax tmp checkpoint directories."""
+        prefix = f"checkpoint_{epoch}" if epoch is not None else "checkpoint_"
+        for p in base.iterdir():
+            if not p.is_dir():
+                continue
+            if not p.name.startswith(prefix):
+                continue
+            if ".orbax-checkpoint-tmp" in p.name:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def _cleanup_invalid_checkpoint_dirs(self) -> None:
+        """
+        Remove invalid checkpoint_<epoch> directories and stale tmp dirs.
+        Prevents accumulation of fake checkpoints on HPC filesystems.
+        """
+        base = Path(self.model_dir)
+        if not base.exists():
+            return
+        pat = re.compile(r"checkpoint_(\d+)$")
+        for p in base.iterdir():
+            if not p.is_dir():
+                continue
+            if ".orbax-checkpoint-tmp" in p.name:
+                shutil.rmtree(p, ignore_errors=True)
+                continue
+            if not pat.fullmatch(p.name):
+                continue
+            if self._is_valid_checkpoint_dir(p):
+                continue
+            shutil.rmtree(p, ignore_errors=True)
 
     def _build_checkpointer(self):
         """Create an Orbax checkpointer with async disabled if supported."""
@@ -223,33 +238,32 @@ class Train:
             model (nnx.Module): The model to save.
             epoch (int): Current epoch number.
         """
-        import os, shutil
-        from pathlib import Path
-
         _, state = nnx.split(model)
         ckpt_dir = Path(self.model_dir).resolve()
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         ckpt_path = ckpt_dir / f"checkpoint_{epoch}"
-        tmp_path  = ckpt_dir / f"checkpoint_{epoch}.orbax-checkpoint-tmp"
 
         # Remove stale dirs
+        self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
         shutil.rmtree(ckpt_path, ignore_errors=True)
-        shutil.rmtree(tmp_path, ignore_errors=True)
 
         try:
             self.checkpointer.save(str(ckpt_path), state)
             if hasattr(self.checkpointer, "wait_until_finished"):
                 self.checkpointer.wait_until_finished()
 
-            # Validate checkpoint is real
-            if not (ckpt_path / "_METADATA").exists():
-                raise RuntimeError(f"Orbax save produced no _METADATA in {ckpt_path}")
+            # Validate checkpoint marker/payload.
+            if not self._is_valid_checkpoint_dir(ckpt_path):
+                print(
+                    f"[WARN] Checkpoint directory {ckpt_path} has no recognizable Orbax payload yet. "
+                    "Proceeding without hard failure."
+                )
 
             # Optional: delete previous checkpoint + its tmp
             if epoch > 1:
                 shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
-                shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}.orbax-checkpoint-tmp", ignore_errors=True)
+                self._cleanup_temp_dirs(ckpt_dir, epoch=epoch - 1)
 
             print(f"Model checkpoint saved at epoch {epoch} to {ckpt_path}")
             return True
@@ -258,7 +272,7 @@ class Train:
             print(f"[ERROR] Orbax checkpoint save failed at epoch {epoch}: {e}")
             # Clean up partial dirs so restore won't see fake checkpoints
             shutil.rmtree(ckpt_path, ignore_errors=True)
-            shutil.rmtree(tmp_path, ignore_errors=True)
+            self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
             return False
 
 
@@ -278,11 +292,16 @@ class Train:
             print(f"No model directory found at {model_dir}. Starting from scratch.")
             return 0
 
-        # Find all checkpoint_* directories
-        entries = [
-            d for d in os.listdir(model_dir)
-            if d.startswith("checkpoint_") and os.path.isdir(os.path.join(model_dir, d))
-        ]
+        # Find all valid checkpoint_<epoch> directories.
+        entries = []
+        pat = re.compile(r"checkpoint_(\d+)$")
+        for d in os.listdir(model_dir):
+            path = Path(model_dir) / d
+            if not pat.fullmatch(d):
+                continue
+            if not self._is_valid_checkpoint_dir(path):
+                continue
+            entries.append(d)
 
         if not entries:
             print("No checkpoints found. Starting from scratch.")
@@ -291,7 +310,7 @@ class Train:
         # Extract epoch numbers from "checkpoint_{epoch}"
         epochs = []
         for name in entries:
-            m = re.match(r"checkpoint_(\d+)", name)
+            m = re.match(r"checkpoint_(\d+)$", name)
             if m:
                 epochs.append(int(m.group(1)))
 
@@ -628,7 +647,7 @@ class Train:
             m = pat.search(p.name)
             if not m:
                 continue
-            if not (p / "_METADATA").exists():
+            if not self._is_valid_checkpoint_dir(p):
                 continue  # skip fake/partial checkpoints
             epoch = int(m.group(1))
             if best is None or epoch > best:
@@ -658,6 +677,7 @@ class Train:
                 If True, use the apodised MWSS mask to weight the loss/accuracy.
                 If False, use an all-ones mask with the same shape (no masking).
         """
+        self._cleanup_invalid_checkpoint_dirs()
         Train.clear_gpu_cache()
         learning_rate = self.learning_rate
         momentum = self.momentum
@@ -669,6 +689,12 @@ class Train:
         print_gpu_usage("Before dataset creation")
         print("Constructing the CMB-Free ILC dataset")
         train_ds, test_ds, n_train, n_test, drop_remainder_test = self.dataset.prepare_data()
+        if self.prefetch:
+            train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+            test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
+            print("[Input Pipeline] Prefetch enabled (tf.data.AUTOTUNE).")
+        else:
+            print("[Input Pipeline] Prefetch disabled.")
         print_gpu_usage("After dataset creation")
         if n_test == 0:
             raise ValueError("Test set is empty. Increase realisations or adjust split.")
@@ -777,26 +803,38 @@ class Train:
                 metrics_history[f"train_{metric}"].append(self._to_host_scalar(value))
             metrics.reset()
 
-            # Evaluate at the end of the current epoch
-            for _ in range(testing_batches_per_epoch):
-                batch_x, batch_y = next(test_iter)
-                images = jnp.asarray(batch_x)
-                residuals = jnp.asarray(batch_y)
-                state = self.eval_step(graphdef, state, images, residuals, 
-                                        norm_quad_weights, mask_mwss)
-            nnx.update((model, optimizer, metrics), state)  # Only updates metrics
-            test_iter = iter(tfds.as_numpy(test_ds))
-            for metric, value in metrics.compute().items():
-                metrics_history[f"eval_{metric}"].append(self._to_host_scalar(value))
-            metrics.reset()
+            do_eval = (epoch % self.eval_every == 0)
+            if do_eval:
+                # Evaluate only on the first self.eval_steps batches when eval_steps > 0.
+                eval_batches = testing_batches_per_epoch if self.eval_steps <= 0 else min(self.eval_steps, testing_batches_per_epoch)
+                for _ in range(eval_batches):
+                    batch_x, batch_y = next(test_iter)
+                    images = jnp.asarray(batch_x)
+                    residuals = jnp.asarray(batch_y)
+                    state = self.eval_step(graphdef, state, images, residuals, 
+                                            norm_quad_weights, mask_mwss)
+                nnx.update((model, optimizer, metrics), state)  # Only updates metrics
+                test_iter = iter(tfds.as_numpy(test_ds))
+                for metric, value in metrics.compute().items():
+                    metrics_history[f"eval_{metric}"].append(self._to_host_scalar(value))
+                metrics.reset()
+                eval_loss_display = f"{metrics_history['eval_loss'][-1]:.3f}"
+                eval_acc_display = f"{metrics_history['eval_accuracy'][-1]:.3f}"
+            else:
+                # Keep history length aligned with epochs when skipping evaluation.
+                metrics_history["eval_loss"].append(float("nan"))
+                metrics_history["eval_accuracy"].append(float("nan"))
+                eval_loss_display = "nan"
+                eval_acc_display = "nan"
 
             print(
-                "[Train/Test] epoch = {:03d}: train_loss = {:.03f}, eval_loss = {:.3f}, train_acc = {:.3f}, eval_acc = {:.3f}".format(
+                "[Train/Test] epoch = {:03d}: train_loss = {:.03f}, eval_loss = {}, train_acc = {:.3f}, eval_acc = {}{}".format(
                     epoch,
                     metrics_history["train_loss"][-1],
-                    metrics_history["eval_loss"][-1],
+                    eval_loss_display,
                     metrics_history["train_accuracy"][-1],
-                    metrics_history["eval_accuracy"][-1],
+                    eval_acc_display,
+                    "" if do_eval else f" [skipped; eval_every={self.eval_every}]",
                 )
             )
             # Force sync on a host scalar (no device retention).
@@ -833,18 +871,27 @@ class Train:
         """
         fig, ((ax1), (ax3)) = plt.subplots(1, 2, figsize=(10, 4))
         total_epochs = len(metrics_history["train_loss"])
-        epochs = range(1, total_epochs + 1)
-        
-        ax1.plot(epochs, metrics_history["train_loss"], 'b-', label='Training', linewidth=2)
-        ax1.plot(epochs, metrics_history["eval_loss"], 'r-', label='Validation', linewidth=2)
+        epochs = np.arange(1, total_epochs + 1)
+        train_loss = np.asarray(metrics_history["train_loss"], dtype=float)
+        train_acc = np.asarray(metrics_history["train_accuracy"], dtype=float)
+        eval_loss = np.asarray(metrics_history["eval_loss"], dtype=float)
+        eval_acc = np.asarray(metrics_history["eval_accuracy"], dtype=float)
+
+        eval_loss_valid = np.isfinite(eval_loss)
+        eval_acc_valid = np.isfinite(eval_acc)
+
+        ax1.plot(epochs, train_loss, 'b-', label='Training', linewidth=2)
+        if np.any(eval_loss_valid):
+            ax1.plot(epochs[eval_loss_valid], eval_loss[eval_loss_valid], 'r-', label='Validation', linewidth=2)
         ax1.set_title('Training Loss')
         ax1.set_xlabel('Epoch')
         ax1.set_ylabel('Loss')
         ax1.grid(True, alpha=0.3)
         ax1.legend()
 
-        ax3.plot(epochs, metrics_history["train_accuracy"], 'b-', label='Training', linewidth=2)
-        ax3.plot(epochs, metrics_history["eval_accuracy"], 'r-', label='Validation', linewidth=2)
+        ax3.plot(epochs, train_acc, 'b-', label='Training', linewidth=2)
+        if np.any(eval_acc_valid):
+            ax3.plot(epochs[eval_acc_valid], eval_acc[eval_acc_valid], 'r-', label='Validation', linewidth=2)
         ax3.set_title('Training Accuracy')
         ax3.set_xlabel('Epoch')
         ax3.set_ylabel('Accuracy')
@@ -1053,6 +1100,19 @@ def main():
         default='False',
         help='Generate test maps or not: True/False'
     )
+    parser.add_argument(
+        '--prefetch',
+        dest='prefetch',
+        action='store_true',
+        help='Enable tf.data prefetching for train/test datasets'
+    )
+    parser.add_argument(
+        '--no-prefetch',
+        dest='prefetch',
+        action='store_false',
+        help='Disable tf.data prefetching for train/test datasets'
+    )
+    parser.set_defaults(prefetch=False)
         
     args = parser.parse_args()
 
@@ -1081,6 +1141,7 @@ def main():
         resume_training=args.resume_training,
         loss_tag=args.loss_tag,
         random_generator=args.random,
+        prefetch=args.prefetch,
     )
     
     trainer.execute_training_procedure()

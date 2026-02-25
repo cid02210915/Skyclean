@@ -6,6 +6,7 @@ with integrated FileTemplates support for organized data management.
 """
 
 import os
+import re
 import numpy as np
 import jax.numpy as jnp
 from flax import nnx
@@ -75,6 +76,20 @@ class Inference:
                 batch_size=1,  # Not used for inference
                 directory=self.directory
             )
+
+    @staticmethod
+    def _is_valid_checkpoint_dir(path: str) -> bool:
+        """Return True only for fully materialized Orbax checkpoints."""
+        if not os.path.isdir(path):
+            return False
+        if (
+            os.path.exists(os.path.join(path, "_METADATA"))
+            or os.path.exists(os.path.join(path, "_CHECKPOINT_METADATA"))
+        ):
+            return True
+        ignore = {"prediction.png", "training_metrics.png", "training_log.npy", "spectrum.png"}
+        names = set(os.listdir(path))
+        return any(name not in ignore for name in names)
 
     
     '''
@@ -162,10 +177,18 @@ class Inference:
             model_dir = self.file_templates.output_directories["ml_models"]
             if not os.path.isdir(model_dir):
                 raise FileNotFoundError(f"Model directory not found: {model_dir}")
-            ckpts = [f for f in os.listdir(model_dir) if f.startswith("checkpoint_")]
+            pat = re.compile(r"checkpoint_(\d+)$")
+            ckpts = []
+            for f in os.listdir(model_dir):
+                if not pat.fullmatch(f):
+                    continue
+                p = os.path.join(model_dir, f)
+                if not self._is_valid_checkpoint_dir(p):
+                    continue
+                ckpts.append(f)
             if not ckpts:
                 raise FileNotFoundError(f"No checkpoints found in {model_dir}")
-            latest = max(ckpts, key=lambda x: int(x.split("_")[1]))
+            latest = max(ckpts, key=lambda x: int(pat.fullmatch(x).group(1)))
             checkpoint_path = os.path.abspath(os.path.join(model_dir, latest))
             print(f"Loading checkpoint from: {checkpoint_path}")
 
@@ -231,7 +254,15 @@ class Inference:
                 result['message'] = f"Default model directory does not exist: {model_dir}"
                 return result
             
-            checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
+            pat = re.compile(r"checkpoint_(\d+)$")
+            checkpoint_files = []
+            for f in os.listdir(model_dir):
+                if not pat.fullmatch(f):
+                    continue
+                p = os.path.join(model_dir, f)
+                if not self._is_valid_checkpoint_dir(p):
+                    continue
+                checkpoint_files.append(f)
             if not checkpoint_files:
                 result['message'] = f"No checkpoint files found in: {model_dir}"
                 return result
