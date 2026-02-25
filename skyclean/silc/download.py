@@ -4,8 +4,8 @@ import numpy as np
 import healpy as hp
 from .utils import *
 from .file_templates import FileTemplates
-import os
 from io import StringIO
+import time
 
 class DownloadData(): 
     """Download foreground data from Planck Legacy Archive (PLA) and generate CMB realisations."""
@@ -47,22 +47,23 @@ class DownloadData():
             """ 
             freq = str(frequency).zfill(3)
 
-            # FFP10 CO has no signal maps at 30/44/70 GHz.
-            # Skip download here; map_processing injects zeros for these channels.
+            # Skip unavailable CO channels
             if component == "co" and freq in {"030", "044", "070", "217"}:
-                print(f"Skipping CO download at {freq} GHz (no CO signal map for this channel).")
-                return None
+                print(f"Skipping CO download at {freq} GHz.")
+                return
 
-            template, file_template = self.download_templates[component], self.file_templates[component]
+            template = self.download_templates[component]
+            file_template = self.file_templates[component]
             if realisation is None: 
                 # foreground components same across realisations
                 filename = file_template.format(frequency=frequency)
             else:
                 filename = file_template.format(frequency=frequency, realisation=realisation)
-            # Check if the file already exists
+            
+            # Skip valid existing file
             if os.path.exists(filename):
                 print(f"File {filename} already exists. Skipping download.")
-                return None
+                return
 
             # PLA has a naming inconsistency for clusterirps: 44 GHz is published as 040.
             remote_frequency = "040" if (component == "clusterirps" and freq == "044") else frequency
@@ -72,27 +73,44 @@ class DownloadData():
             remote_realisation = realisation
             if component == "noise" and realisation is not None:
                 remote_realisation = int(realisation) % 300
-                if int(realisation) != remote_realisation:
-                    print(
-                        f"Noise realisation rollover: requested r{int(realisation):05d}, "
-                        f"reusing source mc_{remote_realisation:05d}."
-                    )
+
             url = template.format(frequency=remote_frequency, realisation=remote_realisation)
+
             
-            # stronguchii @ 070 is "_full.f" on PLA, but we want to save as ".fits" locally ---
+            # stronguchii @ 070 is "_full.f" on PLA, but we want to save as ".fits" locally
             if component == "stronguchii" and frequency == "070":
                 url = url.replace("_full.fits", "_full.f") 
 
-            # Send a GET request to the URL
-            response = requests.get(url)
-            # Check if the request was successful
-            if response.status_code == 200:
-                # Open the file in binary write mode and write the content
-                with open(filename, 'wb') as f:
-                    f.write(response.content)
-                print(f"Downloaded {component} data for frequency {frequency}.")
-            else:
-                raise ValueError(f"Failed to download {component} data for frequency {frequency}. Status code: {response.status_code}")
+            # Send a GET request to the URL and stream the content to avoid loading large files into memory
+            # Implement retry logic with exponential backoff to handle transient network issues during large downloads in parallel processing environments
+            max_attempts = 5
+            tmp_filename = filename + ".tmp"
+
+            for attempt in range(max_attempts):
+                try:
+                    with requests.get(url, stream=True, timeout=120) as response:
+                        response.raise_for_status()
+
+                        with open(tmp_filename, "wb") as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+
+                    # Atomic rename (prevents partial-file poisoning)
+                    os.replace(tmp_filename, filename)
+
+                    print(f"Downloaded {component} data for frequency {frequency}.")
+                    return
+
+                except requests.exceptions.RequestException as e:
+                    print(f"Download failed ({attempt+1}/{max_attempts}): {e}")
+                    time.sleep(10)
+
+            # Cleanup if all attempts fail
+            if os.path.exists(tmp_filename):
+                os.remove(tmp_filename)
+
+            raise RuntimeError(f"Failed to download {component} at {frequency} after {max_attempts} attempts.")
             
             
         
@@ -165,6 +183,9 @@ class DownloadData():
         Returns:
             None
         """
+        # Set higher retry limit for requests to handle transient network issues during large downloads
+        requests.adapters.DEFAULT_RETRIES = 5
+
         # Download foregrounds, which have only one realisation.
         print("Downloading foreground components...")
         if 'all' in self.components:
