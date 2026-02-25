@@ -14,6 +14,7 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 import s2wav.filters as filters
+import tempfile
 
 from .map_tools import *
 from .utils import *
@@ -34,6 +35,61 @@ ell_peak = np.array([64, 128, 256, 512, 705, 917, 1192, 1550, 2015, 2539, 3047, 
 
 class SILCTools():
     '''Tools for Scale-discretised, directional wavelet ILC (SILC).'''
+
+    @staticmethod
+    def _atomic_save_npy(path: str, array: np.ndarray) -> None:
+        """
+        Atomically write a .npy file to avoid partially-written or corrupted files e.g. intermediate avelet maps.
+        Params:
+            path (str): Target file path for the .npy file.
+            array (np.ndarray): NumPy array to save.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                suffix=".npy",
+                prefix=f".{os.path.basename(path)}.",
+                dir=os.path.dirname(path),
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+                np.save(tmp, array)
+            os.replace(tmp_path, path)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _load_npy_with_retry(path: str, *, retries: int = 6, delay_s: float = 0.15) -> np.ndarray:
+        """
+        Retry np.load to tolerate short windows where another process is replacing a file.
+        This is designed to handle the intermediate wavelet maps that are saved during processing, which can be large and take time to write. 
+        By retrying on common file access errors, we can avoid failures due to transient file states. 
+        The retry logic uses exponential backoff with a maximum delay of 1 second between attempts. 
+        If all attempts fail, a RuntimeError is raised with the last exception as context.
+
+        Params:
+            path (str): Path to the .npy file to load.
+            retries (int): Number of retry attempts before giving up.
+            delay_s (float): Initial delay in seconds between retries, which will be increased exponentially.  
+        """
+        last_exc = None
+        wait_s = float(delay_s)
+        for attempt in range(int(retries)):
+            try:
+                return np.load(path)
+            except (FileNotFoundError, OSError, EOFError, ValueError) as exc:
+                last_exc = exc
+                if attempt == retries - 1:
+                    break
+                time.sleep(wait_s)
+                wait_s = min(wait_s * 1.8, 1.0)
+        raise RuntimeError(f"Failed loading NumPy file after {retries} attempts: {path}") from last_exc
 
     @staticmethod
     def Single_Map_doubleworker(mw_map: np.ndarray, method: str):
@@ -644,7 +700,7 @@ class SILCTools():
     
         # early exit: reuse existing matrix
         if (not overwrite) and os.path.exists(save_path):
-            return np.load(save_path)
+            return SILCTools._load_npy_with_retry(save_path)
     
         # --- only now do the heavy work ---
         sample_data = doubled_MW_wav_c_j[(norm_freqs[0], scale_i)]
@@ -674,7 +730,7 @@ class SILCTools():
             for l2 in range(l1):
                 full_array[l1, l2] = full_array[l2, l1]
     
-        np.save(save_path, full_array)
+        SILCTools._atomic_save_npy(save_path, full_array)
         return full_array
     
 
@@ -704,14 +760,20 @@ class SILCTools():
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
                 if (not overwrite) and os.path.exists(out_path):
-                    doubled = np.load(out_path)
+                    doubled = SILCTools._load_npy_with_retry(out_path)
                 else:
                     src = original_wavelet_c_j.get((freq_tag, s))
                     if src is None:
-                        src = original_wavelet_c_j[(f, s)] 
+                        src = original_wavelet_c_j.get((str(f), s))
+                    if src is None:
+                        known = sorted(list(original_wavelet_c_j.keys()))[:8]
+                        raise KeyError(
+                            f"Missing wavelet coeff for key {(freq_tag, s)}. "
+                            f"Sample available keys: {known}"
+                        )
 
                     doubled = SILCTools.Single_Map_doubleworker(src, method)
-                    np.save(out_path, np.asarray(doubled))
+                    SILCTools._atomic_save_npy(out_path, np.asarray(doubled))
 
                 doubled_MW_wav_c_j[(freq_tag, s)] = doubled
 
@@ -852,7 +914,7 @@ class SILCTools():
         weight_path = weight_vector_matrix_template.format(**fmt)
 
         if (not overwrite) and os.path.exists(weight_path):
-            weight_vectors = np.load(weight_path)
+            weight_vectors = SILCTools._load_npy_with_retry(weight_path)
             # return dummy inverses + existing weights
             return None, weight_vectors, [], extract_comp
 
@@ -931,7 +993,7 @@ class SILCTools():
 
         # save final weight vector matrix
         if overwrite or not os.path.exists(weight_path):
-            np.save(weight_path, weight_vectors)
+            SILCTools._atomic_save_npy(weight_path, weight_vectors)
 
         return inverses, weight_vectors, singular_matrices_location, extract_comp
     
@@ -1028,7 +1090,7 @@ class SILCTools():
             )
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             if overwrite or not os.path.exists(save_path):
-                np.save(save_path, mw_map_original)
+                SILCTools._atomic_save_npy(save_path, mw_map_original)
             #print(f"[SAVE] Trimmed map -> {save_path}")
 
         return int(scale), mw_map_original
@@ -1056,22 +1118,53 @@ class SILCTools():
         realisation = int(realisation)
 
         frequency_data = {}
+        failed = []
         for frequency in frequencies:
             for scale in scales:
+                freq_key = str(frequency).zfill(3)
+                scale_key = int(scale)
                 filename = file_template.format(
                     comp=comp,
                     component=comp,        
                     frequency=frequency,
-                    scale=scale,
+                    scale=scale_key,
                     realisation=realisation,
                     lmax=lmax,
                     lam=lam,
                     nsamp=nsamp, 
                 )
+                alt_filename = file_template.format(
+                    comp=comp,
+                    component=comp,
+                    frequency=freq_key,
+                    scale=scale_key,
+                    realisation=realisation,
+                    lmax=lmax,
+                    lam=lam,
+                    nsamp=nsamp,
+                )
+                candidates = [filename] if filename == alt_filename else [filename, alt_filename]
+                loaded = None
+                err = None
                 try:
-                    frequency_data[(frequency, scale)] = np.load(filename)
+                    for candidate in candidates:
+                        try:
+                            loaded = SILCTools._load_npy_with_retry(candidate)
+                            break
+                        except Exception as e:
+                            err = e
+                    if loaded is None:
+                        raise err if err is not None else FileNotFoundError(filename)
+                    frequency_data[(freq_key, scale_key)] = loaded
                 except Exception as e:
-                    print(f"Error loading {filename} for frequency {frequency} and scale {scale}: {e}.")
+                    failed.append((freq_key, scale_key, candidates[-1], str(e)))
+        if failed:
+            preview = "; ".join(
+                f"(f={f}, s={s}, file={p}) -> {msg}" for f, s, p, msg in failed[:5]
+            )
+            raise RuntimeError(
+                f"Failed to load {len(failed)} wavelet files for comp={comp}, realisation={realisation}. {preview}"
+            )
         return frequency_data
     
     
@@ -1166,7 +1259,7 @@ class SILCTools():
 
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         if overwrite or not os.path.exists(out_path):
-            np.save(out_path, MW_Pix)
+            SILCTools._atomic_save_npy(out_path, MW_Pix)
     
         # 5) Visualise
         if visualise:
@@ -1371,7 +1464,7 @@ class ProduceSILC():
             # 5) Load covariance matrices (per scale)
             F_str = '_'.join(frequencies)
             R_covariance = [
-                np.load(
+                SILCTools._load_npy_with_retry(
                     output_templates['covariance_matrices'].format(
                         component=comp,
                         frequencies=F_str,
@@ -1425,7 +1518,7 @@ class ProduceSILC():
                     lam=str(lam),
                     nsamp=nsamp,
                 )
-                W = np.load(weight_vector_path)  # mmap_mode='r' optional
+                W = SILCTools._load_npy_with_retry(weight_vector_path)  # mmap_mode='r' optional
                 print("→ loading:", weight_vector_path)
                 if W.ndim == 2 and 1 in W.shape:
                     W = W.reshape(-1)            # handle saved (1,F) or (F,1)
@@ -1457,7 +1550,7 @@ class ProduceSILC():
                     nsamp=nsamp,
                 )
                 if overwrite or not os.path.exists(ilc_path):
-                    np.save(ilc_path, map_)
+                    SILCTools._atomic_save_npy(ilc_path, map_)
 
             dt = time.perf_counter() - t0
             print(f'Created ILC maps in {dt:.2f} seconds')
@@ -1480,7 +1573,7 @@ class ProduceSILC():
                 print(f"[trim] scale={sc} save_path={save_path}")
 
                 if (not overwrite) and os.path.exists(save_path):
-                    tm = np.load(save_path)
+                    tm = SILCTools._load_npy_with_retry(save_path)
                     trimmed_maps.append(tm)
                     continue
                 
@@ -1515,7 +1608,7 @@ class ProduceSILC():
                 # but save again if we took the pass-through branch)
                 if not os.path.exists(save_path):
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                    np.save(save_path, tm)
+                    SILCTools._atomic_save_npy(save_path, tm)
 
                 trimmed_maps.append(tm)
 
