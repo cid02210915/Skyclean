@@ -152,11 +152,6 @@ class Train:
         # Ensure model_dir is absolute path
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
         os.makedirs(self.model_dir, exist_ok=True)
-
-
-        #self.save_dir = os.path.join(self.directory, "ML/model")
-        #if not os.path.exists(self.save_dir):
-        #    create_dir(self.save_dir)
         
         # Initialize Orbax checkpoint manager (prefer sync save to avoid event loop issues).
         self.checkpointer = self._build_checkpointer()
@@ -222,13 +217,13 @@ class Train:
                 return ocp.StandardCheckpointer()
 
     @staticmethod
-    def _save_state_msgpack(state: nnx.State, ckpt_path: Path) -> None:
+    def _save_state_msgpack(state_dict: dict, ckpt_path: Path) -> None:
         """Fallback checkpoint writer for Orbax-incompatible environments."""
         ckpt_path.mkdir(parents=True, exist_ok=True)
         tmp_file = ckpt_path / "state.msgpack.tmp"
         final_file = ckpt_path / "state.msgpack"
         with open(tmp_file, "wb") as f:
-            f.write(serialization.to_bytes(state))
+            f.write(serialization.msgpack_serialize(state_dict))
         os.replace(tmp_file, final_file)
 
 
@@ -256,6 +251,7 @@ class Train:
             epoch (int): Current epoch number.
         """
         _, state = nnx.split(model)
+        serializable_state = serialization.to_state_dict(state)
         ckpt_dir = Path(self.model_dir).resolve()
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -269,7 +265,7 @@ class Train:
             # Build a fresh checkpointer each save to avoid event-loop lock mismatch
             # observed on some HPC nodes.
             checkpointer = self._build_checkpointer()
-            checkpointer.save(str(ckpt_path), state)
+            checkpointer.save(str(ckpt_path), serializable_state)
             if hasattr(checkpointer, "wait_until_finished"):
                 checkpointer.wait_until_finished()
 
@@ -292,7 +288,7 @@ class Train:
             shutil.rmtree(ckpt_path, ignore_errors=True)
             self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
             try:
-                self._save_state_msgpack(state, ckpt_path)
+                self._save_state_msgpack(serializable_state, ckpt_path)
                 if epoch > 1:
                     shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
                     self._cleanup_temp_dirs(ckpt_dir, epoch=epoch - 1)
@@ -359,11 +355,13 @@ class Train:
             fallback_msgpack = Path(checkpoint_path) / "state.msgpack"
             if fallback_msgpack.exists():
                 with open(fallback_msgpack, "rb") as f:
-                    restored_state = serialization.from_bytes(abstract_state, f.read())
+                    state_dict = serialization.msgpack_restore(f.read())
+                    restored_state = serialization.from_state_dict(abstract_state, state_dict)
                 print(f"[Checkpoint] Restored fallback msgpack checkpoint from: {checkpoint_path}")
             else:
                 checkpointer = self._build_checkpointer()
-                restored_state = checkpointer.restore(checkpoint_path, abstract_state)
+                state_dict = checkpointer.restore(checkpoint_path)
+                restored_state = serialization.from_state_dict(abstract_state, state_dict)
 
             # Update the live model in-place
             nnx.update(model, restored_state)
