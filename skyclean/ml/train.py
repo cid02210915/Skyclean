@@ -8,7 +8,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
-from flax import nnx
+from flax import nnx, serialization
 import tensorflow as tf
 tf.config.set_visible_devices([], "GPU")
 import tensorflow_datasets as tfds
@@ -215,6 +215,16 @@ class Train:
             except TypeError:
                 return ocp.StandardCheckpointer()
 
+    @staticmethod
+    def _save_state_msgpack(state: nnx.State, ckpt_path: Path) -> None:
+        """Fallback checkpoint writer for Orbax-incompatible environments."""
+        ckpt_path.mkdir(parents=True, exist_ok=True)
+        tmp_file = ckpt_path / "state.msgpack.tmp"
+        final_file = ckpt_path / "state.msgpack"
+        with open(tmp_file, "wb") as f:
+            f.write(serialization.to_bytes(state))
+        os.replace(tmp_file, final_file)
+
 
     @staticmethod
     def clear_gpu_cache():
@@ -250,15 +260,17 @@ class Train:
         shutil.rmtree(ckpt_path, ignore_errors=True)
 
         try:
-            self.checkpointer.save(str(ckpt_path), state)
-            if hasattr(self.checkpointer, "wait_until_finished"):
-                self.checkpointer.wait_until_finished()
+            # Build a fresh checkpointer each save to avoid event-loop lock mismatch
+            # observed on some HPC nodes.
+            checkpointer = self._build_checkpointer()
+            checkpointer.save(str(ckpt_path), state)
+            if hasattr(checkpointer, "wait_until_finished"):
+                checkpointer.wait_until_finished()
 
             # Validate checkpoint marker/payload.
             if not self._is_valid_checkpoint_dir(ckpt_path):
-                print(
-                    f"[WARN] Checkpoint directory {ckpt_path} has no recognizable Orbax payload yet. "
-                    "Proceeding without hard failure."
+                raise RuntimeError(
+                    f"Checkpoint directory {ckpt_path} has no recognizable Orbax payload."
                 )
 
             # Optional: delete previous checkpoint + its tmp
@@ -270,11 +282,22 @@ class Train:
             return True
 
         except Exception as e:
-            print(f"[ERROR] Orbax checkpoint save failed at epoch {epoch}: {e}")
-            # Clean up partial dirs so restore won't see fake checkpoints
+            print(f"[WARN] Orbax checkpoint save failed at epoch {epoch}: {e}")
             shutil.rmtree(ckpt_path, ignore_errors=True)
             self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
-            return False
+            try:
+                self._save_state_msgpack(state, ckpt_path)
+                if epoch > 1:
+                    shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
+                    self._cleanup_temp_dirs(ckpt_dir, epoch=epoch - 1)
+                print(f"[Checkpoint] Saved fallback msgpack checkpoint at {ckpt_path}")
+                return True
+            except Exception as e2:
+                print(f"[ERROR] Fallback checkpoint save failed at epoch {epoch}: {e2}")
+                shutil.rmtree(ckpt_path, ignore_errors=True)
+                return False
+        finally:
+            self._cleanup_temp_dirs(ckpt_dir)
 
 
     def load_model_for_training(self, model, optimizer):
@@ -327,9 +350,14 @@ class Train:
         try:
             # Build abstract state from current model structure
             _, abstract_state = nnx.split(model)
-
-            checkpointer = ocp.StandardCheckpointer()
-            restored_state = checkpointer.restore(checkpoint_path, abstract_state)
+            fallback_msgpack = Path(checkpoint_path) / "state.msgpack"
+            if fallback_msgpack.exists():
+                with open(fallback_msgpack, "rb") as f:
+                    restored_state = serialization.from_bytes(abstract_state, f.read())
+                print(f"[Checkpoint] Restored fallback msgpack checkpoint from: {checkpoint_path}")
+            else:
+                checkpointer = self._build_checkpointer()
+                restored_state = checkpointer.restore(checkpoint_path, abstract_state)
 
             # Update the live model in-place
             nnx.update(model, restored_state)
