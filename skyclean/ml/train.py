@@ -4,6 +4,7 @@
 
 import argparse
 import subprocess # for nvidia-smi call for memory check
+import json
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -19,6 +20,7 @@ import orbax.checkpoint as ocp
 import atexit
 import re
 from pathlib import Path
+from datetime import datetime
 import os
 import shutil
 
@@ -83,7 +85,7 @@ class Train:
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0), 
                  directory: str = "data/", resume_training: bool = False,  loss_tag: str | None = 'pixel', 
                  random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
-                 prefetch: bool = False):
+                 prefetch: bool = False, run_id: str | None = None):
         """
         Parameters:
             component (str): components to pass through silc pipeline. Options: 'cfn', 'cfne'
@@ -132,11 +134,14 @@ class Train:
         self.eval_every = eval_every
         self.eval_steps = eval_steps
         self.prefetch = prefetch
+        self.run_id = (run_id or datetime.now().strftime("%Y%m%d_%H%M%S")).strip()
 
         if self.loss_tag not in {"pixel", "harmonic"}:
             raise ValueError(f"Unsupported loss_tag={self.loss_tag!r}. Use 'pixel' or 'harmonic'.")
         if self.eval_every < 1:
             raise ValueError(f"eval_every must be >= 1, got {self.eval_every}.")
+        if not self.run_id:
+            raise ValueError("run_id cannot be empty.")
         self.random_generator = random_generator
 
         self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam, 
@@ -145,7 +150,8 @@ class Train:
         # Create model directory for checkpoints
         files = FileTemplates(directory)  # Pass directory to FileTemplates
         # Ensure model_dir is absolute path
-        self.model_dir = os.path.abspath(files.output_directories["ml_models"])
+        self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
+        os.makedirs(self.model_dir, exist_ok=True)
 
 
         #self.save_dir = os.path.join(self.directory, "ML/model")
@@ -641,6 +647,18 @@ class Train:
     def _training_log_path(self) -> str:
         return os.path.join(self.model_dir, "training_log.npy")
 
+    def save_run_config(self, config: dict) -> str:
+        """Persist full run configuration for reproducibility."""
+        os.makedirs(self.model_dir, exist_ok=True)
+        path = os.path.join(self.model_dir, "config.json")
+        payload = dict(config)
+        payload["run_id"] = self.run_id
+        payload["model_dir"] = self.model_dir
+        payload["created_at"] = datetime.now().isoformat(timespec="seconds")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+        return path
+
     def _load_training_log(self) -> dict | None:
         p = self._training_log_path()
         if not os.path.exists(p):
@@ -870,15 +888,18 @@ class Train:
             _ = np.asarray(metrics_history["eval_loss"][-1])
             print_gpu_usage(f"After epoch {epoch}")
 
-            # Save model checkpoint after each epoch (overwrites previous)
-            ok = self.save_model(model, epoch)
-            
-            if ok:
-                outdir = os.path.join(self.model_dir, f"checkpoint_{epoch}")
-                os.makedirs(outdir, exist_ok=True)
-                np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
+            # Save checkpoint only at the final epoch.
+            if epoch == epochs:
+                ok = self.save_model(model, epoch)
+                if ok:
+                    outdir = os.path.join(self.model_dir, f"checkpoint_{epoch}")
+                    os.makedirs(outdir, exist_ok=True)
+                    np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
+                else:
+                    # save logs somewhere else so you still keep progress
+                    self._save_training_log(metrics_history)
             else:
-                # save logs somewhere else so you still keep progress
+                # keep progress log between epochs
                 self._save_training_log(metrics_history)
 
             
