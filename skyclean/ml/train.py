@@ -5,6 +5,7 @@
 import argparse
 import subprocess # for nvidia-smi call for memory check
 import numpy as np
+import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
