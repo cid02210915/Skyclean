@@ -2,6 +2,7 @@ import os
 import requests
 import numpy as np
 import healpy as hp
+from astropy.io import fits
 from .utils import *
 from .file_templates import FileTemplates
 from io import StringIO
@@ -32,6 +33,25 @@ class DownloadData():
         self.download_templates = files.download_templates
         self.file_templates = files.file_templates
 
+    @staticmethod
+    def _validate_fits_file(path: str) -> tuple[bool, str]:
+        """Basic on-disk FITS integrity check."""
+        if not os.path.exists(path):
+            return False, "file does not exist"
+        if os.path.getsize(path) == 0:
+            return False, "file is empty (0 bytes)"
+        try:
+            with fits.open(path, memmap=False) as hdul:
+                hdul.verify("exception")
+                # Force table payload materialization to catch truncated binary-table data.
+                if len(hdul) > 1 and hasattr(hdul[1], "data"):
+                    data = hdul[1].data
+                    if data is not None:
+                        _ = data.shape
+        except Exception as exc:
+            return False, f"invalid FITS structure ({exc})"
+        return True, ""
+
     
     def download_foreground_component(self, component: str, frequency: str, realisation: int = None):
             """
@@ -60,10 +80,17 @@ class DownloadData():
             else:
                 filename = file_template.format(frequency=frequency, realisation=realisation)
             
-            # Skip valid existing file
+            # Skip only if existing file is valid; otherwise force redownload.
             if os.path.exists(filename):
-                print(f"File {filename} already exists. Skipping download.")
-                return
+                valid, reason = self._validate_fits_file(filename)
+                if valid:
+                    print(f"File {filename} already exists and is valid. Skipping download.")
+                    return
+                print(f"Existing file {filename} is invalid ({reason}). Redownloading.")
+                try:
+                    os.remove(filename)
+                except OSError as exc:
+                    raise RuntimeError(f"Cannot remove invalid existing file {filename}: {exc}") from exc
 
             # PLA has a naming inconsistency for clusterirps: 44 GHz is published as 040.
             remote_frequency = "040" if (component == "clusterirps" and freq == "044") else frequency
@@ -84,17 +111,30 @@ class DownloadData():
             # Send a GET request to the URL and stream the content to avoid loading large files into memory
             # Implement retry logic with exponential backoff to handle transient network issues during large downloads in parallel processing environments
             max_attempts = 5
-            tmp_filename = filename + ".tmp"
+            last_error = None
 
             for attempt in range(max_attempts):
+                tmp_filename = f"{filename}.tmp.{os.getpid()}.{time.time_ns()}"
                 try:
                     with requests.get(url, stream=True, timeout=120) as response:
                         response.raise_for_status()
+                        content_length = response.headers.get("Content-Length")
+                        if content_length is not None and int(content_length) == 0:
+                            raise RuntimeError("Remote server responded with Content-Length: 0")
 
+                        bytes_written = 0
                         with open(tmp_filename, "wb") as f:
                             for chunk in response.iter_content(chunk_size=8192):
                                 if chunk:
                                     f.write(chunk)
+                                    bytes_written += len(chunk)
+
+                    if bytes_written == 0:
+                        raise RuntimeError("Downloaded 0 bytes.")
+
+                    valid, reason = self._validate_fits_file(tmp_filename)
+                    if not valid:
+                        raise RuntimeError(f"Downloaded invalid FITS ({reason}).")
 
                     # Atomic rename (prevents partial-file poisoning)
                     os.replace(tmp_filename, filename)
@@ -102,15 +142,21 @@ class DownloadData():
                     print(f"Downloaded {component} data for frequency {frequency}.")
                     return
 
-                except requests.exceptions.RequestException as e:
+                except (requests.exceptions.RequestException, RuntimeError, OSError) as e:
+                    last_error = e
                     print(f"Download failed ({attempt+1}/{max_attempts}): {e}")
-                    time.sleep(10)
+                    time.sleep(10 * (attempt + 1))
+                finally:
+                    if os.path.exists(tmp_filename):
+                        try:
+                            os.remove(tmp_filename)
+                        except OSError:
+                            pass
 
-            # Cleanup if all attempts fail
-            if os.path.exists(tmp_filename):
-                os.remove(tmp_filename)
-
-            raise RuntimeError(f"Failed to download {component} at {frequency} after {max_attempts} attempts.")
+            raise RuntimeError(
+                f"Failed to download {component} at {frequency} after {max_attempts} attempts. "
+                f"Last error: {last_error}"
+            )
             
             
         

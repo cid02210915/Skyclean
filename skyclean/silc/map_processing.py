@@ -9,7 +9,22 @@ def read_map_with_known_order(path: str, comp: str | None = None, frequency: str
     # Only low-frequency noise maps are stored in NESTED ordering.
     freq = str(frequency).zfill(3) if frequency is not None else None
     nest = (comp == "noise") and (freq in {"030", "044", "070"})
-    return hp.read_map(path, verbose=False, nest=nest)
+    # Explicitly check for file existence and non-emptiness before attempting to read
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Map file not found: {path}")
+
+    file_size = os.path.getsize(path)
+    if file_size == 0:
+        detail = f" (component={comp}, frequency={freq})" if (comp is not None or freq is not None) else ""
+        raise OSError(
+            f"Empty map file detected at '{path}'{detail}. "
+            "Delete/redownload this file and rerun."
+        )
+    try:
+        return hp.read_map(path, verbose=False, nest=nest)
+    except Exception as exc:
+        detail = f"component={comp}, frequency={freq}, nest={nest}, size={file_size} bytes"
+        raise OSError(f"Failed to read map '{path}' ({detail}): {exc}") from exc
 
 
 class ProcessMaps():
@@ -236,13 +251,15 @@ class ProcessMaps():
                     available = []
                     for p in files:
                         try:
+                            if os.path.getsize(p) == 0:
+                                continue
                             rid = int(os.path.basename(p).rsplit(".fits", 1)[0].rsplit("_r", 1)[1])
                             available.append(rid)
                         except Exception:
                             continue
                     if not available:
                         raise FileNotFoundError(
-                            f"No noise files found for frequency '{frequency}' matching '{pattern}'."
+                            f"No valid non-empty noise files found for frequency '{frequency}' matching '{pattern}'."
                         )
                     noise_realisation = int(np.random.choice(sorted(set(available))))
                     filepath = self.file_templates[comp].format(
@@ -351,13 +368,15 @@ class ProcessMaps():
                     available = []
                     for p in files:
                         try:
+                            if os.path.getsize(p) == 0:
+                                continue
                             rid = int(os.path.basename(p).rsplit(".fits", 1)[0].rsplit("_r", 1)[1])
                             available.append(rid)
                         except Exception:
                             continue
                     if not available:
                         raise FileNotFoundError(
-                            f"No noise files found for frequency '{frequency}' matching '{pattern}'."
+                            f"No valid non-empty noise files found for frequency '{frequency}' matching '{pattern}'."
                         )
                     noise_realisation = int(np.random.choice(sorted(set(available))))
                     filepath = self.file_templates[comp].format(
@@ -457,7 +476,23 @@ class ProcessMaps():
         # Build input path
         if comp == "noise":
             if noise_realisation is None:
-                noise_realisation = np.random.randint(self.start_realisation, self.start_realisation + self.realisations)
+                noise_dir = os.path.join(self.directory, "CMB_realisations")
+                pattern = os.path.join(noise_dir, f"noise_f{frequency}_r*.fits")
+                files = glob.glob(pattern)
+                available = []
+                for p in files:
+                    try:
+                        if os.path.getsize(p) == 0:
+                            continue
+                        rid = int(os.path.basename(p).rsplit(".fits", 1)[0].rsplit("_r", 1)[1])
+                        available.append(rid)
+                    except Exception:
+                        continue
+                if not available:
+                    raise FileNotFoundError(
+                        f"No valid non-empty noise files found for frequency '{frequency}' matching '{pattern}'."
+                    )
+                noise_realisation = int(np.random.choice(sorted(set(available))))
             in_path = self.file_templates["noise"].format(
                 frequency=frequency, realisation=noise_realisation
             )
