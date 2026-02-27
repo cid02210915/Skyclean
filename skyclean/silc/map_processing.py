@@ -1,3 +1,5 @@
+
+
 import os, glob
 import healpy as hp
 from .file_templates import FileTemplates
@@ -93,6 +95,42 @@ class ProcessMaps():
             self.ps_rad = None
             self.ps_val = None
             self.ps_sed_lists = None
+
+
+    def _repair_and_read_map(self, path: str, comp: str, frequency: str, realisation: int):
+        """
+        Attempt to read a map; if invalid/missing, regenerate or redownload it once, then retry.
+        """
+        try:
+            return read_map_with_known_order(path, comp=comp, frequency=frequency)
+        except (FileNotFoundError, OSError) as exc:
+            print(
+                f"Map read failed for component='{comp}', frequency='{frequency}', "
+                f"realisation={realisation}: {exc}. Attempting one repair."
+            )
+            try:
+                from .download import DownloadData
+                downloader = DownloadData(
+                    components=[comp],
+                    frequencies=[frequency],
+                    realisations=1,
+                    start_realisation=realisation,
+                    directory=self.directory,
+                )
+                if comp == "cmb":
+                    downloader.generate_and_save_cmb_realisation(realisation)
+                elif comp == "noise":
+                    downloader.download_foreground_component("noise", frequency, realisation)
+                elif comp != "extra_feature":
+                    downloader.download_foreground_component(comp, frequency)
+                else:
+                    raise RuntimeError("Component 'extra_feature' has no source file to repair.")
+                return read_map_with_known_order(path, comp=comp, frequency=frequency)
+            except Exception as repair_exc:
+                raise OSError(
+                    f"Failed to repair map '{path}' for component='{comp}', "
+                    f"frequency='{frequency}', realisation={realisation}: {repair_exc}"
+                ) from repair_exc
             
     
     def build_point_sources(self):
@@ -232,9 +270,15 @@ class ProcessMaps():
                 frequency=frequency, realisation=realisation, lmax=desired_lmax
             )
     
-            if os.path.exists(output_path) and self.overwrite is False:
-                hp_map_reduced = read_map_with_known_order(output_path)
-            else:
+            reuse_processed = os.path.exists(output_path) and self.overwrite is False
+            if reuse_processed:
+                try:
+                    hp_map_reduced = read_map_with_known_order(output_path)
+                except (FileNotFoundError, OSError) as exc:
+                    print(f"Processed map '{output_path}' is invalid ({exc}). Regenerating from source map.")
+                    reuse_processed = False
+
+            if not reuse_processed:
                 if self._co_is_missing_channel(comp, frequency):
                     hp_map_reduced = np.zeros(hp.nside2npix(nside), dtype=np.float64)
                     if save:
@@ -261,9 +305,9 @@ class ProcessMaps():
                         raise FileNotFoundError(
                             f"No valid non-empty noise files found for frequency '{frequency}' matching '{pattern}'."
                         )
-                    noise_realisation = int(np.random.choice(sorted(set(available))))
+                    # noise_realisation = int(np.random.choice(sorted(set(available))))
                     filepath = self.file_templates[comp].format(
-                        frequency=frequency, realisation=realisation
+                        frequency=frequency, realisation=srealisation
                     )
                 elif comp != "extra_feature":
                     filepath = self.file_templates[comp].format(
@@ -271,7 +315,7 @@ class ProcessMaps():
                     )
     
                 #hp_map = hp.read_map(filepath)
-                hp_map = read_map_with_known_order(filepath, comp=comp, frequency=frequency)
+                hp_map = self._repair_and_read_map(filepath, comp=comp, frequency=frequency, realisation=realisation)
 
                 if comp == "cib":
                     hp_map = HPTools.unit_convert_cib(hp_map, frequency)
@@ -349,9 +393,15 @@ class ProcessMaps():
                 frequency=frequency, realisation=realisation, lmax=desired_lmax
             )
     
-            if os.path.exists(output_path) and self.overwrite is False:
-                hp_map_reduced = read_map_with_known_order(output_path)
-            else:
+            reuse_processed = os.path.exists(output_path) and self.overwrite is False
+            if reuse_processed:
+                try:
+                    hp_map_reduced = read_map_with_known_order(output_path)
+                except (FileNotFoundError, OSError) as exc:
+                    print(f"Processed map '{output_path}' is invalid ({exc}). Regenerating from source map.")
+                    reuse_processed = False
+
+            if not reuse_processed:
                 if self._co_is_missing_channel(comp, frequency):
                     hp_map_reduced = np.zeros(hp.nside2npix(nside), dtype=np.float64)
                     if save:
@@ -378,7 +428,7 @@ class ProcessMaps():
                         raise FileNotFoundError(
                             f"No valid non-empty noise files found for frequency '{frequency}' matching '{pattern}'."
                         )
-                    noise_realisation = int(np.random.choice(sorted(set(available))))
+                    #noise_realisation = int(np.random.choice(sorted(set(available))))
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=realisation
                     )
@@ -387,7 +437,7 @@ class ProcessMaps():
                         frequency=frequency, realisation=realisation
                     )
     
-                hp_map = read_map_with_known_order(filepath, comp=comp, frequency=frequency)
+                hp_map = self._repair_and_read_map(filepath, comp=comp, frequency=frequency, realisation=realisation)
 
                 if comp == "cib":
                     hp_map = HPTools.unit_convert_cib(hp_map, frequency)
@@ -465,7 +515,10 @@ class ProcessMaps():
 
         # Fast path: reuse if exists and not overwriting
         if (not self.overwrite) and os.path.exists(out_path):
-            return read_map_with_known_order(out_path)
+            try:
+                return read_map_with_known_order(out_path)
+            except (FileNotFoundError, OSError) as exc:
+                print(f"Processed map '{out_path}' is invalid ({exc}). Regenerating from source map.")
 
         if self._co_is_missing_channel(comp, frequency):
             hp_map_reduced = np.zeros(hp.nside2npix(nside), dtype=np.float64)
@@ -502,7 +555,7 @@ class ProcessMaps():
             )
 
         # Load, convert units, and process
-        hp_map = read_map_with_known_order(in_path, comp=comp, frequency=frequency)
+        hp_map = self._repair_and_read_map(in_path, comp=comp, frequency=frequency, realisation=realisation)
         if comp != "cmb":  
             hp_map = HPTools.unit_convert(hp_map, frequency)
         

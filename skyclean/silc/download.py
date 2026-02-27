@@ -1,3 +1,5 @@
+
+
 import os
 import requests
 import numpy as np
@@ -138,6 +140,14 @@ class DownloadData():
 
                     # Atomic rename (prevents partial-file poisoning)
                     os.replace(tmp_filename, filename)
+                    # Quick post-write guard on the final path.
+                    valid, reason = self._validate_fits_file(filename)
+                    if not valid:
+                        try:
+                            os.remove(filename)
+                        except OSError:
+                            pass
+                        raise RuntimeError(f"Final saved FITS failed validation ({reason}).")
 
                     print(f"Downloaded {component} data for frequency {frequency}.")
                     return
@@ -202,8 +212,17 @@ class DownloadData():
             """
             filename = self.file_templates["cmb"].format(realisation=realisation, lmax=1023)  # lmax is set to 1023 for now
             if os.path.exists(filename):
-                print(f"CMB realisation {realisation} already exists. Skipping generation.")
-                return None
+                valid, reason = self._validate_fits_file(filename)
+                if valid:
+                    print(f"CMB realisation {realisation} already exists and is valid. Skipping generation.")
+                    return None
+                print(f"Existing CMB realisation {realisation} is invalid ({reason}). Regenerating.")
+                try:
+                    os.remove(filename)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise RuntimeError(f"Cannot remove invalid existing CMB file {filename}: {exc}") from exc
             # load the theoretical spectrum, if not exists, load the Planck one
             if os.path.exists(os.path.join(self.directory, "cmb_spectrum_theory.txt")):
                 l, dl = np.loadtxt(os.path.join(self.directory, "cmb_spectrum_theory.txt"),
@@ -216,7 +235,24 @@ class DownloadData():
                 cl[l[m]] = dl[m] * (2.0 * np.pi) / (l[m] * (l[m] + 1.0))   # D_l -> C_l
                 nside = 2048
                 cmb_map = hp.synfast(cl, nside=nside, pixwin=False, lmax=1023) # convolve with pixel window
-                hp.write_map(filename, cmb_map)
+                tmp_filename = f"{filename}.tmp.{os.getpid()}.{time.time_ns()}"
+                hp.write_map(tmp_filename, cmb_map)
+                valid, reason = self._validate_fits_file(tmp_filename)
+                if not valid:
+                    try:
+                        os.remove(tmp_filename)
+                    except OSError:
+                        pass
+                    raise RuntimeError(f"Generated invalid CMB FITS at {tmp_filename} ({reason}).")
+                os.replace(tmp_filename, filename)
+                # Quick post-write guard on the final path.
+                valid, reason = self._validate_fits_file(filename)
+                if not valid:
+                    try:
+                        os.remove(filename)
+                    except OSError:
+                        pass
+                    raise RuntimeError(f"Final saved CMB FITS failed validation ({reason}).")
                 print(f"Downloaded CMB realisation {realisation}.")
             else:
                 raise ValueError("No theoretical CMB spectrum found. Please provide cmb_spectrum_theory.txt in the data directory.")
