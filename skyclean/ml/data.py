@@ -148,6 +148,16 @@ class CMBFreeILC():
         Returns:
             tf.Tensor: Transformed and normalized tensor.
         """
+        # ziming: [性能/一致性问题]
+        # ziming: transform() 每次调用都触发 find_dataset_mean_std() 全数据遍历，单样本推理也会重复扫描全数据集。
+        # ziming: 这会显著拖慢训练与推理，还可能因数据源波动引入不稳定。
+        # ziming: 建议改为“首次计算 + 缓存复用”:
+        # ziming:     if not hasattr(self, "_cached_stats"):
+        # ziming:         self._cached_stats = self.find_dataset_mean_std()
+        # ziming:     (self.signed_log_F_mean,
+        # ziming:      self.signed_log_R_mean,
+        # ziming:      self.signed_log_F_std,
+        # ziming:      self.signed_log_R_std) = self._cached_stats
         self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
         # Apply signed-log transform
         signed_log_x = self.signed_log_transform(x)
@@ -205,6 +215,13 @@ class CMBFreeILC():
                 F, R = self.create_random_mwss_maps(realisation)
                 yield F, R
             else:
+                # ziming: [重复全量统计]
+                # ziming: 这里对每个 realisation 都再次计算全数据 mean/std，会和 transform() 内重复，成本非常高。
+                # ziming: 推荐把统计放到 prepare_data() 或 __init__ 一次性计算，再在 generator 中直接复用。
+                # ziming: 可替换思路:
+                # ziming:     if not hasattr(self, "_cached_stats"):
+                # ziming:         self._cached_stats = self.find_dataset_mean_std()
+                # ziming:     (...四个统计量...) = self._cached_stats
                 self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
                 F, R, _ = self.create_residual_mwss_maps(realisation)
                 # Apply signed-log transform + z-score normalization + cast
@@ -232,6 +249,14 @@ class CMBFreeILC():
         )
         if self.shuffle:
             ds = ds.shuffle(buffer_size=len(indices))
+        # ziming: [prefetch 开关语义不一致]
+        # ziming: 这里无条件 prefetch(AUTOTUNE)，会让上层 Train(prefetch=False) 的“关闭预取”形同虚设。
+        # ziming: 建议把 prefetch 控制下放到这里或由调用方统一控制，避免双重 prefetch。
+        # ziming: 可替换片段:
+        # ziming:     ds = ds.batch(self.batch_size, drop_remainder=drop_remainder)
+        # ziming:     if getattr(self, "prefetch", False):
+        # ziming:         ds = ds.prefetch(tf.data.AUTOTUNE)
+        # ziming:     return ds
         return ds.batch(self.batch_size, drop_remainder=drop_remainder) \
                  .prefetch(tf.data.AUTOTUNE)
 
@@ -271,6 +296,13 @@ class CMBFreeILC():
             F_mean, F_std (np.ndarray) have shape (num_channels,).
             R_mean, R_std (np.ndarray) have shape (1,).
         """
+        # ziming: [可缓存片段]
+        # ziming: 若数据集在一次 run 内不变，建议加缓存避免重复 O(N_realisations) 扫描：
+        # ziming:     if hasattr(self, "_cached_stats"):
+        # ziming:         return self._cached_stats
+        # ziming:     ... 现有统计逻辑 ...
+        # ziming:     self._cached_stats = (signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std)
+        # ziming:     return self._cached_stats
         F_mean_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel mean
         R_mean_sum = 0 # only one output channel
         F_std_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel std

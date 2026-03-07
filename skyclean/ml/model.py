@@ -119,4 +119,3 @@ class S2_UNET(nnx.Module):
 
         x = self.output_conv(x)
         return jnp.clip(x, -6.5, 6.5)
-    

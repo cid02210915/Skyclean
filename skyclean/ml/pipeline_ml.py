@@ -106,6 +106,7 @@ def parse_args():
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64])
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    # ziming: `--random` 是纯 flag（store_true），调用方应仅传 `--random`，不要传 `--random True`。
     parser.add_argument("--random", dest="random", action="store_true",
                         help="Enable random map generation for tests.")
     parser.add_argument("--no-random", dest="random", action="store_false",
