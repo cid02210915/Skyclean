@@ -4,6 +4,33 @@ import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # helps OOM/fragmentation
 
+
+def _fix_curly_quotes_in_ml_dir():
+    """Replace curly/smart quotes with straight ASCII quotes in all ml .py files.
+
+    Curly quotes (e.g. U+201C/U+201D) can appear in source files when comments
+    are written in editors that auto-convert quotes, causing SyntaxError on import.
+    This runs once at pipeline startup before any ml module is imported.
+    """
+    _CURLY = {'\u201c': '"', '\u201d': '"', '\u2018': "'", '\u2019': "'"}
+    ml_dir = os.path.dirname(os.path.abspath(__file__))
+    for fname in os.listdir(ml_dir):
+        if not fname.endswith('.py'):
+            continue
+        fpath = os.path.join(ml_dir, fname)
+        with open(fpath, 'r', encoding='utf-8') as f:
+            original = f.read()
+        fixed = original
+        for curly, straight in _CURLY.items():
+            fixed = fixed.replace(curly, straight)
+        if fixed != original:
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(fixed)
+            print(f"[fix_quotes] Fixed curly quotes in: {fname}")
+
+_fix_curly_quotes_in_ml_dir()
+
+
 import jax
 jax.config.update("jax_enable_x64", False)
 jax.config.update("jax_default_matmul_precision", "float32")

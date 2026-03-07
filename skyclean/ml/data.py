@@ -148,7 +148,7 @@ class CMBFreeILC():
         Returns:
             tf.Tensor: Transformed and normalized tensor.
         """
-        if not hasattr(self, “_cached_stats”):
+        if not hasattr(self, "_cached_stats"):
             self._cached_stats = self.find_dataset_mean_std()
         (self.signed_log_F_mean,
          self.signed_log_R_mean,
@@ -237,7 +237,7 @@ class CMBFreeILC():
         if self.shuffle:
             ds = ds.shuffle(buffer_size=len(indices))
         ds = ds.batch(self.batch_size, drop_remainder=drop_remainder)
-        if getattr(self, “prefetch”, False):
+        if getattr(self, "prefetch", False):
             ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds
 
