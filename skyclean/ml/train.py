@@ -250,87 +250,7 @@ class Train:
         """Convert a JAX/NumPy scalar to a Python float to avoid device memory retention."""
         return float(np.asarray(x))
 
-    '''
-    def save_model(self, model, epoch) -> bool:
-        """Save the model state using Orbax.
 
-        Parameters:
-            model (nnx.Module): The model to save.
-            epoch (int): Current epoch number.
-        """
-        _, state = nnx.split(model)
-        # ziming: [NNX 状态序列化路径不一致]
-        # ziming: 当前用 serialization.to_state_dict(state) 再 msgpack，可能仍残留 NNX State 节点，
-        # ziming: 会导致 "can not serialize 'State' object"。
-        # ziming: NNX 推荐两条稳定路径：
-        # ziming: 1) Orbax 直接保存 raw nnx.State
-        # ziming: 2) fallback 时先 nnx.to_pure_dict(state) 再 msgpack
-        # ziming: 可替换片段（直接粘贴后按需删旧逻辑）:
-        # ziming:     _, state = nnx.split(model)
-        # ziming:     pure_state = nnx.to_pure_dict(state)
-        # ziming:     ckptr = self._build_checkpointer()
-        # ziming:     try:
-        # ziming:         ckptr.save(str(ckpt_path), args=ocp.args.StandardSave(item=state))
-        # ziming:     finally:
-        # ziming:         if hasattr(ckptr, "close"):
-        # ziming:             ckptr.close()
-        # ziming:     ...
-        # ziming:     self._save_state_msgpack(pure_state, ckpt_path)
-        serializable_state = serialization.to_state_dict(state)
-        ckpt_dir = Path(self.model_dir).resolve()
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        ckpt_path = ckpt_dir / f"checkpoint_{epoch}"
-
-        # Remove stale dirs
-        self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
-        shutil.rmtree(ckpt_path, ignore_errors=True)
-
-        try:
-            # Build a fresh checkpointer each save to avoid event-loop lock mismatch
-            # observed on some HPC nodes.
-            # ziming: [Orbax save 参数形态]
-            # ziming: 这里直接 save(path, serializable_state) 与下面 load 的 restore 目标结构不对齐。
-            # ziming: 如果改为同步 + NNX 一致流，建议用 StandardSave(item=state)，由 Orbax 处理结构。
-            checkpointer = self._build_checkpointer()
-            checkpointer.save(str(ckpt_path), serializable_state)
-            if hasattr(checkpointer, "wait_until_finished"):
-                checkpointer.wait_until_finished()
-
-            # Validate checkpoint marker/payload.
-            if not self._is_valid_checkpoint_dir(ckpt_path):
-                raise RuntimeError(
-                    f"Checkpoint directory {ckpt_path} has no recognizable Orbax payload."
-                )
-
-            # Optional: delete previous checkpoint + its tmp
-            if epoch > 1:
-                shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
-                self._cleanup_temp_dirs(ckpt_dir, epoch=epoch - 1)
-
-            print(f"Model checkpoint saved at epoch {epoch} to {ckpt_path}")
-            return True
-
-        except Exception as e:
-            print(f"[WARN] Orbax checkpoint save failed at epoch {epoch}: {e}")
-            shutil.rmtree(ckpt_path, ignore_errors=True)
-            self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
-            try:
-                # ziming: fallback 文件建议保存 pure_state（nnx.to_pure_dict(state)）而非 to_state_dict 产物，
-                # ziming: 恢复时再用 nnx.restore_int_paths + nnx.replace_by_pure_dict 回填到目标 state。
-                self._save_state_msgpack(serializable_state, ckpt_path)
-                if epoch > 1:
-                    shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
-                    self._cleanup_temp_dirs(ckpt_dir, epoch=epoch - 1)
-                print(f"[Checkpoint] Saved fallback msgpack checkpoint at {ckpt_path}")
-                return True
-            except Exception as e2:
-                print(f"[ERROR] Fallback checkpoint save failed at epoch {epoch}: {e2}")
-                shutil.rmtree(ckpt_path, ignore_errors=True)
-                return False
-        finally:
-            self._cleanup_temp_dirs(ckpt_dir)
-        '''
     def save_model(self, model, epoch) -> bool:
         _, state = nnx.split(model)
         pure_state = nnx.to_pure_dict(state)
@@ -1052,7 +972,7 @@ class Train:
             vmax = max(jnp.max(display_ex), jnp.max(output_ex), jnp.max(pred_ex))
 
             im0 = ax[row, 0].imshow(display_ex, vmin=vmin, vmax=vmax)
-            plt.colourbar(im0, ax=ax[row, 0], shrink=0.6)
+            plt.colorbar(im0, ax=ax[row, 0], shrink=0.6)
             ax[row, 0].set_title(f"Input (Ex {row+1})")
 
             # Output 
