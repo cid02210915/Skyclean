@@ -1,10 +1,11 @@
 
 
 import os, glob
+import numpy as np
 import healpy as hp
 from .file_templates import FileTemplates
 from .map_tools import *
-from .add_point_source import PointSource
+from .add_point_source import PointSource, precompute_component_sums
 
 
 def read_map_with_known_order(path: str, comp: str | None = None, frequency: str | int | None = None):
@@ -307,20 +308,20 @@ class ProcessMaps():
                         )
                     # noise_realisation = int(np.random.choice(sorted(set(available))))
                     filepath = self.file_templates[comp].format(
-                        frequency=frequency, realisation=srealisation
+                        frequency=frequency, realisation=realisation
                     )
                 elif comp != "extra_feature":
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=realisation
                     )
     
-                #hp_map = hp.read_map(filepath)
-                hp_map = self._repair_and_read_map(filepath, comp=comp, frequency=frequency, realisation=realisation)
+                if comp != "extra_feature":
+                    hp_map = self._repair_and_read_map(filepath, comp=comp, frequency=frequency, realisation=realisation)
 
-                if comp == "cib":
-                    hp_map = HPTools.unit_convert_cib(hp_map, frequency)
-                elif comp != "cmb":
-                    hp_map = HPTools.unit_convert(hp_map, frequency)
+                    if comp == "cib":
+                        hp_map = HPTools.unit_convert_cib(hp_map, frequency)
+                    elif comp != "cmb":
+                        hp_map = HPTools.unit_convert(hp_map, frequency)
                 
                 if comp == "noise":
                     beam_path = None
@@ -356,8 +357,11 @@ class ProcessMaps():
         return cfn
 
     def create_cfn_with_extra_features(self, frequency: str, realisation: int, 
-                                      center_lon_deg: list, center_lat_deg: list, radius_deg: list, value: list, sed_factors: np.array,
-                                      save=True):
+                                      center_lon_deg: list | None = None, center_lat_deg: list | None = None, radius_deg: list | None = None,
+                                      value: list | None = None, sed_factors: np.ndarray | None = None,
+                                      extra_feature_map: np.ndarray | None = None,
+                                      save=True,
+                                      return_components: bool = True):
         """
         Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
         the CMB with the standard beam and 
@@ -382,6 +386,7 @@ class ProcessMaps():
         standard_fwhm_rad = np.radians(5/60)
         nside = HPTools.get_nside_from_lmax(desired_lmax)
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+        processed_component_maps = {} if return_components else None
     
         for comp in self.components:
          
@@ -389,11 +394,13 @@ class ProcessMaps():
                 continue
             if comp != "extra_feature":
                 processed_comp = "processed_" + comp
-            output_path = self.file_templates[processed_comp].format(
-                frequency=frequency, realisation=realisation, lmax=desired_lmax
-            )
+                output_path = self.file_templates[processed_comp].format(
+                    frequency=frequency, realisation=realisation, lmax=desired_lmax
+                )
+            else:
+                output_path = None
     
-            reuse_processed = os.path.exists(output_path) and self.overwrite is False
+            reuse_processed = (output_path is not None) and os.path.exists(output_path) and self.overwrite is False
             if reuse_processed:
                 try:
                     hp_map_reduced = read_map_with_known_order(output_path)
@@ -437,12 +444,13 @@ class ProcessMaps():
                         frequency=frequency, realisation=realisation
                     )
     
-                hp_map = self._repair_and_read_map(filepath, comp=comp, frequency=frequency, realisation=realisation)
+                if comp != "extra_feature":
+                    hp_map = self._repair_and_read_map(filepath, comp=comp, frequency=frequency, realisation=realisation)
 
-                if comp == "cib":
-                    hp_map = HPTools.unit_convert_cib(hp_map, frequency)
-                elif comp != "cmb":
-                    hp_map = HPTools.unit_convert(hp_map, frequency)
+                    if comp == "cib":
+                        hp_map = HPTools.unit_convert_cib(hp_map, frequency)
+                    elif comp != "cmb":
+                        hp_map = HPTools.unit_convert(hp_map, frequency)
                 
                 if comp == "noise":
                     beam_path = None
@@ -461,26 +469,98 @@ class ProcessMaps():
                         hp_map_noP, lmax=desired_lmax, nside=nside
                     )
                 elif comp == "extra_feature":
-                    hp_map = np.zeros(hp.nside2npix(nside), dtype=np.float64)
-                    for i in range(len(center_lon_deg)):
-                        self.add_filled_circle_hp(hp_map, nside, center_lon_deg[i], center_lat_deg[i], radius_deg[i], value[i]*sed_factors[i])
-                        hp_map_reduced = HPTools.convolve_and_reduce(
-                            hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
-                        )
+                    if extra_feature_map is not None:
+                        hp_map = extra_feature_map
+                    else:
+                        # Fallback to the original uniform-disc injection if no real source map is supplied.
+                        hp_map = np.zeros(hp.nside2npix(nside), dtype=np.float64)
+                        if center_lon_deg is None or center_lat_deg is None or radius_deg is None or value is None or sed_factors is None:
+                            raise ValueError(
+                                "extra_feature_map is None and circle-parameter fallback is incomplete."
+                            )
+                        for i in range(len(center_lon_deg)):
+                            self.add_filled_circle_hp(
+                                hp_map, nside, center_lon_deg[i], center_lat_deg[i], radius_deg[i], value[i] * sed_factors[i]
+                            )
+                    hp_map_reduced = HPTools.convolve_and_reduce(
+                        hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                    )
                 else: 
                     hp_map_reduced = HPTools.convolve_and_reduce(
                         hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
                     )
                 
-                if save:
+                if save and output_path is not None:
                     save_map(output_path, hp_map_reduced, self.overwrite)
+            if return_components and comp == "extra_feature":
+                # Only expose the processed extra-feature map (not other components).
+                processed_component_maps["extra_feature"] = np.asarray(hp_map_reduced, dtype=np.float64)
             hp.mollview(
                 hp_map_reduced,
                 title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)"
             )
             print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
             cfn += hp_map_reduced
+        if return_components:
+            return cfn, processed_component_maps
         return cfn
+
+    def _load_point_source_component_map(self, frequency: str) -> np.ndarray:
+        """
+        Load the raw point-source component map used to define extra features, in K units.
+        """
+        path = self.file_templates[self.ps_component].format(frequency=frequency)
+        m = self._repair_and_read_map(path, comp=self.ps_component, frequency=frequency, realisation=self.start_realisation)
+        if str(frequency) == "545":
+            m = m / 57.117072864249856
+        if str(frequency) == "857":
+            m = m / 1.4357233820474276
+        return m
+
+    def build_real_extra_feature_map(self, frequency: str, center_lon_deg: np.ndarray, center_lat_deg: np.ndarray) -> np.ndarray:
+        """
+        Build an injected extra-feature map by copying full connected components around source seeds.
+        This preserves each source's true morphology and radial brightness profile.
+        """
+        src_map = self._load_point_source_component_map(frequency)
+        nside = hp.get_nside(src_map)
+        label_of_pix, _ = precompute_component_sums(src_map, nest=False, threshold=0.0)
+
+        theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
+        phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
+        seed_pix = hp.ang2pix(nside, theta, phi, nest=False).astype(np.int64)
+
+        labs = label_of_pix[seed_pix]
+        valid_labs = labs[labs >= 0]
+        if valid_labs.size == 0:
+            print(f"Warning: no valid connected components found for injected sources at {frequency} GHz.")
+            return np.zeros_like(src_map, dtype=np.float64)
+
+        unique_labs = np.unique(valid_labs)
+        keep = np.isin(label_of_pix, unique_labs)
+        extra_feature_map = np.zeros_like(src_map, dtype=np.float64)
+        extra_feature_map[keep] = src_map[keep]
+        return extra_feature_map
+
+    def _source_values_from_processed_map(
+        self,
+        hp_map: np.ndarray,
+        center_lon_deg: np.ndarray,
+        center_lat_deg: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Measure per-source summed values from a processed/beamed map by connected-component lookup.
+        """
+        label_of_pix, sum_per = precompute_component_sums(hp_map, nest=False, threshold=0.0)
+        nside = hp.get_nside(hp_map)
+        theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
+        phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
+        seed_pix = hp.ang2pix(nside, theta, phi, nest=False).astype(np.int64)
+        labs = label_of_pix[seed_pix]
+        vals = np.zeros(labs.size, dtype=np.float64)
+        good = labs >= 0
+        vals[good] = sum_per[labs[good]]
+        return vals
     
     
     def process_single_component(self, comp: str, frequency: str, realisation: int,
@@ -556,7 +636,9 @@ class ProcessMaps():
 
         # Load, convert units, and process
         hp_map = self._repair_and_read_map(in_path, comp=comp, frequency=frequency, realisation=realisation)
-        if comp != "cmb":  
+        # extra_feature is already prepared in converted units by add_point_source;
+        # do not re-apply unit conversion here.
+        if comp not in {"cmb", "extra_feature"}:
             hp_map = HPTools.unit_convert(hp_map, frequency)
         
         if comp == "noise":
@@ -589,21 +671,36 @@ class ProcessMaps():
         for realisation in range(self.realisations):
             i=0
             realisation += self.start_realisation  # Adjust for starting realisation
+            if 'extra_feature' in self.components:
+                center_lon_deg, center_lat_deg, _, _, _ = self.build_point_sources()
+                sed_matrix = np.zeros((len(center_lon_deg), len(frequencies)), dtype=np.float64)
             for (i, frequency) in enumerate(frequencies):
                 if 'extra_feature' in self.components:
                     cfn_output_path = self.file_templates["cfne"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                     if os.path.exists(cfn_output_path) and self.overwrite == False:
                         print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                         continue
-                    center_lon_deg, center_lat_deg, radius_deg, value, sed = self.build_point_sources()
                     print(f'Creating CFN with injected feature at {frequency} GHz...')
-                    sed_array = np.array(sed)
-                    cfn_map = self.create_cfn_with_extra_features(frequency, realisation, save=True, 
-                                                                    center_lon_deg = center_lon_deg,
-                                                                    center_lat_deg = center_lat_deg,
-                                                                    radius_deg = radius_deg,
-                                                                    value = value, 
-                                                                    sed_factors = sed_array[:, i]/sed_array[:, 0])
+                    extra_feature_map = self.build_real_extra_feature_map(
+                        frequency=frequency,
+                        center_lon_deg=center_lon_deg,
+                        center_lat_deg=center_lat_deg,
+                    )
+                    cfn_map, processed_maps = self.create_cfn_with_extra_features(
+                        frequency,
+                        realisation,
+                        save=True,
+                        center_lon_deg=center_lon_deg,
+                        center_lat_deg=center_lat_deg,
+                        extra_feature_map=extra_feature_map,
+                        return_components=True,
+                    )
+                    if "extra_feature" in processed_maps:
+                        sed_matrix[:, i] = self._source_values_from_processed_map(
+                            processed_maps["extra_feature"],
+                            center_lon_deg=center_lon_deg,
+                            center_lat_deg=center_lat_deg,
+                        )
                     # visualise the map to check
                     # hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
                 else:
@@ -615,6 +712,20 @@ class ProcessMaps():
                     # hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz, realisation {realisation}")
                 hp.write_map(cfn_output_path, cfn_map, overwrite=True)
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
+            if 'extra_feature' in self.components:
+                sed_path = os.path.join(
+                    self.directory,
+                    "processed_maps",
+                    f"processed_extra_feature_sed_r{realisation:04d}_lmax{desired_lmax}.npz",
+                )
+                np.savez(
+                    sed_path,
+                    frequencies=np.array(frequencies),
+                    lon_deg=np.asarray(center_lon_deg, dtype=np.float64),
+                    lat_deg=np.asarray(center_lat_deg, dtype=np.float64),
+                    sed=sed_matrix,
+                )
+                print(f"Saved processed extra-feature per-source SED to {sed_path}")
 
 
     def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, 

@@ -10,6 +10,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 from .file_templates import FileTemplates
+from .map_tools import HPTools
 
 
 # ----------------------------
@@ -288,14 +289,9 @@ class PointSource:
         tmpl = self.file_templates[self.ps_component]
         return tmpl.format(frequency=fre)
 
-    def _unit_convert(self, path: str, fre: str) -> np.ndarray:
+    def _load_and_convert_map(self, path: str, fre: str) -> np.ndarray:
         m = hp.read_map(path, field=0, verbose=False)
-        # your existing conversion factors
-        if fre == "545":
-            m = m / 57.117072864249856
-        if fre == "857":
-            m = m / 1.4357233820474276
-        return m
+        return HPTools.unit_convert(m, fre)
 
     def create_and_output_catalogue(self):
         """
@@ -311,7 +307,7 @@ class PointSource:
 
         # --- reference map -> catalogue ---
         ref_path = self._path_for_freq(ref_fre)
-        ref_map = self._unit_convert(ref_path, ref_fre)
+        ref_map = self._load_and_convert_map(ref_path, ref_fre)
 
         cat = build_catalog_from_reference_map(ref_map, nest=self.nest, threshold=self.threshold)
 
@@ -346,7 +342,7 @@ class PointSource:
 
         for fre in frequencies:
             path = self._path_for_freq(fre)
-            m = self._unit_convert(path, fre)
+            m = self._load_and_convert_map(path, fre)
 
             label_of_pix, sum_per = precompute_component_sums(m, nest=self.nest, threshold=self.threshold)
             nside = hp.get_nside(m)
