@@ -220,22 +220,8 @@ class Train:
             shutil.rmtree(p, ignore_errors=True)
 
     def _build_checkpointer(self):
-        # ziming: [“sync”并不真的同步]
-        # ziming: StandardCheckpointer 在新版本 Orbax 语义上仍可能异步，即使传 async_save=False/use_async=False。
-        # ziming: 当前 fallback 最终可能回落到 StandardCheckpointer()，仍然是异步路径。
-        # ziming: 这与报错 "loop argument must agree with lock" 高度一致。
-        # ziming: 建议改成真正同步的 API（可直接替换）:
-        # ziming:     def _build_checkpointer(self):
-        # ziming:         return ocp.Checkpointer(ocp.StandardCheckpointHandler())
         """Create an Orbax checkpointer with async disabled if supported."""
-        try:
-            async_opts = ocp.AsyncOptions(async_save=False)
-            return ocp.StandardCheckpointer(async_options=async_opts)
-        except (AttributeError, TypeError):
-            try:
-                return ocp.StandardCheckpointer(use_async=False)
-            except TypeError:
-                return ocp.StandardCheckpointer()
+        return ocp.Checkpointer(ocp.StandardCheckpointHandler())
 
     @staticmethod
     def _save_state_msgpack(state_dict: dict, ckpt_path: Path) -> None:
@@ -264,6 +250,7 @@ class Train:
         """Convert a JAX/NumPy scalar to a Python float to avoid device memory retention."""
         return float(np.asarray(x))
 
+    '''
     def save_model(self, model, epoch) -> bool:
         """Save the model state using Orbax.
 
@@ -343,7 +330,53 @@ class Train:
                 return False
         finally:
             self._cleanup_temp_dirs(ckpt_dir)
+        '''
+    def save_model(self, model, epoch) -> bool:
+        _, state = nnx.split(model)
+        pure_state = nnx.to_pure_dict(state)
 
+        ckpt_dir = Path(self.model_dir).resolve()
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / f"checkpoint_{epoch}"
+
+        self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
+        shutil.rmtree(ckpt_path, ignore_errors=True)
+
+        try:
+            ckptr = self._build_checkpointer()
+            try:
+                ckptr.save(str(ckpt_path), args=ocp.args.StandardSave(item=state))
+            finally:
+                if hasattr(ckptr, "close"):
+                    ckptr.close()
+
+            if not self._is_valid_checkpoint_dir(ckpt_path):
+                raise RuntimeError(f"Checkpoint directory {ckpt_path} has no recognizable Orbax payload.")
+
+            if epoch > 1:
+                shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
+                self._cleanup_temp_dirs(ckpt_dir, epoch=epoch - 1)
+
+            print(f"Model checkpoint saved at epoch {epoch} to {ckpt_path}")
+            return True
+
+        except Exception as e:
+            print(f"[WARN] Orbax checkpoint save failed at epoch {epoch}: {e}")
+            shutil.rmtree(ckpt_path, ignore_errors=True)
+            self._cleanup_temp_dirs(ckpt_dir, epoch=epoch)
+            try:
+                self._save_state_msgpack(pure_state, ckpt_path)
+                if epoch > 1:
+                    shutil.rmtree(ckpt_dir / f"checkpoint_{epoch-1}", ignore_errors=True)
+                    self._cleanup_temp_dirs(ckpt_dir, epoch=epoch - 1)
+                print(f"[Checkpoint] Saved fallback msgpack checkpoint at {ckpt_path}")
+                return True
+            except Exception as e2:
+                print(f"[ERROR] Fallback checkpoint save failed at epoch {epoch}: {e2}")
+                shutil.rmtree(ckpt_path, ignore_errors=True)
+                return False
+        finally:
+            self._cleanup_temp_dirs(ckpt_dir)
 
     def load_model_for_training(self, model, optimizer):
         """
@@ -366,72 +399,40 @@ class Train:
         pat = re.compile(r"checkpoint_(\d+)$")
         for d in os.listdir(model_dir):
             path = Path(model_dir) / d
-            if not pat.fullmatch(d):
-                continue
-            if not self._is_valid_checkpoint_dir(path):
-                continue
-            entries.append(d)
+            if pat.fullmatch(d) and self._is_valid_checkpoint_dir(path):
+                entries.append(d)
 
         if not entries:
             print("No checkpoints found. Starting from scratch.")
             return 0
 
-        # Extract epoch numbers from "checkpoint_{epoch}"
-        epochs = []
-        for name in entries:
-            m = re.match(r"checkpoint_(\d+)$", name)
-            if m:
-                epochs.append(int(m.group(1)))
-
-        if not epochs:
-            print("No valid checkpoint names found. Starting from scratch.")
-            return 0
-
-        last_epoch = max(epochs)
+        last_epoch = max(int(re.match(r"checkpoint_(\d+)$", name).group(1)) for name in entries)
         checkpoint_path = os.path.join(model_dir, f"checkpoint_{last_epoch}")
-
         print(f"Loading model checkpoint from: {checkpoint_path}")
 
         try:
-            # Build abstract state from current model structure
-            # ziming: [恢复格式需与保存格式严格一致]
-            # ziming: 当前 restore 分支里，Orbax 分支和 msgpack 分支都走 from_state_dict(abstract_state, ...)
-            # ziming: 只有在“保存结构与抽象状态结构完全一致”时才安全。
-            # ziming: 若 save 改为 StandardSave(item=state)，推荐恢复写法如下（可直接替换）:
-            # ziming:     _, target_state = nnx.split(model)
-            # ziming:     fallback_msgpack = Path(checkpoint_path) / "state.msgpack"
-            # ziming:     if fallback_msgpack.exists():
-            # ziming:         with open(fallback_msgpack, "rb") as f:
-            # ziming:             restored_pure = serialization.msgpack_restore(f.read())
-            # ziming:         restored_pure = nnx.restore_int_paths(restored_pure)
-            # ziming:         nnx.replace_by_pure_dict(target_state, restored_pure)
-            # ziming:         restored_state = target_state
-            # ziming:     else:
-            # ziming:         ckptr = self._build_checkpointer()
-            # ziming:         try:
-            # ziming:             restored_state = ckptr.restore(
-            # ziming:                 checkpoint_path,
-            # ziming:                 args=ocp.args.StandardRestore(item=target_state),
-            # ziming:             )
-            # ziming:         finally:
-            # ziming:             if hasattr(ckptr, "close"):
-            # ziming:                 ckptr.close()
-            # ziming:     nnx.update(model, restored_state)
-            _, abstract_state = nnx.split(model)
+            _, target_state = nnx.split(model)
             fallback_msgpack = Path(checkpoint_path) / "state.msgpack"
+
             if fallback_msgpack.exists():
                 with open(fallback_msgpack, "rb") as f:
-                    state_dict = serialization.msgpack_restore(f.read())
-                    restored_state = serialization.from_state_dict(abstract_state, state_dict)
+                    restored_pure = serialization.msgpack_restore(f.read())
+                restored_pure = nnx.restore_int_paths(restored_pure)
+                nnx.replace_by_pure_dict(target_state, restored_pure)
+                restored_state = target_state
                 print(f"[Checkpoint] Restored fallback msgpack checkpoint from: {checkpoint_path}")
             else:
-                checkpointer = self._build_checkpointer()
-                state_dict = checkpointer.restore(checkpoint_path)
-                restored_state = serialization.from_state_dict(abstract_state, state_dict)
+                ckptr = self._build_checkpointer()
+                try:
+                    restored_state = ckptr.restore(
+                        checkpoint_path,
+                        args=ocp.args.StandardRestore(item=target_state),
+                    )
+                finally:
+                    if hasattr(ckptr, "close"):
+                        ckptr.close()
 
-            # Update the live model in-place
             nnx.update(model, restored_state)
-
             print(f"Successfully loaded model from epoch {last_epoch}")
             return last_epoch
 
@@ -439,7 +440,6 @@ class Train:
             print(f"Warning: Failed to load checkpoint from {checkpoint_path}: {e}")
             print("Starting from scratch instead.")
             return 0
-
 
     @staticmethod
     def pix_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss):
@@ -1041,50 +1041,38 @@ class Train:
             ax = ax.reshape(1, -1)  # Ensure 2D array for consistency
 
         for row in range(n_plot):
-            # ziming: [多频输入通道 bug]
-            # ziming: 当前代码只取 foreground[..., 0]，随后又手动补成单通道输入给模型。
-            # ziming: 训练模型是按 ch_in=len(self.frequencies) 构建的，多频时这里会维度不匹配或语义错误。
-            # ziming: 建议可替换片段:
-            # ziming:     input_ex = jnp.asarray(foreground[row])          # (H, W, N_freq)
-            # ziming:     output_ex = jnp.asarray(residual[row, :, :, 0]) # (H, W)
-            # ziming:     pred_ex = model(input_ex[None, ...])[0, :, :, 0]
-            # ziming:     display_ex = input_ex[:, :, 0]  # 或 input_ex.mean(axis=-1)
-            # ziming:     vmin = min(jnp.min(display_ex), jnp.min(output_ex), jnp.min(pred_ex))
-            # ziming:     vmax = max(jnp.max(display_ex), jnp.max(output_ex), jnp.max(pred_ex))
-            # ziming:     im0 = ax[row, 0].imshow(display_ex, vmin=vmin, vmax=vmax)
-            input_ex = jnp.asarray(foreground[row, :, :, 0])
-            output_ex = jnp.asarray(residual[row, :, :, 0])
-            pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]
-            residual_ex = pred_ex - output_ex  # Prediction - Target residual
-            
-            # Find global min/max for consistent colorbar (excluding residual)
-            vmin = min(jnp.min(input_ex), jnp.min(output_ex), jnp.min(pred_ex))
-            vmax = max(jnp.max(input_ex), jnp.max(output_ex), jnp.max(pred_ex))
-            
-            # Residual colorbar limits (symmetric around zero)
-            res_max = max(abs(jnp.min(residual_ex)), abs(jnp.max(residual_ex)))
-            res_vmin, res_vmax = -res_max, res_max
+            input_ex = jnp.asarray(foreground[row])          # (H, W, N_freq)
+            output_ex = jnp.asarray(residual[row, :, :, 0]) # (H, W)
+            pred_ex = model(input_ex[None, ...])[0, :, :, 0]
             
             # Input
-            im0 = ax[row, 0].imshow(input_ex, vmin=vmin, vmax=vmax)
-            plt.colorbar(im0, ax=ax[row, 0], shrink=0.6)
+            display_ex = input_ex[:, :, 0]  # or input_ex.mean(axis=-1)
+
+            vmin = min(jnp.min(display_ex), jnp.min(output_ex), jnp.min(pred_ex))
+            vmax = max(jnp.max(display_ex), jnp.max(output_ex), jnp.max(pred_ex))
+
+            im0 = ax[row, 0].imshow(display_ex, vmin=vmin, vmax=vmax)
+            plt.colourbar(im0, ax=ax[row, 0], shrink=0.6)
             ax[row, 0].set_title(f"Input (Ex {row+1})")
-            
-            # Output
+
+            # Output 
             im1 = ax[row, 1].imshow(output_ex, vmin=vmin, vmax=vmax)
             plt.colorbar(im1, ax=ax[row, 1], shrink=0.6)
             ax[row, 1].set_title(f"Output (Ex {row+1})")
-            
+
             # Prediction
             im2 = ax[row, 2].imshow(pred_ex, vmin=vmin, vmax=vmax)
             plt.colorbar(im2, ax=ax[row, 2], shrink=0.6)
             ax[row, 2].set_title(f"Prediction (Ex {row+1})")
-            
+
             # Residual (Prediction - Output)
+            residual_ex = pred_ex - output_ex
+            res_vmax = max(jnp.max(residual_ex), -jnp.min(residual_ex))
+            res_vmin = -res_vmax
             im3 = ax[row, 3].imshow(residual_ex, vmin=res_vmin, vmax=res_vmax, cmap='RdBu_r')
             plt.colorbar(im3, ax=ax[row, 3], shrink=0.6)
             ax[row, 3].set_title(f"Residual (Ex {row+1})")
-            
+
             # Combined Histogram of Expected Output and Prediction
             ax[row, 4].hist(output_ex.flatten(), bins=30, alpha=0.6, color='red', density=True, label='Expected Output')
             ax[row, 4].hist(pred_ex.flatten(), bins=30, alpha=0.6, color='blue', density=True, label='Prediction')
@@ -1093,7 +1081,7 @@ class Train:
             ax[row, 4].set_ylabel("Density")
             ax[row, 4].grid(True, alpha=0.3)
             ax[row, 4].legend()
-        
+
         plt.tight_layout()
         total_epochs = len(metrics_history["train_loss"])
         fig.suptitle(f"Epoch {total_epochs}", fontsize=16)

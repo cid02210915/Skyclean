@@ -11,11 +11,7 @@ import numpy as np
 import jax.numpy as jnp
 from flax import nnx
 import orbax.checkpoint as ocp
-# ziming: [导入缺失提示]
-# ziming: 如果要支持 train.py 的 fallback `state.msgpack` 恢复，这里需要额外导入:
-# ziming:     from flax import nnx, serialization
-# ziming: 否则 load_model 无法处理 msgpack 分支。
-
+from flax import nnx, serialization
 from .model import S2_UNET
 from .data import CMBFreeILC
 from skyclean.silc.file_templates import FileTemplates
@@ -161,46 +157,14 @@ class Inference:
     '''
 
     def load_model(self, force_load: bool = False):
-        """Load and return a trained nnx.Module; also sets self.model."""
-        # ziming: [恢复流程与保存流程不一致]
-        # ziming: 这里 restore 后只抽 `params` 再 merge({'params': params})，
-        # ziming: 会丢掉非参数状态，且与 NNX 推荐的 graphdef + target_state + StandardRestore(item=target_state) 不一致。
-        # ziming: 另外没有处理 fallback `state.msgpack` 文件，save 成功但 restore 可能失败。
-        # ziming: 建议可替换片段（与训练端保持一致）:
-        # ziming:     L = self.lmax + 1
-        # ziming:     ch_in = len(self.frequencies)
-        # ziming:     model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
-        # ziming:     graphdef, target_state = nnx.split(model)
-        # ziming:     fallback_msgpack = os.path.join(checkpoint_path, "state.msgpack")
-        # ziming:     if os.path.exists(fallback_msgpack):
-        # ziming:         with open(fallback_msgpack, "rb") as f:
-        # ziming:             restored_pure = serialization.msgpack_restore(f.read())
-        # ziming:         restored_pure = nnx.restore_int_paths(restored_pure)
-        # ziming:         nnx.replace_by_pure_dict(target_state, restored_pure)
-        # ziming:         restored_state = target_state
-        # ziming:     else:
-        # ziming:         ckptr = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-        # ziming:         try:
-        # ziming:             restored_state = ckptr.restore(
-        # ziming:                 checkpoint_path,
-        # ziming:                 args=ocp.args.StandardRestore(item=target_state),
-        # ziming:             )
-        # ziming:         finally:
-        # ziming:             if hasattr(ckptr, "close"):
-        # ziming:                 ckptr.close()
-        # ziming:     model = nnx.merge(graphdef, restored_state)
-        # ziming:     self.model = model
-        # ziming:     return model
-        # 1) Compatibility gate
         if not force_load:
             compatibility = self.check_model_compatibility()
-            if not compatibility.get('compatible', False):
+            if not compatibility.get("compatible", False):
                 raise RuntimeError(
-                    f"Model compatibility check failed: {compatibility.get('message','')}. "
+                    f"Model compatibility check failed: {compatibility.get('message', '')}. "
                     f"Pass force_load=True to bypass."
                 )
 
-        # 2) Resolve checkpoint path
         if getattr(self, "model_path", None):
             checkpoint_path = os.path.abspath(self.model_path)
             if not os.path.exists(checkpoint_path):
@@ -213,37 +177,39 @@ class Inference:
             pat = re.compile(r"checkpoint_(\d+)$")
             ckpts = []
             for f in os.listdir(model_dir):
-                if not pat.fullmatch(f):
-                    continue
                 p = os.path.join(model_dir, f)
-                if not self._is_valid_checkpoint_dir(p):
-                    continue
-                ckpts.append(f)
+                if pat.fullmatch(f) and self._is_valid_checkpoint_dir(p):
+                    ckpts.append(f)
             if not ckpts:
                 raise FileNotFoundError(f"No checkpoints found in {model_dir}")
             latest = max(ckpts, key=lambda x: int(pat.fullmatch(x).group(1)))
             checkpoint_path = os.path.abspath(os.path.join(model_dir, latest))
             print(f"Loading checkpoint from: {checkpoint_path}")
 
-        # 3) Rebuild *exact same* architecture used at train time
         L = self.lmax + 1
         ch_in = len(self.frequencies)
-        model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(getattr(self, "seed", 0)))
+        model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
+        graphdef, target_state = nnx.split(model)
 
-        # 4) Split to get graphdef and expected state structure and restore
-        # ziming: 这里的 `_` 丢弃了目标状态结构；建议保留为 target_state 并用于 StandardRestore(item=target_state)。
-        graphdef, _ = nnx.split(model)
-        ckpt = ocp.StandardCheckpointer().restore(checkpoint_path)
-        # tolerate both layouts (either {'params': ...} or just params)
-        params = ckpt['params'] if isinstance(ckpt, dict) and 'params' in ckpt else ckpt
-        import jax
-        params = jax.tree.map(jax.device_put, params) # put the whole tree on device in one go (avoid many tiny transfers)
+        fallback_msgpack = os.path.join(checkpoint_path, "state.msgpack")
+        if os.path.exists(fallback_msgpack):
+            with open(fallback_msgpack, "rb") as f:
+                restored_pure = serialization.msgpack_restore(f.read())
+            restored_pure = nnx.restore_int_paths(restored_pure)
+            nnx.replace_by_pure_dict(target_state, restored_pure)
+            restored_state = target_state
+        else:
+            ckptr = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+            try:
+                restored_state = ckptr.restore(
+                    checkpoint_path,
+                    args=ocp.args.StandardRestore(item=target_state),
+                )
+            finally:
+                if hasattr(ckptr, "close"):
+                    ckptr.close()
 
-
-        # 5) Merge (single object return in your NNX)
-        # ziming: 这里 merge({'params': params}) 只覆盖参数子树，若模型包含其他状态（例如统计量/缓存）会丢失。
-        model = nnx.merge(graphdef, {'params': params})
-
+        model = nnx.merge(graphdef, restored_state)
         self.model = model
         return model
 
@@ -303,13 +269,8 @@ class Inference:
                 return result
         
 
-        # ziming: [逻辑 bug]
-        # ziming: 当前函数无论成功与否都直接 return result，且默认 compatible=False 从未被置 True，
-        # ziming: 所以 load_model(force_load=False) 会恒定失败。
-        # ziming: 最小修复建议（可直接替换 return 前逻辑）:
-        # ziming:     result['compatible'] = True
-        # ziming:     result['message'] = "Basic checkpoint path checks passed."
-        # ziming:     return result
+        result['compatible'] = True
+        result['message'] = "Basic checkpoint path checks passed."
         return result
     
     
