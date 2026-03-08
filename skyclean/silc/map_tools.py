@@ -247,10 +247,10 @@ class HPTools():
             numpy.ndarray: The healpix map with converted units.    
         """
         if frequency == "545":
-            unit_conversion = 57.117072864249856
+            unit_conversion = 58.0356
             hp_map /= unit_conversion
         if frequency == "857":
-            unit_conversion = 1.4357233820474276
+            unit_conversion = 2.2681
             hp_map /= unit_conversion
         else:
             hp_map = hp_map  # No conversion for other frequencies
