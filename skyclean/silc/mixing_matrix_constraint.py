@@ -76,7 +76,7 @@ class SpectralVector:
         # thermodynamic K_CMB conversions
         h = 6.62607015e-34
         k = 1.380649e-23
-        Tcmb = 2.7255  # CMB temperature
+        Tcmb = 2.726  # CMB temperature
         x = h * nu / (k * Tcmb)
         g_nu = (x**2 * np.exp(x)) / (np.exp(x) - 1.0)**2  # dB_nu/dT at T_CMB
 
@@ -100,11 +100,18 @@ class SpectralVector:
         if "353" in frequencies:
             idx_353 = frequencies.index("353")
             dust = dust / dust[idx_353]
+            
+        tsz = x * ((np.exp(x) + 1.0) / (np.exp(x) - 1.0)) - 4.0
 
+        # (optional, to match Fig. 5 caption) normalise so |tSZ|=1 at 143 GHz
+        if "143" in frequencies:
+            idx_143 = frequencies.index("143")
+            tsz = tsz / np.abs(tsz[idx_143])
+        
         # RAW spectral response vectors (all in K_CMB)
         vecs = {
             "cmb":  np.ones_like(nu),
-            "tsz":  x * ((np.exp(x) + 1.0) / (np.exp(x) - 1.0)) - 4.0,
+            "tsz":  tsz,
             "sync": (nu / float(nu0)) ** float(beta_s) / g_nu,
             "cib":  cib,
             "dust": dust,
@@ -122,7 +129,7 @@ class SpectralVector:
         print('F_theory:', F)
         return F, F_cols, reference_vectors, list(frequencies)
 
-
+    '''
     @staticmethod
     def build_F_empirical(
         base_dir: str,
@@ -172,6 +179,90 @@ class SpectralVector:
 
         F = np.column_stack([reference_vectors[c] for c in F_cols]) if F_cols else np.zeros((len(frequencies), 0))
         print ('F_empirical:', F)
+        return F, F_cols, reference_vectors, list(frequencies)
+        '''
+    
+    @staticmethod
+    def build_F_empirical(
+        base_dir: str,
+        file_templates: dict[str, str],
+        frequencies: list[str],
+        realization: int = 0,
+        mask_path: str = "",
+        components_order: list[str] | None = None,
+        override_vectors: dict[str, list[float] | np.ndarray] | None = None,  # <-- NEW
+    ):
+        """
+        Empirical F: per-component, per-frequency masked means.
+    
+        NEW FEATURE:
+            override_vectors={"tsz": measured_vector}
+            lets you manually insert a spectral vector instead of reading maps.
+    
+        Returns:
+            F (np.ndarray): (Nf, Nc)
+            F_cols (list[str])
+            reference_vectors (dict[str, np.ndarray])
+            frequencies_out (list[str])
+        """
+    
+        def _mean(path, mask):
+            M = hp.read_map(path).astype(np.float64)
+            if mask is not None:
+                m = hp.ud_grade(mask, nside_out=hp.get_nside(M), power=0) > 0
+                vals = M[np.isfinite(M) & m]
+            else:
+                vals = M[np.isfinite(M)]
+            return vals.mean() if vals.size else 0.0
+    
+        mask = hp.read_map(mask_path) if mask_path else None
+    
+        # Decide column order
+        default = ["cmb", "tsz", "sync", "cib", "dust"]
+        wanted = [str(c).lower() for c in (components_order or default)]
+        F_cols = [
+            c for c in wanted
+            if (c in file_templates and file_templates[c] is not None)
+            or (override_vectors is not None and c in override_vectors)
+        ]
+    
+        if not F_cols:
+            raise ValueError("No valid components in file_templates for empirical F.")
+    
+        reference_vectors = {}
+    
+        for comp in F_cols:
+        
+            # ============================================================
+            # NEW: override vector if provided (e.g. measured tSZ SED)
+            # ============================================================
+            if override_vectors is not None and comp in override_vectors:
+                v = np.array(override_vectors[comp], dtype=float)
+    
+                if v.size != len(frequencies):
+                    raise ValueError(
+                        f"override_vectors['{comp}'] has length {v.size} "
+                        f"but expected {len(frequencies)}"
+                    )
+    
+                reference_vectors[comp] = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+                continue
+            # ============================================================
+    
+            tmpl = file_templates[comp]
+            v = np.zeros(len(frequencies), dtype=float)
+    
+            for i, f in enumerate(frequencies):
+                path = os.path.join(base_dir, tmpl.format(frequency=f, realisation=realization))
+                if os.path.exists(path):
+                    v[i] = _mean(path, mask)
+    
+            reference_vectors[comp] = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+    
+        # Build F matrix
+        F = np.column_stack([reference_vectors[c] for c in F_cols]) if F_cols else np.zeros((len(frequencies), 0))
+        print("F_empirical:", F)
+        
         return F, F_cols, reference_vectors, list(frequencies)
 
     @staticmethod
