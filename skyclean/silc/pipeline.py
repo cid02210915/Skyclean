@@ -36,6 +36,10 @@ class Pipeline:
         F = None,
         reference_vectors = None,
         nsamp: float = 1200, 
+        pcilc: bool = False,
+        pcilc_component: str = "tsz",
+        pcilc_eps: float | None = None,
+        pcilc_pick: str = "minvar",
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -58,6 +62,11 @@ class Pipeline:
         #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
         self.nsamp = nsamp
+
+        self.pcilc = bool(pcilc)
+        self.pcilc_component = str(pcilc_component).lower()
+        self.pcilc_eps = pcilc_eps
+        self.pcilc_pick = str(pcilc_pick)
 
     # -------------------------
     # Steps
@@ -181,9 +190,22 @@ class Pipeline:
     
         # Constraint inputs (build F/ref on demand; default empirical)
         do_constraint = getattr(self, "constraint", False)
+        if getattr(self, "pcilc", False) and do_constraint:
+            raise ValueError(
+            "pcilc=True and constraint=True cannot both be enabled. "
+            "Set constraint=False for pcILC."
+        )
         F = getattr(self, "F", None)
         reference_vectors = getattr(self, "reference_vectors", None)
 
+        if reference_vectors is None:
+            _, _, ref_vecs, _ = SpectralVector.build_F_theory(
+                frequencies=freqs,
+                components_order=["cmb", "tsz"],
+            )
+            self.reference_vectors = ref_vecs
+            reference_vectors = ref_vecs
+            
         if do_constraint and (F is None or reference_vectors is None):
             source = getattr(self, "F_source", "theory")
             kwargs = dict(getattr(self, "F_kwargs", {}))
@@ -197,12 +219,15 @@ class Pipeline:
                 # build_F_empirical(base_dir, file_templates, frequencies, realization, mask_path, components_order)
                 if "realisation" in kwargs and "realization" not in kwargs:
                     kwargs["realization"] = kwargs.pop("realisation")
+                    
                 kwargs = {k: v for k, v in kwargs.items()
-                          if k in ("base_dir", "file_templates", "realization", "mask_path")}
+                          if k in ("base_dir", "file_templates", "realization", "mask_path",
+                                   "components_order", "override_vectors")}
 
-            # desired column order comes from your input component list; ignore extras like 'noise'
-            components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz")]
-
+            components_order = kwargs.pop("components_order", None)
+            if components_order is None:
+                components_order = [c.lower() for c in self.components if c.lower() in ("cmb","tsz")]
+            
             # build F with explicit column order 
             F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(
                 source=source,
@@ -215,6 +240,10 @@ class Pipeline:
             self.reference_vectors = ref_vecs
             F = self.F
             reference_vectors = self.reference_vectors
+        
+        # Realisations, freqs
+        realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
+        freqs = list(self.frequencies)
 
         # Run ILC for requested targets
         for extract_comp in self.ilc_components:
@@ -235,6 +264,10 @@ class Pipeline:
                 reference_vectors=reference_vectors,
                 nsamp=self.nsamp, 
                 overwrite=self.overwrite,
+                pcilc=self.pcilc,
+                pcilc_component=self.pcilc_component,
+                pcilc_eps=self.pcilc_eps,
+                pcilc_pick=self.pcilc_pick,
             )
 
 
@@ -400,12 +433,14 @@ class Pipeline:
         extract_comp_X: str | None = None,
         frequencies_X: list[str] | None = None,
         frequency_X: str | int | None = None,
+        realisation_X: int | None = None,
         # Y side
         source_Y: str = "auto",
         component_Y: str | None = None,
         extract_comp_Y: str | None = None,
         frequencies_Y: list[str] | None = None,
         frequency_Y: str | int | None = None,
+        realisation_Y: int | None = None,
         # shared
         realisation: int | None = None,
         lmax: int | None = None,
@@ -420,7 +455,9 @@ class Pipeline:
         Compute TT cross C_ell^{XY} (and plot D_ell^{XY}). Returns (ell, cl_xy).
         """
         # defaults (mirror step_power_spec)
-        r     = self.start_realisation if realisation is None else int(realisation)
+        r_default = self.start_realisation if realisation is None else int(realisation)
+        rX = r_default if realisation_X is None else int(realisation_X)
+        rY = r_default if realisation_Y is None else int(realisation_Y)
         lmax_ = self.lmax if lmax is None else int(lmax)
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         nsamp_ = getattr(self, "nsamp", 1200) if nsamp is None else int(nsamp)
@@ -449,7 +486,7 @@ class Pipeline:
                 return "downloaded"
     
         # loader (single place)
-        def load_one(source, component, extract_comp, frequencies, frequency):
+        def load_one(source, component, extract_comp, frequencies, frequency, r_use):
             src = pick_source(source)
             if src == "ilc_synth":
                 comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")
@@ -457,7 +494,7 @@ class Pipeline:
                 out = conv.to_alm(
                     component=comp_in, source="ilc_synth",
                     extract_comp=tgt, frequencies=frequencies,
-                    realisation=r, lmax=lmax_, lam=lam_,
+                    realisation=r_use, lmax=lmax_, lam=lam_,
                     nsamp=nsamp_, constraint=constraint_
                 )
                 label = f"ILC-synth ({tgt})"; fmt = "mw" if out["format"] == "mw" else "hp"
@@ -465,21 +502,24 @@ class Pipeline:
                 comp_use = component or ("cfn" if has_processed_cfn else "cmb")
                 out = conv.to_alm(
                     component=comp_use, source="processed",
-                    frequency=frequency, realisation=r, lmax=lmax_
+                    frequency=frequency, realisation=r_use, lmax=lmax_
                 )
                 label = f"Processed {comp_use}"; fmt = "mw" if out["format"] == "mw" else "hp"
             else:  # downloaded
                 comp_use = component or "cmb"
                 out = conv.to_alm(
                     component=comp_use, source="downloaded",
-                    frequency=frequency, realisation=r, lmax=lmax_, field=field
+                    frequency=frequency, realisation=r_use, lmax=lmax_, field=field
                 )
                 label = f"Downloaded {comp_use}"; fmt = "mw" if out["format"] == "mw" else "hp"
             return out, label, fmt
     
         # load X and Y
-        outX, labelX, fmtX = load_one(source_X, component_X, extract_comp_X, fX, frequency_X)
-        outY, labelY, fmtY = load_one(source_Y, component_Y, extract_comp_Y, fY, frequency_Y)
+        outX, labelX, fmtX = load_one(source_X, component_X, extract_comp_X, fX, frequency_X, rX)
+        outY, labelY, fmtY = load_one(source_Y, component_Y, extract_comp_Y, fY, frequency_Y, rY)
+
+        print(f"[DEBUG xspec] X: {labelX} fmt={fmtX} path={outX.get('path')}")
+        print(f"[DEBUG xspec] Y: {labelY} fmt={fmtY} path={outY.get('path')}")
     
         # alms -> C_ell^{XY}  (FIX: handle mixed MW/healpy)
         fx = outX["format"]
@@ -579,7 +619,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run the SILC pipeline with configurable parameters and GPU selection."
     )
-    parser.add_argument('--components', nargs='+', default=["cmb", "sync", "dust", "noise", 'tsz'])
+    parser.add_argument('--components', nargs='+', default=["cmb", 'tsz', "sync", "dust", "noise"])
     parser.add_argument('--wavelet-components', nargs='+', default=["cfn"])
     parser.add_argument('--ilc-components', nargs='+', default=["cmb"])
     parser.add_argument('--frequencies', nargs='+',
