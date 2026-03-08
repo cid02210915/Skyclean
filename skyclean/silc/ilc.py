@@ -171,7 +171,8 @@ class SILCTools():
         Nfreq: int,
         lmax: int, 
         Ndeproj: int = 0,
-        b_tol: float = 0.01
+        b_tol: float = 0.1,
+
     ) -> float:
         """
         Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for WAVELET band j.
@@ -1751,3 +1752,4 @@ class ProduceSILC():
                 _check_against_F(W_for_final_check, F, f)
 
         return synthesized_map, timings
+
