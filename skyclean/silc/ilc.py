@@ -171,8 +171,7 @@ class SILCTools():
         Nfreq: int,
         lmax: int, 
         Ndeproj: int = 0,
-        b_tol: float = 0.1,
-
+        b_tol: float = 0.01
     ) -> float:
         """
         Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for WAVELET band j.
