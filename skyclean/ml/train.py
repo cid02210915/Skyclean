@@ -152,22 +152,6 @@ class Train:
         # Ensure model_dir is absolute path
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
         os.makedirs(self.model_dir, exist_ok=True)
-        
-        # ziming: [checkpoint 生命周期问题]
-        # ziming: 这里创建的 self.checkpointer 不是 save_model() 实际保存时用的对象。
-        # ziming: save_model() 内部每次都会新建 checkpointer，因此 atexit 等待可能“等错对象”。
-        # ziming: 这会让你误以为已同步完成，实际上后台 async 任务还在跑，容易触发 loop/lock 相关错误。
-        # ziming: 建议统一采用真正同步 API，并在 save/load 内使用同一对象并 close():
-        # ziming:     def _build_checkpointer(self):
-        # ziming:         return ocp.Checkpointer(ocp.StandardCheckpointHandler())
-        # ziming:     ...
-        # ziming:     ckptr = self._build_checkpointer()
-        # ziming:     try:
-        # ziming:         ckptr.save(...)
-        # ziming:     finally:
-        # ziming:         if hasattr(ckptr, "close"):
-        # ziming:             ckptr.close()
-        # Initialize Orbax checkpoint manager (prefer sync save to avoid event loop issues).
         self.checkpointer = self._build_checkpointer()
 
         # ensure checkpoints are saved before exit
@@ -574,7 +558,7 @@ class Train:
             accuracy = Train.harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L=self.lmax+1)
         return loss, accuracy # Return loss as main value, accuracy as aux
 
-    #@jax.jit
+
     @functools.partial(jax.jit, static_argnums=0) # self argument is treated as static
     # 'static' means: treat that argument as compile-time constant, not a JAX value and JAX wont try to stage this.
     def train_step(self, graphdef: nnx.GraphDef, state: nnx.State, images: jnp.ndarray, residuals: jnp.ndarray, 
