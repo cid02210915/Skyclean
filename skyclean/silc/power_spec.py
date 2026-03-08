@@ -39,6 +39,14 @@ class MapAlmConverter:
             nsamp=nsamp, constraint=constraint,
         )
 
+        print(
+        f"[DEBUG to_alm] source={source} component={component} extract_comp={extract_comp} "
+        f"constraint={constraint} lmax={lmax} lam={lam} nsamp={nsamp} "
+        f"freq={frequency} freqs={frequencies}\n"
+        f"              -> path={path}\n"
+        f"              -> exists={os.path.exists(path)}"
+        )
+
         # 2) Load the map from disk
         arr = self._load_map(path, field=field)
     
