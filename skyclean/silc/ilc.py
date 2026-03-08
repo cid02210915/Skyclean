@@ -171,7 +171,7 @@ class SILCTools():
         Nfreq: int,
         lmax: int, 
         Ndeproj: int = 0,
-        b_tol: float = 0.01,
+        b_tol: float = 0.1,
 
     ) -> float:
         """
@@ -241,7 +241,7 @@ class SILCTools():
         J: int,
         Nfreq: int,
         Ndeproj: int = 0,
-        b_tol: float = 0.01,
+        b_tol: float = 0.1,
         scal_ell_cut: float = 64.0,
         scal_ell_max: int = 64,
     ) -> float:
@@ -373,7 +373,7 @@ class SILCTools():
         scaling: bool = False,
         Nfreq: int | None = None,
         Ndeproj: int = 0,
-        b_tol: float = 0.01,
+        b_tol: float = 0.1,
         # For diagnostics:
         nside_nmodes: int = 2048,
         k_sigma: float = 3.0,
@@ -613,7 +613,7 @@ class SILCTools():
                                     realisation: int, method: str, path_template: str, *,
                                     component: str = "cfn", lmax: int, lam: float | None = None,
                                     nsamp: float = 1200, overwrite: bool = False,
-                                    Ndeproj: int = 0, b_tol: float = 0.01,):
+                                    Ndeproj: int = 0, b_tol: float = 0.1,):
         
         #print("calculate_covariance_matrix", flush = True)
 
@@ -967,116 +967,121 @@ class SILCTools():
         # ---------------------------------------
         # Main loop
         # ---------------------------------------
+        tol = 1e-12
+
         for i in range(dim1):
             for j in range(dim2):
-
+            
                 Rij = R_Pix[i, j]
 
-                # robust inverse
+                # ---- pcILC branch ----
+                if pcilc:
+                    print('pcilc')
+                    try:
+                        Rinva = np.linalg.solve(Rij, a_vec)          # R^{-1} a
+                    except np.linalg.LinAlgError:
+                        zeros = np.zeros((N_freq,), dtype=float)
+                        singular_matrices_location.append((i, j))
+                        singular_matrices.append(Rij)
+                        weight_vectors[i, j] = zeros
+                        continue
+                    
+                    den_a = float(np.dot(a_vec, Rinva))              # a^T R^{-1} a
+                    if (not np.isfinite(den_a)) or abs(den_a) < tol:
+                        zeros = np.zeros((N_freq,), dtype=float)
+                        singular_constraints_location.append((i, j))
+                        singular_constraints.append(np.array([[den_a]]))
+                        weight_vectors[i, j] = zeros
+                        continue
+                    
+                    w_ilc = (Rinva / den_a).ravel()
+                    resp = float(np.dot(w_ilc, b_vec))               # w^T b
+
+                    if abs(resp) <= eps:
+                        w = w_ilc
+                    else:
+                        try:
+                            Rinvb = np.linalg.solve(Rij, b_vec)      # R^{-1} b
+                        except np.linalg.LinAlgError:
+                            zeros = np.zeros((N_freq,), dtype=float)
+                            singular_matrices_location.append((i, j))
+                            singular_matrices.append(Rij)
+                            weight_vectors[i, j] = zeros
+                            continue
+                        
+                        Ka  = den_a
+                        Kb  = float(np.dot(b_vec, Rinvb))
+                        Kab = float(np.dot(a_vec, Rinvb))
+
+                        Delta = Ka * Kb - Kab * Kab
+                        if (not np.isfinite(Delta)) or abs(Delta) < tol:
+                            zeros = np.zeros((N_freq,), dtype=float)
+                            singular_constraints_location.append((i, j))
+                            singular_constraints.append(np.array([[Ka, Kab], [Kab, Kb]]))
+                            weight_vectors[i, j] = zeros
+                            continue
+                        
+                        w_plus  = (Rinva * (Kb - eps * Kab) + Rinvb * ( eps * Ka - Kab)) / Delta
+                        w_minus = (Rinva * (Kb + eps * Kab) + Rinvb * (-eps * Ka - Kab)) / Delta
+
+                        if pcilc_pick == "minvar":
+                            var_plus  = float(np.dot(w_plus,  np.dot(Rij, w_plus)))
+                            var_minus = float(np.dot(w_minus, np.dot(Rij, w_minus)))
+                            w = w_plus if var_plus <= var_minus else w_minus
+                        else:
+                            w = w_plus if resp > 0.0 else w_minus
+
+                    weight_vectors[i, j] = np.asarray(w, dtype=float).ravel()
+                    continue
+                
+                # ---- cILC branch ----
+                if constraint:
+                    print('cilc')
+                    try:
+                        RinvF = np.linalg.solve(Rij, F)              # (Nf, Nc)
+                    except np.linalg.LinAlgError:
+                        zeros = np.zeros((N_freq,), dtype=float)
+                        singular_matrices_location.append((i, j))
+                        singular_matrices.append(Rij)
+                        weight_vectors[i, j] = zeros
+                        continue
+                    
+                    constraint_matrix = np.dot(F.T, RinvF)           # (Nc, Nc)
+
+                    try:
+                        temp = np.linalg.solve(constraint_matrix, f) # (Nc,)
+                    except np.linalg.LinAlgError:
+                        zeros = np.zeros((N_freq,), dtype=float)
+                        singular_constraints_location.append((i, j))
+                        singular_constraints.append(constraint_matrix)
+                        weight_vectors[i, j] = zeros
+                        continue
+                    
+                    w = np.dot(RinvF, temp).ravel()                  # (Nf,)
+                    weight_vectors[i, j] = w
+                    continue
+                
+                # ---- standard ILC branch ----
                 try:
-                    R_inv = np.linalg.inv(Rij)
+                    #print('ilc')
+                    num = np.linalg.solve(Rij, identity_vector)      # R^{-1} a
                 except np.linalg.LinAlgError:
                     zeros = np.zeros((N_freq,), dtype=float)
                     singular_matrices_location.append((i, j))
                     singular_matrices.append(Rij)
                     weight_vectors[i, j] = zeros
                     continue
-
-                # ---- pcILC branch ----
-                if pcilc:
-                    print ('we are in pcilc branch')
-                    # interior candidate: standard ILC on a_vec
-                    Rinva = np.dot(R_inv, a_vec)               # (Nf,)
-                    den_a = float(np.dot(a_vec, Rinva))        # a^T R^{-1} a
-                    if den_a == 0.0:
-                        zeros = np.zeros((N_freq,), dtype=float)
-                        singular_constraints_location.append((i, j))
-                        singular_constraints.append(np.array([[den_a]]))
-                        weight_vectors[i, j] = zeros
-                        continue
-                    print ('1')
-
-                    w_ilc = (Rinva / den_a).ravel()
-                    resp = float(np.dot(w_ilc, b_vec))         # w^T b
-
-                    if abs(resp) <= eps:
-                        w = w_ilc
-                    else:
-                        Rinvb = np.dot(R_inv, b_vec)           # (Nf,)
-
-                        Ka = float(np.dot(a_vec, Rinva))       # a^T R^{-1} a
-                        Kb = float(np.dot(b_vec, Rinvb))       # b^T R^{-1} b
-                        Kab = float(np.dot(a_vec, Rinvb))      # a^T R^{-1} b
-
-                        Delta = Ka * Kb - Kab * Kab
-                        if Delta == 0.0:
-                            zeros = np.zeros((N_freq,), dtype=float)
-                            singular_constraints_location.append((i, j))
-                            singular_constraints.append(np.array([[Ka, Kab], [Kab, Kb]]))
-                            weight_vectors[i, j] = zeros
-                            continue
-                            print ('2')
-                        # boundary candidates (paper Eq. 14 equivalent form)
-                        w_plus = (Rinva * (Kb - eps * Kab) + Rinvb * (eps * Ka - Kab)) / Delta
-                        w_minus = (Rinva * (Kb + eps * Kab) + Rinvb * (-eps * Ka - Kab)) / Delta
-
-                        if pcilc_pick == "minvar":
-                            var_plus = float(np.dot(w_plus, np.dot(Rij, w_plus)))
-                            var_minus = float(np.dot(w_minus, np.dot(Rij, w_minus)))
-                            w = w_plus if var_plus <= var_minus else w_minus
-                        else:  # "sign"
-                            w = w_plus if resp > 0.0 else w_minus
-                        print ('3')
-                    weight_vectors[i, j] = np.asarray(w, dtype=float).ravel()
-                    inverses[i, j] = R_inv
-                    print ('4')
-                    continue
-
-                # ---- cILC branch ----
-                if constraint:
-                    # Step 1: F^T R^{-1}
-                    FT_Rinv = np.dot(F.T, R_inv)                 # (Nc, Nf)
-
-                    # Step 2: F^T R^{-1} F
-                    constraint_matrix = np.dot(FT_Rinv, F)        # (Nc, Nc)
-
-                    try:
-                        constraint_matrix_inv = np.linalg.inv(constraint_matrix)
-                    except np.linalg.LinAlgError:
-                        zeros = np.zeros((N_freq,), dtype=float)
-                        singular_constraints_location.append((i, j))
-                        singular_constraints.append(constraint_matrix)
-                        weight_vectors[i, j] = zeros
-                        inverses[i, j] = R_inv
-                        continue
-
-                    # temp = (F^T R^{-1} F)^{-1} f
-                    temp = np.dot(constraint_matrix_inv, f)       # (Nc,)
-
-                    # F temp
-                    F_temp = np.dot(F, temp)                      # (Nf,)
-
-                    # w = R^{-1} F (F^T R^{-1} F)^{-1} f
-                    w = np.dot(R_inv, F_temp).ravel()             # (Nf,)
-
-                    weight_vectors[i, j] = w
-                    inverses[i, j] = R_inv
-                    continue
-
-                # ---- standard ILC branch  ----
-                num = np.dot(R_inv, identity_vector)              # (Nf,)
-                den = float(np.dot(identity_vector, num))         # scalar
-                if den == 0.0:
+                
+                den = float(np.dot(identity_vector, num))
+                if (not np.isfinite(den)) or abs(den) < tol:
                     zeros = np.zeros((N_freq,), dtype=float)
                     singular_constraints_location.append((i, j))
                     singular_constraints.append(np.array([[den]]))
                     weight_vectors[i, j] = zeros
-                    inverses[i, j] = R_inv
                     continue
-
+                
                 w = (num / den).ravel()
                 weight_vectors[i, j] = w
-                inverses[i, j] = R_inv
 
         if len(singular_matrices_location) > 0:
             print("Discovered", len(singular_matrices_location),
@@ -1330,13 +1335,19 @@ class SILCTools():
         # 5) Visualise
         if visualise:
             try:
-                prefix = "cILC" if extract_comp else "ILC"
+                if str(mode).startswith("pcilc"):
+                    prefix = "pcILC"
+                elif str(mode) == "cilc":
+                    prefix = "cILC"
+                else:
+                    prefix = "ILC"
+        
                 name = extract_comp.upper() if extract_comp else ""
                 title = f"{prefix} {name} | r={realisation_str}, lmax={int(lmax)}, N={N_directions}, λ={lam}".strip()
                 SILCTools.visualize_MW_Pix_map(MW_Pix, title)
             except Exception:
                 pass
-
+            
         return MW_Pix
     
     ELL_MIN = np.array([32, 64, 128, 256, 542, 705, 916, 1192, 1550, 2115, 2539, 3046], dtype=int)
@@ -1468,7 +1479,7 @@ class ProduceSILC():
         #Ndeproj = 0
         
         print(f"Derived Ndeproj={Ndeproj}")
-        b_tol = 0.01
+        b_tol = 0.1
             
         synthesized_map = []
         
