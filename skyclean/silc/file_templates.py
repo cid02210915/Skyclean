@@ -51,6 +51,13 @@ class FileTemplates():
             "noise":"http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_noise_{frequency}_full_map_mc_{realisation:05d}.fits",
             'tsz':  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "cib":  "http://pla.esac.esa.int/pla/aio/product-action?MAP.MAP_ID=COM_CompMap_CIB-GNILC-F{frequency}_2048_R2.00.fits",
+            # point sources 
+            "strong_irps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_strongirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "faint_radiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            # diffuse
+            "freefree": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_freefree-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "faint_irps":    "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "strong_uchii":  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_stronguchii-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
         }
 
         self.file_templates = {
@@ -61,6 +68,11 @@ class FileTemplates():
         "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
         "tsz":   os.path.join(self.output_directories["cmb_realisations"], "tsz_f{frequency}.fits"),
         "cib":   os.path.join(self.output_directories["cmb_realisations"], "cib_f{frequency}.fits"),
+        "strong_irps":  os.path.join(self.output_directories["cmb_realisations"], "strong_irps_f{frequency}.fits"),
+        "freefree":      os.path.join(self.output_directories["cmb_realisations"], "freefree_f{frequency}.fits"),
+        "faint_irps":    os.path.join(self.output_directories["cmb_realisations"], "faint_irps_f{frequency}.fits"),
+        "faint_radiops":  os.path.join(self.output_directories["cmb_realisations"], "faint_radiops_f{frequency}.fits"),
+        "strong_uchii":   os.path.join(self.output_directories["cmb_realisations"], "strong_uchii_f{frequency}.fits"),
 
         # ---------------- processed maps ----------------
         "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
@@ -69,6 +81,11 @@ class FileTemplates():
         "processed_noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
         "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
         "processed_cib":   os.path.join(self.output_directories["processed_maps"], "processed_cib_f{frequency}_lmax{lmax}.npy"),
+        "processed_strong_irps":  os.path.join(self.output_directories["processed_maps"], "processed_strong_irps_f{frequency}_lmax{lmax}.npy"),
+        "processed_freefree":      os.path.join(self.output_directories["processed_maps"], "processed_freefree_f{frequency}_lmax{lmax}.npy"),
+        "processed_faint_irps":    os.path.join(self.output_directories["processed_maps"], "processed_faint_irps_f{frequency}_lmax{lmax}.npy"),
+        "processed_faint_radiops": os.path.join(self.output_directories["processed_maps"], "processed_faint_radiops_f{frequency}_lmax{lmax}.npy"),
+        "processed_strong_uchii":  os.path.join(self.output_directories["processed_maps"], "processed_strong_uchii_f{frequency}_lmax{lmax}.npy"),
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
         # ---------------- wavelet transforms ----------------
@@ -113,21 +130,21 @@ class FileTemplates():
         # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
         "ilc_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Legacy alias (same path)
         "ilc_doubled_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
         
         # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
         "trimmed_maps": os.path.join(
             self.output_directories["ilc_trimmed_maps"],
-            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
-        
+
         # Final synthesized map — records target (extract_comp), source (component), and band-set
         "ilc_synth": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
