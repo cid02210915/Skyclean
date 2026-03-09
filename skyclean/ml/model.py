@@ -1,3 +1,5 @@
+# Contributed by Qixing Deng
+
 # Adapted from: https://github.com/astro-informatics/s2ai
 # Original code by: Matthew A. Price, Kevin Mulder, Jason D. McEwen
 # License: MIT
@@ -28,7 +30,6 @@ class S2_UNET(nnx.Module):
         """
         if chs is None:
             chs = [1, 16, 32, 32, 64]
-        #chs = [1, 64, 64, 256]
         gr = chs[1]//2
         Ls = [int(L / pow(2, i)) for i in range(len(chs) - 1)]
         print(Ls)
@@ -120,4 +121,3 @@ class S2_UNET(nnx.Module):
 
         x = self.output_conv(x)
         return jnp.clip(x, -6.5, 6.5)
-    
