@@ -1,3 +1,5 @@
+# Contributed by Qixing Deng
+
 """
 CMB-Free ILC Model Inference Class.
 
@@ -6,11 +8,12 @@ with integrated FileTemplates support for organized data management.
 """
 
 import os
+import re
 import numpy as np
 import jax.numpy as jnp
 from flax import nnx
 import orbax.checkpoint as ocp
-
+from flax import nnx, serialization
 from .model import S2_UNET
 from .data import CMBFreeILC
 from skyclean.silc.file_templates import FileTemplates
@@ -20,7 +23,8 @@ from skyclean.silc import SamplingConverters
 class Inference:
     """Class for CMB prediction inference using trained models."""
     
-    def __init__(self, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None):
+    def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None,
+                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3, momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False):
         """Initialize the CMB inference system.
         
         Parameters:
@@ -33,7 +37,11 @@ class Inference:
             directory (str): Base data directory.
             seed (int): Random seed for model initialization.
             model_path (str, optional): Specific path to model checkpoint. If None, loads the latest model.
+            nsamp (int)
+            constraint (bool): Mode for the constrainted ILC method. 
         """
+        self.extract_comp = extract_comp
+        self.component = component
         self.frequencies = frequencies
         self.realisations = realisations
         self.lmax = lmax
@@ -43,6 +51,13 @@ class Inference:
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
+        self.rn = rn
+        self.batch = batch_size
+        self.epochs = epochs
+        self.lr = learning_rate 
+        self.momentum = momentum 
+        self.nsamp = nsamp
+        self.constraint = constraint
         
         # Initialize file templates
         self.file_templates = FileTemplates(directory)
@@ -51,16 +66,35 @@ class Inference:
         self.model = None
         self.config = None
         self.data_handler = CMBFreeILC(
+                extract_comp=self.extract_comp,
+                component=self.component,
                 frequencies=self.frequencies,
                 realisations=self.realisations,
                 lmax=self.lmax,
                 N_directions=self.N_directions,
+                nsamp=self.nsamp,
+                constraint=self.constraint,
                 lam=self.lam,
                 batch_size=1,  # Not used for inference
                 directory=self.directory
             )
 
+    @staticmethod
+    def _is_valid_checkpoint_dir(path: str) -> bool:
+        """Return True only for fully materialized Orbax checkpoints."""
+        if not os.path.isdir(path):
+            return False
+        if (
+            os.path.exists(os.path.join(path, "_METADATA"))
+            or os.path.exists(os.path.join(path, "_CHECKPOINT_METADATA"))
+        ):
+            return True
+        ignore = {"prediction.png", "training_metrics.png", "training_log.npy", "spectrum.png"}
+        names = set(os.listdir(path))
+        return any(name not in ignore for name in names)
+
     
+    '''
     def load_model(self, force_load=False):
         """Load model weights for inference using fresh start approach.
         
@@ -122,7 +156,65 @@ class Inference:
 
         model = nnx.merge(graphdef, state_restored)
         return model
-    
+    '''
+
+    def load_model(self, force_load: bool = False):
+        if not force_load:
+            compatibility = self.check_model_compatibility()
+            if not compatibility.get("compatible", False):
+                raise RuntimeError(
+                    f"Model compatibility check failed: {compatibility.get('message', '')}. "
+                    f"Pass force_load=True to bypass."
+                )
+
+        if getattr(self, "model_path", None):
+            checkpoint_path = os.path.abspath(self.model_path)
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"Specified model path does not exist: {checkpoint_path}")
+            print(f"Loading user-specified model from: {checkpoint_path}")
+        else:
+            model_dir = self.file_templates.output_directories["ml_models"]
+            if not os.path.isdir(model_dir):
+                raise FileNotFoundError(f"Model directory not found: {model_dir}")
+            pat = re.compile(r"checkpoint_(\d+)$")
+            ckpts = []
+            for f in os.listdir(model_dir):
+                p = os.path.join(model_dir, f)
+                if pat.fullmatch(f) and self._is_valid_checkpoint_dir(p):
+                    ckpts.append(f)
+            if not ckpts:
+                raise FileNotFoundError(f"No checkpoints found in {model_dir}")
+            latest = max(ckpts, key=lambda x: int(pat.fullmatch(x).group(1)))
+            checkpoint_path = os.path.abspath(os.path.join(model_dir, latest))
+            print(f"Loading checkpoint from: {checkpoint_path}")
+
+        L = self.lmax + 1
+        ch_in = len(self.frequencies)
+        model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
+        graphdef, target_state = nnx.split(model)
+
+        fallback_msgpack = os.path.join(checkpoint_path, "state.msgpack")
+        if os.path.exists(fallback_msgpack):
+            with open(fallback_msgpack, "rb") as f:
+                restored_pure = serialization.msgpack_restore(f.read())
+            restored_pure = nnx.restore_int_paths(restored_pure)
+            nnx.replace_by_pure_dict(target_state, restored_pure)
+            restored_state = target_state
+        else:
+            ckptr = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+            try:
+                restored_state = ckptr.restore(
+                    checkpoint_path,
+                    args=ocp.args.StandardRestore(item=target_state),
+                )
+            finally:
+                if hasattr(ckptr, "close"):
+                    ckptr.close()
+
+        model = nnx.merge(graphdef, restored_state)
+        self.model = model
+        return model
+
     def check_model_compatibility(self):
         """Check if the model path is compatible with initialized variables.
         
@@ -165,16 +257,26 @@ class Inference:
                 result['message'] = f"Default model directory does not exist: {model_dir}"
                 return result
             
-            checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
+            pat = re.compile(r"checkpoint_(\d+)$")
+            checkpoint_files = []
+            for f in os.listdir(model_dir):
+                if not pat.fullmatch(f):
+                    continue
+                p = os.path.join(model_dir, f)
+                if not self._is_valid_checkpoint_dir(p):
+                    continue
+                checkpoint_files.append(f)
             if not checkpoint_files:
                 result['message'] = f"No checkpoint files found in: {model_dir}"
                 return result
         
 
+        result['compatible'] = True
+        result['message'] = "Basic checkpoint path checks passed."
         return result
     
     
-    def predict_cmb(self, realisation, save_result=True):
+    def predict_cmb(self, realisation, save_result=True, masked=False):
         """Predict CMB for a specific realisation.
         
         Parameters:
@@ -211,19 +313,103 @@ class Inference:
         cmb_pred = ilc_mwss - R_pred
         
         # Convert to MW sampling
-        print("Converting prediction to MW sampling...")
+        #print("Converting prediction to MW sampling...")
         cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred, L=self.lmax + 1)
+
         
         # Save result if requested
         if save_result:
-            self._save_cmb_prediction(cmb_mw, realisation)
+            if masked:
+                mask_mw = self.data_handler.mask_mw_beamed()
+                cmb_mw *= mask_mw
+                self._save_masked_cmb_prediction(cmb_mw, realisation, masked)
+            else:
+                self._save_cmb_prediction(cmb_mw, realisation)
         
         print(f"CMB prediction completed for realisation {realisation}")
         print(f"Prediction shape: {cmb_mw.shape}")
         print(f"Value range: [{cmb_mw.min():.3e}, {cmb_mw.max():.3e}]")
-        
+
         return cmb_mw
         
+
+    def compute_mse(self, comp, realisation, save_result=True, masked=False):
+        """
+        Compute pixel-space MSE for a single realisation.
+
+        Parameters
+        ----------
+        comp : str e.g. {"ilc", "nn"}
+            - "ilc": MSE of the raw ILC map vs true CMB.
+            - "nn" : MSE of the NN-predicted CMB map vs true CMB
+                     (using the trained network).
+        realisation : int
+            Realisation index.
+
+        Returns
+        -------
+        float
+            Mean squared error for this realisation.
+        """
+        comp = comp.lower()
+        if comp not in ("ilc", "nn"):
+            raise ValueError("comp must be 'ilc' or 'nn'")
+        
+        # Get the data for this realisation
+        F, R, _ = self.data_handler.create_residual_mwss_maps(realisation)
+        # R has shape (H, W, 1); squeeze to (H, W)
+        R = np.asarray(R)
+        if R.ndim == 3 and R.shape[-1] == 1:
+            R = R[..., 0]          # shape (H, W)
+        elif R.ndim == 2:
+            R = R                  # already (H, W)
+        else:
+            raise ValueError(f"Unexpected shape for R: {R.shape}")
+        
+        if masked:
+            mask = self.data_handler.mask_mwss_beamed()  # (T, P) or (T, P, 1)
+            mask = np.asarray(mask)
+            if mask.ndim == 3 and mask.shape[-1] == 1:
+                mask = mask[..., 0]
+            elif mask.ndim != 2:
+                raise ValueError(f"Unexpected mask shape: {mask.shape}")
+        else:
+            mask = None
+
+        if comp == "ilc":
+            print(f"Calculating MSE(ILC) for realisation {realisation}...")
+            diff = R
+            
+        else: # comp == "nn":
+            print(f"Calculating MSE(NN) for realisation {realisation}...")
+            
+            if self.model is None: # Ensure model is loaded
+                print("Loading model...")
+                self.model = self.load_model()  
+                print("Loaded model.")
+
+            # Prepare network input (same pipeline as in predict_cmb)
+            F = self.data_handler.transform(F).astype(np.float32)
+            F = jnp.expand_dims(F, axis=0)  # Add batch dimension
+            
+            # Predict normalised residual and inverse-transform
+            R_pred_norm = self.model(F)
+            R_pred = self.data_handler.inverse_transform(R_pred_norm) # shape: ()
+            R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
+        
+            # MSE(NN) = <(R_pred - R_true)^2>
+            diff = R - np.asarray(R_pred)
+        
+        if mask is None:
+            mse = float(np.mean(diff ** 2)) # in K
+        else:
+            w = mask
+            num = np.sum(w * diff**2)
+            denom = np.sum(w) + 1e-12
+            mse = float(num / denom)
+
+        print(mse)
+        return mse
 
     
     def _save_cmb_prediction(self, cmb_prediction, realisation):
@@ -235,22 +421,54 @@ class Inference:
         """
         try:
             # Create a model configuration string for the filename
-            model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}"
-            
+            chs = "_".join(str(n) for n in self.chs)
+            #model_config = f"r{realisation}_lmax{self.lmax}_lam{self.lam}_nsamp{self.nsamp}_rn{self.rn}_batch{self.batch}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
+
+            if self.constraint == True:
+                mode = "con"
+            else:
+                mode = "uncon"
+            frequencies = '_'.join(self.frequencies)
             # Use FileTemplates to get the save path
-            save_path = self.file_templates.file_templates["ilc_improved_map"].format(
+            save_path = self.file_templates.file_templates["ilc_improved"].format(
+                mode=mode,
+                extract_comp=self.extract_comp,
+                frequencies=frequencies,
+                component=self.component,
+                realisation=realisation,
+                lmax=self.lmax,
+                lam=self.lam,
+                nsamp=self.nsamp,
+                rn=self.rn,
+                batch=self.batch,
+                epochs=self.epochs,
+                lr=self.lr,
+                momentum=self.momentum,
+                chs=chs,
+            )
+            
+            # Save the prediction
+            np.save(save_path, cmb_prediction)
+
+            print(f"Saved CMB prediction to: {save_path}")
+            
+        except Exception as e:
+            print(f"Warning: Failed to save CMB prediction: {str(e)}")
+    
+    def _save_masked_cmb_prediction(self, cmb_prediction, realisation, mask):
+        try:
+            model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}"
+            save_path = self.file_templates.file_templates["ilc_improved_masked_map"].format(
                 realisation=realisation,
                 lmax=self.lmax,
                 lam=self.lam,
                 model_config=model_config
             )
-            
-            # Save the prediction
-            np.save(save_path, cmb_prediction)
-            print(f"Saved CMB prediction to: {save_path}")
-            
+            masked_cmb_prediction = cmb_prediction * mask
+            np.save(save_path, masked_cmb_prediction)
+            print(f"Saved masked CMB prediction to: {save_path}")
         except Exception as e:
-            print(f"Warning: Failed to save CMB prediction: {str(e)}")
+            print(f"Warning: Failed to save maked CMB prediction: {str(e)}")
     
     def get_model_info(self):
         """Get information about the loaded model.
@@ -287,6 +505,7 @@ class Inference:
             })
         
         return info
+    
 
 # Example inference.
 if __name__ == "__main__":
