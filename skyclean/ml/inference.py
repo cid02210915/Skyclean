@@ -11,6 +11,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import nnx, serialization
+import msgpack
 
 from .model import S2_UNET
 from .data import CMBFreeILC
@@ -124,6 +125,26 @@ class Inference:
         if latest_file is None:
             raise FileNotFoundError(f"在 {dir_path} 及其子目录下未找到任何有效的 msgpack checkpoint")
         return latest_file
+    
+    @staticmethod
+    def _msgpack_restore_compat(bytes_data: bytes):
+        try:
+            return serialization.msgpack_restore(bytes_data)
+        except ValueError as e:
+            if "strict_map_key" not in str(e):
+                raise
+
+            original_unpackb = msgpack.unpackb
+
+            def _compat_unpackb(*args, **kwargs):
+                kwargs.setdefault("strict_map_key", False)
+                return original_unpackb(*args, **kwargs)
+
+            try:
+                msgpack.unpackb = _compat_unpackb
+                return serialization.msgpack_restore(bytes_data)
+            finally:
+                msgpack.unpackb = original_unpackb
 
     def load_model(self, force_load=False):
         """Load model weights for inference (无 Orbax，纯 flax.serialization)
@@ -169,7 +190,8 @@ class Inference:
         with open(checkpoint_path, "rb") as f:
             bytes_data = f.read()
 
-        restored_pure = serialization.msgpack_restore(bytes_data)
+        # restored_pure = serialization.msgpack_restore(bytes_data)
+        restored_pure = self._msgpack_restore_compat(bytes_data)
         # 兼容 {"model": ...} 包装格式
         if isinstance(restored_pure, dict) and "model" in restored_pure:
             restored_pure = restored_pure["model"]
