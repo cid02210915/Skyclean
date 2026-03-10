@@ -7,7 +7,6 @@ with integrated FileTemplates support for organized data management.
 
 import os
 import re
-import msgpack
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -126,23 +125,6 @@ class Inference:
             raise FileNotFoundError(f"在 {dir_path} 及其子目录下未找到任何有效的 msgpack checkpoint")
         return latest_file
 
-    @staticmethod
-    def _restore_state_msgpack(msgpack_path: str):
-        """Restore a Flax msgpack payload, tolerating legacy integer map keys."""
-        with open(msgpack_path, "rb") as f:
-            payload = f.read()
-
-        try:
-            return serialization.msgpack_restore(payload)
-        except ValueError as e:
-            if "strict_map_key=True" not in str(e):
-                raise
-            ext_hook = getattr(serialization, "_msgpack_ext_unpack", None)
-            kwargs = {"raw": False, "strict_map_key": False}
-            if ext_hook is not None:
-                kwargs["ext_hook"] = ext_hook
-            return msgpack.unpackb(payload, **kwargs)
-
     def load_model(self, force_load=False):
         """Load model weights for inference (无 Orbax，纯 flax.serialization)
 
@@ -180,30 +162,25 @@ class Inference:
         ch_in = len(self.frequencies)
         model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
 
-        # 4) 拆分模型，获取空的 state 模板
-        graphdef, empty_state = nnx.split(model)
+        # 4) 拆分模型，获取目标 state 模板
+        graphdef, target_state = nnx.split(model)
 
-        # 5) 加载 msgpack 文件，优先匹配当前训练保存的 pure-state 格式。
-        restored_payload = self._restore_state_msgpack(checkpoint_path)
-        restored_state = None
+        # 5) 加载 msgpack 文件（pure dict + restore_int_paths 路径）
+        with open(checkpoint_path, "rb") as f:
+            bytes_data = f.read()
 
-        if isinstance(restored_payload, dict) and "model" in restored_payload:
-            # Legacy layout: {"model": ..., "opt": ..., "epoch": ...}
-            model_payload = restored_payload["model"]
-            if isinstance(model_payload, dict):
-                model_payload = nnx.restore_int_paths(model_payload)
-                nnx.replace_by_pure_dict(empty_state, model_payload)
-                restored_state = empty_state
-            else:
-                restored_state = serialization.from_state_dict(empty_state, model_payload)
-        else:
-            # Current fallback layout from training: pure nnx state dict.
-            if isinstance(restored_payload, dict):
-                restored_payload = nnx.restore_int_paths(restored_payload)
-                nnx.replace_by_pure_dict(empty_state, restored_payload)
-                restored_state = empty_state
-            else:
-                restored_state = serialization.from_state_dict(empty_state, restored_payload)
+        restored_pure = serialization.msgpack_restore(bytes_data)
+        # 兼容 {"model": ...} 包装格式
+        if isinstance(restored_pure, dict) and "model" in restored_pure:
+            restored_pure = restored_pure["model"]
+        if not isinstance(restored_pure, dict):
+            raise TypeError(
+                f"Unsupported checkpoint payload type: {type(restored_pure).__name__}. "
+                "Expected pure dict (or dict with key 'model')."
+            )
+        restored_pure = nnx.restore_int_paths(restored_pure)
+        nnx.replace_by_pure_dict(target_state, restored_pure)
+        restored_state = target_state
 
         # 6) 合并 state 到模型
         model = nnx.merge(graphdef, restored_state)
@@ -214,45 +191,6 @@ class Inference:
         self.model = model
         print(f"[Inference] Model loaded successfully from {checkpoint_path} ✅")
         return model
-
-    def check_model_compatibility(self):
-        """Check if the model path is compatible with initialized variables.
-
-        Returns:
-            dict: Dictionary containing compatibility information
-        """
-        expected_L = self.lmax + 1
-        expected_ch_in = len(self.frequencies)
-
-        result = {
-            'compatible': True,  # 无 Orbax 时默认兼容（可根据需要扩展）
-            'message': "Compatibility check passed (Orbax-free mode)",
-            'model_info': {},
-            'expected_info': {
-                'L': expected_L,
-                'lmax': self.lmax,
-                'channels': expected_ch_in,
-                'frequencies': self.frequencies,
-                'N_directions': self.N_directions,
-                'lam': self.lam
-            }
-        }
-
-        # 检查模型路径是否存在
-        if self.model_path is not None:
-            if not os.path.exists(self.model_path):
-                result['compatible'] = False
-                result['message'] = f"Model path does not exist: {self.model_path}"
-                return result
-        else:
-            # 检查默认目录是否有 checkpoint
-            try:
-                self._find_latest_checkpoint_in_dir(self.file_templates.output_directories["ml_models"])
-            except FileNotFoundError as e:
-                result['compatible'] = False
-                result['message'] = str(e)
-
-        return result
 
     def predict_cmb(self, realisation, save_result=True, masked=False):
         """Predict CMB for a specific realisation."""
