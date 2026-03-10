@@ -7,6 +7,7 @@ with integrated FileTemplates support for organized data management.
 
 import os
 import re
+import msgpack
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -125,6 +126,23 @@ class Inference:
             raise FileNotFoundError(f"在 {dir_path} 及其子目录下未找到任何有效的 msgpack checkpoint")
         return latest_file
 
+    @staticmethod
+    def _restore_state_msgpack(msgpack_path: str):
+        """Restore a Flax msgpack payload, tolerating legacy integer map keys."""
+        with open(msgpack_path, "rb") as f:
+            payload = f.read()
+
+        try:
+            return serialization.msgpack_restore(payload)
+        except ValueError as e:
+            if "strict_map_key=True" not in str(e):
+                raise
+            ext_hook = getattr(serialization, "_msgpack_ext_unpack", None)
+            kwargs = {"raw": False, "strict_map_key": False}
+            if ext_hook is not None:
+                kwargs["ext_hook"] = ext_hook
+            return msgpack.unpackb(payload, **kwargs)
+
     def load_model(self, force_load=False):
         """Load model weights for inference (无 Orbax，纯 flax.serialization)
 
@@ -165,23 +183,27 @@ class Inference:
         # 4) 拆分模型，获取空的 state 模板
         graphdef, empty_state = nnx.split(model)
 
-        # 5) 加载 msgpack 文件（和训练时的保存逻辑对应）
-        with open(checkpoint_path, "rb") as f:
-            bytes_data = f.read()
+        # 5) 加载 msgpack 文件，优先匹配当前训练保存的 pure-state 格式。
+        restored_payload = self._restore_state_msgpack(checkpoint_path)
+        restored_state = None
 
-        # 兼容两种保存格式：纯 state（state.msgpack）或 字典（checkpoint_epoch_*.msgpack）
-        try:
-            # 先尝试直接反序列化为 state（兼容 state.msgpack）
-            restored_state = serialization.from_bytes(empty_state, bytes_data)
-        except Exception:
-            # 失败则尝试训练时的字典格式（兼容 checkpoint_epoch_*.msgpack）
-            template = {
-                "model": empty_state,
-                "opt": empty_state,  # 推理不需要 optimizer，占位即可
-                "epoch": 0
-            }
-            restored_dict = serialization.from_bytes(template, bytes_data)
-            restored_state = restored_dict["model"]
+        if isinstance(restored_payload, dict) and "model" in restored_payload:
+            # Legacy layout: {"model": ..., "opt": ..., "epoch": ...}
+            model_payload = restored_payload["model"]
+            if isinstance(model_payload, dict):
+                model_payload = nnx.restore_int_paths(model_payload)
+                nnx.replace_by_pure_dict(empty_state, model_payload)
+                restored_state = empty_state
+            else:
+                restored_state = serialization.from_state_dict(empty_state, model_payload)
+        else:
+            # Current fallback layout from training: pure nnx state dict.
+            if isinstance(restored_payload, dict):
+                restored_payload = nnx.restore_int_paths(restored_payload)
+                nnx.replace_by_pure_dict(empty_state, restored_payload)
+                restored_state = empty_state
+            else:
+                restored_state = serialization.from_state_dict(empty_state, restored_payload)
 
         # 6) 合并 state 到模型
         model = nnx.merge(graphdef, restored_state)
