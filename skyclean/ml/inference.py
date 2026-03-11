@@ -1,8 +1,5 @@
 """
 CMB-Free ILC Model Inference Class.
-
-This module provides a class-based interface for loading trained models and applying them for inference,
-with integrated FileTemplates support for organized data management.
 """
 
 import os
@@ -11,7 +8,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import nnx, serialization
-import msgpack
 
 from .model import S2_UNET
 from .data import CMBFreeILC
@@ -26,21 +22,7 @@ class Inference:
                  directory="data/", seed=0, model_path=None,
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3,
                  momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False):
-        """Initialize the CMB inference system.
 
-        Parameters:
-            frequencies (list): List of frequency strings.
-            realisations (int): Number of realisations.
-            lmax (int): Maximum multipole.
-            N_directions (int): Number of directions for wavelet transform.
-            lam (float): Lambda parameter.
-            chs (list): List of channel dimensions for each layer. Default: [1, 16, 32, 32, 64]
-            directory (str): Base data directory.
-            seed (int): Random seed for model initialization.
-            model_path (str, optional): Specific path to model checkpoint (msgpack file or directory). If None, loads the latest model.
-            nsamp (int)
-            constraint (bool): Mode for the constrainted ILC method.
-        """
         self.extract_comp = extract_comp
         self.component = component
         self.frequencies = frequencies
@@ -48,7 +30,7 @@ class Inference:
         self.lmax = lmax
         self.N_directions = N_directions
         self.lam = lam
-        self.chs = chs if chs is not None else [1, 16, 32, 32, 64]
+        self.chs = chs if chs is not None else [512, 256, 128, 64]
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
@@ -60,10 +42,7 @@ class Inference:
         self.nsamp = nsamp
         self.constraint = constraint
 
-        # Initialize file templates
         self.file_templates = FileTemplates(directory)
-
-        # Model and config will be loaded when needed
         self.model = None
         self.config = None
         self.data_handler = CMBFreeILC(
@@ -76,20 +55,20 @@ class Inference:
             nsamp=self.nsamp,
             constraint=self.constraint,
             lam=self.lam,
-            batch_size=1,  # Not used for inference
+            batch_size=1,
             directory=self.directory
         )
 
     @staticmethod
     def _is_valid_checkpoint_file(path: str) -> bool:
-        """识别有效的 msgpack 格式 checkpoint 文件（state.msgpack 或 checkpoint_epoch_*.msgpack）"""
+        """识别有效的msgpack checkpoint文件"""
         if not os.path.isfile(path):
             return False
         filename = os.path.basename(path)
-        return filename == "state.msgpack" or bool(re.match(r"checkpoint_epoch_\d+\.msgpack$", filename))
+        return bool(re.match(r"checkpoint_epoch_\d+\.msgpack$", filename))
 
     def _find_latest_checkpoint_in_dir(self, dir_path: str) -> str:
-        """在指定目录及其子目录下，递归查找最新的有效 msgpack checkpoint"""
+        """递归查找目录下最新的msgpack checkpoint"""
         if not os.path.isdir(dir_path):
             raise FileNotFoundError(f"Checkpoint 目录不存在: {dir_path}")
 
@@ -102,20 +81,11 @@ class Inference:
                 if not self._is_valid_checkpoint_file(file_path):
                     continue
 
-                # 尝试从路径/文件名提取 epoch
-                epoch = None
-                # 情况1: checkpoint_3/state.msgpack → 从目录名取 epoch
-                parent_dir = os.path.basename(root)
-                m = re.match(r"checkpoint_(\d+)$", parent_dir)
+                # 提取epoch
+                m = re.match(r"checkpoint_epoch_(\d+)\.msgpack$", file)
                 if m:
                     epoch = int(m.group(1))
-                # 情况2: checkpoint_epoch_3.msgpack → 从文件名取 epoch
                 else:
-                    m = re.match(r"checkpoint_epoch_(\d+)\.msgpack$", file)
-                    if m:
-                        epoch = int(m.group(1))
-                # 兜底：用文件修改时间排序
-                if epoch is None:
                     epoch = os.path.getmtime(file_path)
 
                 if epoch > latest_epoch:
@@ -125,98 +95,97 @@ class Inference:
         if latest_file is None:
             raise FileNotFoundError(f"在 {dir_path} 及其子目录下未找到任何有效的 msgpack checkpoint")
         return latest_file
-    
-    @staticmethod
-    def _msgpack_restore_compat(bytes_data: bytes):
-        try:
-            return serialization.msgpack_restore(bytes_data)
-        except ValueError as e:
-            if "strict_map_key" not in str(e):
-                raise
-
-            original_unpackb = msgpack.unpackb
-
-            def _compat_unpackb(*args, **kwargs):
-                kwargs.setdefault("strict_map_key", False)
-                return original_unpackb(*args, **kwargs)
-
-            try:
-                msgpack.unpackb = _compat_unpackb
-                return serialization.msgpack_restore(bytes_data)
-            finally:
-                msgpack.unpackb = original_unpackb
 
     def load_model(self, force_load=False):
-        """Load model weights for inference (无 Orbax，纯 flax.serialization)
-
-        Parameters:
-            force_load (bool): If True, skip compatibility check and force load.
-
-        Returns:
-            nnx.Module: The loaded model.
-        """
-        # 1) 兼容性检查（保留原有逻辑）
+        """加载模型，完全兼容flax 0.10.6"""
         if not force_load:
             compatibility = self.check_model_compatibility()
             if not compatibility.get('compatible', False):
                 raise RuntimeError(
-                    f"Model compatibility check failed: {compatibility.get('message', '')}. "
-                    f"Pass force_load=True to bypass."
+                    f"模型兼容性检查失败: {compatibility.get('message', '')}。"
+                    f"传入 force_load=True 跳过检查。"
                 )
 
-        # 2) 解析 checkpoint 路径（支持目录/文件）
+        # 解析checkpoint路径
         if self.model_path is not None:
             checkpoint_path = os.path.abspath(self.model_path)
             if not os.path.exists(checkpoint_path):
-                raise FileNotFoundError(f"Specified model path does not exist: {checkpoint_path}")
-            # 如果用户指定的是目录，尝试找目录下的 msgpack 文件
+                raise FileNotFoundError(f"指定路径不存在: {checkpoint_path}")
+            # 如果是目录，自动找里面的msgpack
             if os.path.isdir(checkpoint_path):
                 checkpoint_path = self._find_latest_checkpoint_in_dir(checkpoint_path)
             print(f"[Inference] Loading user-specified model from: {checkpoint_path}")
         else:
-            # 自动找最新的 checkpoint
+            # 自动找最新的checkpoint
             checkpoint_path = self._find_latest_checkpoint_in_dir(self.file_templates.output_directories["ml_models"])
             print(f"[Inference] Loading latest checkpoint from: {checkpoint_path}")
 
-        # 3) 构建和训练时完全一致的模型结构
+        # 构建和训练时完全一致的模型结构
         L = self.lmax + 1
         ch_in = len(self.frequencies)
+        print(f"[Model] Building model with L={L}, ch_in={ch_in}, chs={self.chs}")
         model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
 
-        # 4) 拆分模型，获取目标 state 模板
-        graphdef, target_state = nnx.split(model)
+        # 拆分模型，获取空的state模板
+        graphdef, empty_state = nnx.split(model)
 
-        # 5) 加载 msgpack 文件（pure dict + restore_int_paths 路径）
+        # 加载msgpack文件
         with open(checkpoint_path, "rb") as f:
             bytes_data = f.read()
 
-        # restored_pure = serialization.msgpack_restore(bytes_data)
-        restored_pure = self._msgpack_restore_compat(bytes_data)
-        # 兼容 {"model": ...} 包装格式
-        if isinstance(restored_pure, dict) and "model" in restored_pure:
-            restored_pure = restored_pure["model"]
-        if not isinstance(restored_pure, dict):
-            raise TypeError(
-                f"Unsupported checkpoint payload type: {type(restored_pure).__name__}. "
-                "Expected pure dict (or dict with key 'model')."
-            )
-        restored_pure = nnx.restore_int_paths(restored_pure)
-        nnx.replace_by_pure_dict(target_state, restored_pure)
-        restored_state = target_state
+        # 反序列化，兼容训练时的字典格式
+        template = {
+            "model": nnx.to_pure_dict(empty_state),
+            "opt": {},
+            "epoch": 0
+        }
+        restored_dict = serialization.from_bytes(template, bytes_data)
+        #restored_state = restored_dict["model"]
+        nnx.replace_by_pure_dict(empty_state, restored_dict["model"])
 
-        # 6) 合并 state 到模型
-        model = nnx.merge(graphdef, restored_state)
-
-        # 7) 将参数放到设备上（加速推理）
-        model = jax.tree.map(jax.device_put, model)
+        # 合并state到模型
+        model = nnx.merge(graphdef, empty_state)
+        #model = jax.tree.map(jax.device_put, model)
 
         self.model = model
         print(f"[Inference] Model loaded successfully from {checkpoint_path} ✅")
         return model
 
+    def check_model_compatibility(self):
+        """检查模型兼容性"""
+        expected_L = self.lmax + 1
+        expected_ch_in = len(self.frequencies)
+
+        result = {
+            'compatible': True,
+            'message': "Compatibility check passed (Orbax-free mode)",
+            'model_info': {},
+            'expected_info': {
+                'L': expected_L,
+                'lmax': self.lmax,
+                'channels': expected_ch_in,
+                'frequencies': self.frequencies,
+                'N_directions': self.N_directions,
+                'lam': self.lam
+            }
+        }
+
+        if self.model_path is not None:
+            if not os.path.exists(self.model_path):
+                result['compatible'] = False
+                result['message'] = f"Model path does not exist: {self.model_path}"
+                return result
+        else:
+            try:
+                self._find_latest_checkpoint_in_dir(self.file_templates.output_directories["ml_models"])
+            except FileNotFoundError as e:
+                result['compatible'] = False
+                result['message'] = str(e)
+
+        return result
+
     def predict_cmb(self, realisation, save_result=True, masked=False):
         """Predict CMB for a specific realisation."""
-        # Ensure model is loaded
         if self.model is None:
             print("Loading model...")
             self.model = self.load_model()
@@ -224,27 +193,20 @@ class Inference:
 
         print(f"Predicting CMB for realisation {realisation}...")
 
-        # Get the data for this realisation
         F, _, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
 
-        # Transform and prepare for model input
         F = self.data_handler.transform(F).astype(np.float32)
-        F = jnp.expand_dims(F, axis=0)  # Add batch dimension
+        F = jnp.expand_dims(F, axis=0)
 
-        # Apply model
         R_pred_norm = self.model(F)
 
-        # Inverse transform to get residual prediction
         R_pred = self.data_handler.inverse_transform(R_pred_norm)
-        R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
+        R_pred = jnp.squeeze(R_pred, axis=(0, 3))
 
-        # Compute CMB prediction
         cmb_pred = ilc_mwss - R_pred
 
-        # Convert to MW sampling
         cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred, L=self.lmax + 1)
 
-        # Save result if requested
         if save_result:
             if masked:
                 mask_mw = self.data_handler.mask_mw_beamed()
@@ -265,19 +227,15 @@ class Inference:
         if comp not in ("ilc", "nn"):
             raise ValueError("comp must be 'ilc' or 'nn'")
 
-        # Get the data for this realisation
         F, R, _ = self.data_handler.create_residual_mwss_maps(realisation)
-        # R has shape (H, W, 1); squeeze to (H, W)
         R = np.asarray(R)
         if R.ndim == 3 and R.shape[-1] == 1:
-            R = R[..., 0]  # shape (H, W)
-        elif R.ndim == 2:
-            R = R  # already (H, W)
-        else:
+            R = R[..., 0]
+        elif R.ndim != 2:
             raise ValueError(f"Unexpected shape for R: {R.shape}")
 
         if masked:
-            mask = self.data_handler.mask_mwss_beamed()  # (T, P) or (T, P, 1)
+            mask = self.data_handler.mask_mwss_beamed()
             mask = np.asarray(mask)
             if mask.ndim == 3 and mask.shape[-1] == 1:
                 mask = mask[..., 0]
@@ -290,28 +248,25 @@ class Inference:
             print(f"Calculating MSE(ILC) for realisation {realisation}...")
             diff = R
 
-        else:  # comp == "nn":
+        else:
             print(f"Calculating MSE(NN) for realisation {realisation}...")
 
-            if self.model is None:  # Ensure model is loaded
+            if self.model is None:
                 print("Loading model...")
                 self.model = self.load_model()
                 print("Loaded model.")
 
-            # Prepare network input (same pipeline as in predict_cmb)
             F = self.data_handler.transform(F).astype(np.float32)
-            F = jnp.expand_dims(F, axis=0)  # Add batch dimension
+            F = jnp.expand_dims(F, axis=0)
 
-            # Predict normalised residual and inverse-transform
             R_pred_norm = self.model(F)
-            R_pred = self.data_handler.inverse_transform(R_pred_norm)  # shape: ()
-            R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
+            R_pred = self.data_handler.inverse_transform(R_pred_norm)
+            R_pred = jnp.squeeze(R_pred, axis=(0, 3))
 
-            # MSE(NN) = <(R_pred - R_true)^2>
             diff = R - np.asarray(R_pred)
 
         if mask is None:
-            mse = float(np.mean(diff ** 2))  # in K
+            mse = float(np.mean(diff ** 2))
         else:
             w = mask
             num = np.sum(w * diff ** 2)
@@ -324,7 +279,6 @@ class Inference:
     def _save_cmb_prediction(self, cmb_prediction, realisation):
         """Save CMB prediction using FileTemplates."""
         try:
-            # Create a model configuration string for the filename
             chs = "_".join(str(n) for n in self.chs)
 
             if self.constraint:
@@ -333,7 +287,6 @@ class Inference:
                 mode = "uncon"
             frequencies = '_'.join(self.frequencies)
 
-            # Use FileTemplates to get the save path
             save_path = self.file_templates.file_templates["ilc_improved"].format(
                 mode=mode,
                 extract_comp=self.extract_comp,
@@ -351,9 +304,7 @@ class Inference:
                 chs=chs,
             )
 
-            # Create directory if needed
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            # Save the prediction
             np.save(save_path, cmb_prediction)
 
             print(f"Saved CMB prediction to: {save_path}")
@@ -362,7 +313,7 @@ class Inference:
             print(f"Warning: Failed to save CMB prediction: {str(e)}")
 
     def _save_masked_cmb_prediction(self, cmb_prediction, realisation, mask):
-        """Save masked CMB prediction (修复参数错误)"""
+        """Save masked CMB prediction"""
         try:
             chs = "_".join(str(n) for n in self.chs)
             model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}_chs{chs}"
@@ -372,7 +323,6 @@ class Inference:
                 lam=self.lam,
                 model_config=model_config
             )
-            # Create directory if needed
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             np.save(save_path, cmb_prediction)
             print(f"Saved masked CMB prediction to: {save_path}")
@@ -390,30 +340,15 @@ class Inference:
             'lam': self.lam,
             'directory': self.directory,
             'model_dir': self.file_templates.output_directories["ml_models"],
-            'checkpoint_format': "flax.serialization (msgpack, no Orbax)"  # 新增标识
+            'checkpoint_format': "flax serialization (msgpack, no Orbax)"
         }
 
-        # Add compatibility check information
         compatibility = self.check_model_compatibility()
         info['model_compatibility'] = compatibility
-
-        if self.config is not None:
-            info.update({
-                'trained_frequencies': self.config.get('frequencies'),
-                'trained_lmax': self.config.get('lmax'),
-                'trained_L': self.config.get('L'),
-                'trained_channels': self.config.get('ch_in'),
-                'training_params': {
-                    'batch_size': self.config.get('batch_size'),
-                    'learning_rate': self.config.get('learning_rate'),
-                    'momentum': self.config.get('momentum')
-                }
-            })
 
         return info
 
 
-# Example inference.
 if __name__ == "__main__":
     frequencies = ["030", "100", "353"]
     realisations = 1000
