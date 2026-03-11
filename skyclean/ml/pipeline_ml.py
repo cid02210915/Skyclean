@@ -68,6 +68,33 @@ def resolve_model_dir_from_directory(directory: str) -> str:
     return os.path.abspath(files.output_directories["ml_models"])
 
 
+def resolve_evaluate_target(args) -> str:
+    """
+    Resolve evaluation target from CLI args.
+
+    Accepted inputs:
+    - `--model-dir` pointing to a run directory containing checkpoint_* folders
+    - `--model-dir` pointing directly to a checkpoint_* directory
+    - `--run-id` pointing to ML/models/<run_id>
+    - no `--run-id`, in which case ML/models itself is searched
+    """
+    if args.model_dir.strip():
+        return os.path.abspath(args.model_dir.strip())
+
+    base_model_dir = resolve_model_dir_from_directory(args.directory)
+    run_id = args.run_id.strip()
+    if not run_id:
+        return base_model_dir
+
+    run_dir = os.path.join(base_model_dir, run_id)
+    if not os.path.isdir(run_dir):
+        raise FileNotFoundError(
+            f"Run directory does not exist: {run_dir}. "
+            "With --run-id, checkpoints are expected under ML/models/<run_id>/checkpoint_<epoch>."
+        )
+    return run_dir
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Pipeline (train + evaluate) for Skyclean ML."
@@ -139,8 +166,14 @@ def parse_args():
     # ----- evaluation controls -----
     parser.add_argument("--eval-every", type=int, default=1, 
             help="Run evaluation every N epochs (default: 1 = every epoch).")
-    parser.add_argument("--eval-steps", type=int, default=-1, 
-            help="Number of eval batches per evaluation. -1 means full test set.")
+    parser.add_argument(
+        "--eval-batches",
+        "--eval-steps",
+        dest="eval_batches",
+        type=int,
+        default=-1,
+        help="Number of validation batches per evaluation run. -1 means full test set.",
+    )
     parser.add_argument(
         "--prefetch",
         dest="prefetch",
@@ -188,7 +221,7 @@ def step_train(args) -> str:
         loss_tag=args.loss_tag,
         random_generator=args.random,
         eval_every=args.eval_every,
-        eval_steps=args.eval_steps,
+        eval_steps=args.eval_batches,
         prefetch=args.prefetch,
         run_id=(args.run_id.strip() or None),
     )
@@ -589,6 +622,18 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
 
 def resolve_checkpoint_dir(args, model_dir: str) -> str:
+    model_path = Path(model_dir)
+    direct_ckpt_pat = re.compile(r"^checkpoint_(\d+)$")
+
+    if model_path.is_dir() and direct_ckpt_pat.match(model_path.name):
+        return str(model_path)
+
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Run directory does not exist: {model_dir}. "
+            "Evaluation with --run-id requires an existing ML/models/<run_id> directory."
+        )
+
     if args.checkpoint_epoch is not None:
         ckpt_dir = os.path.join(model_dir, f"checkpoint_{args.checkpoint_epoch}")
         if not os.path.isdir(ckpt_dir):
@@ -622,13 +667,8 @@ def main():
 
     if args.mode == "evaluate":
         print("[evaluate] Starting evaluation...")
-        model_dir_from_train = resolve_model_dir_from_directory(args.directory)
-        if args.run_id.strip():
-            model_dir_from_train = os.path.join(model_dir_from_train, args.run_id.strip())
+        model_dir_from_train = resolve_evaluate_target(args)
         print(f"Model directory: {model_dir_from_train}")
-        if args.model_dir.strip():
-            model_dir_from_train = os.path.abspath(args.model_dir.strip())
-            print(f"Using overridden model_dir: {model_dir_from_train}")
         ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
         print(f'loaded model from: {ckpt_dir}')
         step_evaluate(args, ckpt_dir=ckpt_dir)
@@ -646,7 +686,7 @@ if __name__ == "__main__":
 
 # Example usage:
 # 030 044 070 100 143 217 353 545 857
-# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 300 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 5 --nsamp 1200 --epochs 200 --eval-every 5 --eval-steps 10 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --plot --prefetch --run-id 20260226_173000 
+# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 2 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --nsamp 1200 --epochs 10 --eval-every 5 --eval-batches 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --plot --run-id testing --random 
 
 
 ''' Example usage:
@@ -665,7 +705,7 @@ python3 -m skyclean.ml.pipeline_ml \
   --learning-rate 1e-3 \
   --momentum 0.90 \
   --eval-every 5 \
-  --eval-steps 10 \
+  --eval-batches 10 \
   --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \
   --prefetch \
   --run-id 20260226_1

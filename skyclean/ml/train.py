@@ -589,10 +589,17 @@ class Train:
 
         eval_loss_valid = np.isfinite(eval_loss)
         eval_acc_valid = np.isfinite(eval_acc)
+        eval_loss_plot = eval_loss.copy()
+        eval_acc_plot = eval_acc.copy()
+
+        if np.any(eval_loss_valid) and np.any(~eval_loss_valid):
+            eval_loss_plot = np.interp(epochs, epochs[eval_loss_valid], eval_loss[eval_loss_valid])
+        if np.any(eval_acc_valid) and np.any(~eval_acc_valid):
+            eval_acc_plot = np.interp(epochs, epochs[eval_acc_valid], eval_acc[eval_acc_valid])
 
         ax1.plot(epochs, train_loss, 'b-', label='Training', linewidth=2)
         if np.any(eval_loss_valid):
-            ax1.plot(epochs[eval_loss_valid], eval_loss[eval_loss_valid], 'r-', label='Validation', linewidth=2)
+            ax1.plot(epochs, eval_loss_plot, 'r-', label='Validation', linewidth=2)
         ax1.set_title('Loss Curve')
         ax1.set_xlabel('Epoch')
         ax1.set_ylabel('Loss')
@@ -601,7 +608,7 @@ class Train:
 
         ax3.plot(epochs, train_acc, 'b-', label='Training', linewidth=2)
         if np.any(eval_acc_valid):
-            ax3.plot(epochs[eval_acc_valid], eval_acc[eval_acc_valid], 'r-', label='Validation', linewidth=2)
+            ax3.plot(epochs, eval_acc_plot, 'r-', label='Validation', linewidth=2)
         ax3.set_title('Accuracy Curve')
         ax3.set_xlabel('Epoch')
         ax3.set_ylabel('Accuracy')
