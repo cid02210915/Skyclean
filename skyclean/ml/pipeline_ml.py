@@ -125,7 +125,13 @@ def parse_args():
 
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--no-shuffle", action="store_true")
-    parser.add_argument("--split", nargs=2, type=float, default=[0.8, 0.2])
+    parser.add_argument(
+        "--split",
+        nargs="+",
+        type=float,
+        default=[0.8, 0.1, 0.1],
+        help="Train/validation/test split ratios. Recommended: 0.8 0.1 0.1",
+    )
 
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -686,7 +692,7 @@ if __name__ == "__main__":
 
 # Example usage:
 # 030 044 070 100 143 217 353 545 857
-# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 2 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --nsamp 1200 --epochs 10 --eval-every 5 --eval-batches 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --plot --run-id testing --random 
+# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 2 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --nsamp 1200 --epochs 10 --eval-every 5 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --plot --run-id testing --random 
 
 
 ''' Example usage:

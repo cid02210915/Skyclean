@@ -17,7 +17,7 @@ jax.config.update("jax_enable_x64", False)
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
                  nsamp: int = 1200, constraint: bool = False, 
-                 batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.2], directory: str = "data/", random: bool = False):
+                 batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False):
         """
         Parameters:
             extract_comp (str): Component to be extracted. e.g. "cmb"
@@ -43,7 +43,7 @@ class CMBFreeILC():
         self.lam = lam
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.split = split
+        self.split = self._normalize_split(split)
         self.directory = directory
         self.component = component
         self.extract_comp = extract_comp
@@ -249,25 +249,55 @@ class CMBFreeILC():
             else:
                 self.create_random_mwss_maps(realisation)
 
+    @staticmethod
+    def _normalize_split(split):
+        """Normalize split ratios to (train, validation, test)."""
+        if len(split) == 2:
+            train_ratio, remaining_ratio = split
+            validation_ratio = remaining_ratio / 2.0
+            test_ratio = remaining_ratio / 2.0
+            split = [train_ratio, validation_ratio, test_ratio]
+        elif len(split) != 3:
+            raise ValueError(f"split must have 2 or 3 values, got {split}.")
+
+        split = np.asarray(split, dtype=float)
+        if np.any(split < 0):
+            raise ValueError(f"split values must be non-negative, got {split.tolist()}.")
+        total = float(np.sum(split))
+        if not np.isclose(total, 1.0):
+            raise ValueError(f"split must sum to 1.0, got {split.tolist()} (sum={total}).")
+        return split.tolist()
+
     def prepare_data(self):
-        """Split indices and return (train_ds, test_ds) generators.
+        """Split indices and return train/validation/test generators.
         
         Returns:
-            tuple: A tuple containing the training and testing datasets.
+            tuple: Training, validation, and test datasets plus their sizes.
         NOTE: It is recommended to run produce_residuals before running this in the training code.
         """
         random = self.random
         idx = np.arange(self.realisations)
-        cut = int(self.split[0] * self.realisations)
-        train_idx, test_idx = idx[:cut], idx[cut:]
+        n_train = int(self.split[0] * self.realisations)
+        n_val = int(self.split[1] * self.realisations)
+        train_idx = idx[:n_train]
+        val_idx = idx[n_train:n_train + n_val]
+        test_idx = idx[n_train + n_val:]
+
+        # TODO: k-fold cross-validation is better.
         train_ds = self._make_dataset(train_idx, random, drop_remainder=True)
+        drop_remainder_val = len(val_idx) >= self.batch_size
+        if not drop_remainder_val:
+            print(f"[WARN] Validation set size ({len(val_idx)}) < batch_size ({self.batch_size}); "
+                  "using drop_remainder=False for validation dataset.")
+        val_ds = self._make_dataset(val_idx, random, drop_remainder=drop_remainder_val)
+
         drop_remainder_test = len(test_idx) >= self.batch_size
         if not drop_remainder_test:
             print(f"[WARN] Test set size ({len(test_idx)}) < batch_size ({self.batch_size}); "
                   "using drop_remainder=False for test dataset.")
         test_ds = self._make_dataset(test_idx, random, drop_remainder=drop_remainder_test)
-        print("Data generators prepared. Train size:", len(train_idx), "Test size:", len(test_idx))
-        return train_ds, test_ds, len(train_idx), len(test_idx), drop_remainder_test
+        print("Data generators prepared. Train size:", len(train_idx), "Validation size:", len(val_idx), "Test size:", len(test_idx))
+        return train_ds, val_ds, test_ds, len(train_idx), len(val_idx), len(test_idx), drop_remainder_val, drop_remainder_test
 
     def find_dataset_mean_std(self): 
         """Compute the mean and standard deviation of the inputs (channel-wise) and outputs (single channel). 

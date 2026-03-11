@@ -65,7 +65,7 @@ def print_gpu_usage(stage_name: str, jax_device_id: int = 0):
 class Train:
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int,
                  lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, nsamp: int = 1200, constraint: bool = False,
-                 batch_size: int = 32, shuffle: bool = True, split: list = [0.8, 0.2], epochs: int = 120,
+                 batch_size: int = 32, shuffle: bool = True, split: list = [0.8, 0.1, 0.1], epochs: int = 120,
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0),
                  directory: str = "data/", resume_training: bool = False, loss_tag: str | None = 'pixel',
                  random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
@@ -422,26 +422,30 @@ class Train:
         print_gpu_usage("Before dataset creation")
         print("[Data] Constructing CMB-Free ILC dataset...")
 
-        train_ds, test_ds, n_train, n_test, drop_remainder_test = self.dataset.prepare_data()
+        train_ds, val_ds, test_ds, n_train, n_val, n_test, drop_remainder_val, drop_remainder_test = self.dataset.prepare_data()
 
         if self.prefetch:
             train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+            val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
             test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
             print("[Data] Prefetch enabled.")
         else:
             print("[Data] Prefetch disabled.")
 
-        print(f"[Data] Dataset ready - Train: {n_train} samples | Test: {n_test} samples")
+        print(f"[Data] Dataset ready - Train: {n_train} samples | Validation: {n_val} samples | Test: {n_test} samples")
         print_gpu_usage("After dataset creation")
 
+        if n_val == 0:
+            raise ValueError("Validation set is empty! Increase realisations or adjust split.")
         if n_test == 0:
-            raise ValueError("Test set is empty! Increase realisations or adjust split.")
+            print("[WARN] Test set is empty. Final blind evaluation is not available for this split.")
 
         training_batches_per_epoch = n_train // self.batch_size
-        testing_batches_per_epoch = n_test // self.batch_size if drop_remainder_test else (
-                                                                                                      n_test + self.batch_size - 1) // self.batch_size
+        validation_batches_per_epoch = n_val // self.batch_size if drop_remainder_val else (
+            n_val + self.batch_size - 1
+        ) // self.batch_size
 
-        train_iter, test_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(test_ds))
+        train_iter, val_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(val_ds))
 
         print("[Model] Constructing S2_UNET model...")
         model = S2_UNET(L, len(self.frequencies), chs=self.chs, rngs=self.rngs)
@@ -473,7 +477,7 @@ class Train:
             accuracy=nnx.metrics.Average("accuracy"),
         )
 
-        test_batch = next(iter(test_ds))
+        test_batch = next(iter(val_ds))
         norm_quad_weights = model.input_conv.conv.quad_weights.value / (4 * L)
         graphdef, state = nnx.split((model, optimizer, metrics))
 
@@ -512,16 +516,17 @@ class Train:
             # Evaluation phase
             do_eval = (epoch % self.eval_every == 0)
             if do_eval:
-                eval_batches = testing_batches_per_epoch if self.eval_steps <= 0 else min(self.eval_steps,
-                                                                                          testing_batches_per_epoch)
+                eval_batches = validation_batches_per_epoch if self.eval_steps <= 0 else min(
+                    self.eval_steps, validation_batches_per_epoch
+                )
 
                 for _ in range(eval_batches):
-                    batch_x, batch_y = next(test_iter)
+                    batch_x, batch_y = next(val_iter)
                     state = self.eval_step(graphdef, state, jnp.asarray(batch_x), jnp.asarray(batch_y),
                                            norm_quad_weights, mask_mwss)
 
                 nnx.update((model, optimizer, metrics), state)
-                test_iter = iter(tfds.as_numpy(test_ds))
+                val_iter = iter(tfds.as_numpy(val_ds))
 
                 eval_metrics = metrics.compute()
                 for metric, value in eval_metrics.items():
@@ -540,9 +545,9 @@ class Train:
             print(
                 f"[Train] Epoch {epoch:03d}/{self.epochs}: "
                 f"Train Loss = {metrics_history['train_loss'][-1]:.3f} | "
-                f"Eval Loss = {eval_loss} | "
+                f"Val Loss = {eval_loss} | "
                 f"Train Acc = {metrics_history['train_accuracy'][-1]:.3f} | "
-                f"Eval Acc = {eval_acc}"
+                f"Val Acc = {eval_acc}"
                 f"{'' if do_eval else f' (eval skipped, eval_every={self.eval_every})'}"
             )
             print_gpu_usage(f"After epoch {epoch}")
