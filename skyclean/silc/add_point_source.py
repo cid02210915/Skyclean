@@ -213,6 +213,54 @@ def increase_size_deg(rad_deg: np.ndarray, factor: int | float) -> np.ndarray:
     return np.asarray(rad_deg, dtype=np.float64) * float(factor)
 
 
+def sum_selected_pixels_by_udgrade_region(
+    hp_map_in: np.ndarray,
+    selected_pix_in: np.ndarray,
+    nside_out: int,
+    *,
+    nest: bool = False,
+) -> np.ndarray:
+    """
+    Sum high-resolution map values over selected input pixels, grouped by the
+    low-resolution parent pixels reached by ud_grade-style grouping.
+    """
+    nside_in = hp.get_nside(hp_map_in)
+    selected_pix_in = np.asarray(selected_pix_in, dtype=np.int64)
+
+    if nside_out > nside_in:
+        raise ValueError("nside_out must be <= nside_in")
+
+    theta, phi = hp.pix2ang(nside_in, selected_pix_in, nest=nest)
+    pix_out = hp.ang2pix(nside_out, theta, phi, nest=nest)
+
+    sums_out = np.zeros(hp.nside2npix(nside_out), dtype=np.float64)
+    np.add.at(sums_out, pix_out, hp_map_in[selected_pix_in])
+    return sums_out
+
+
+def measure_source_values(
+    hp_map: np.ndarray,
+    center_lon_deg: np.ndarray,
+    center_lat_deg: np.ndarray,
+    *,
+    nest: bool = False,
+    threshold: float = 0.0,
+) -> np.ndarray:
+    """
+    Measure per-source summed values from a map by connected-component lookup.
+    """
+    label_of_pix, sum_per = precompute_component_sums(hp_map, nest=nest, threshold=threshold)
+    nside = hp.get_nside(hp_map)
+    theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
+    phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
+    seed_pix = hp.ang2pix(nside, theta, phi, nest=nest).astype(np.int64)
+    labs = label_of_pix[seed_pix]
+    vals = np.zeros(labs.size, dtype=np.float64)
+    good = labs >= 0
+    vals[good] = sum_per[labs[good]]
+    return vals
+
+
 def create_sed_lists_from_results(results_df: pd.DataFrame, frequencies: Sequence[str]) -> list[list[float]]:
     sed_df = results_df[[f"val_{fre}" for fre in frequencies]].copy()
     sed_lists = sed_df.to_numpy(dtype=float).tolist()
@@ -371,3 +419,236 @@ class PointSource:
         rad_list = increase_size_deg(results["rad_deg"].to_numpy(dtype=np.float64), self.factor)
 
         return lon_list, lat_list, rad_list, val_list, sed_lists
+
+
+class CircularPSInjector:
+    """
+    Build extra-feature maps by copying the full connected components of a base
+    point-source map around selected source seeds.
+    """
+
+    def __init__(
+        self,
+        *,
+        ps_component: str,
+        map_loader,
+        nest: bool = False,
+        threshold: float = 0.0,
+    ):
+        self.ps_component = ps_component
+        self.map_loader = map_loader
+        self.nest = nest
+        self.threshold = float(threshold)
+
+    def build_map(
+        self,
+        *,
+        frequency: str,
+        realisation: int,
+        center_lon_deg: np.ndarray,
+        center_lat_deg: np.ndarray,
+    ) -> np.ndarray:
+        print(f"[circular_ps] using ps_component='{self.ps_component}' at {frequency} GHz")
+        src_map = self.map_loader(self.ps_component, frequency, realisation)
+        nside = hp.get_nside(src_map)
+        label_of_pix, _ = precompute_component_sums(src_map, nest=self.nest, threshold=self.threshold)
+
+        theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
+        phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
+        seed_pix = hp.ang2pix(nside, theta, phi, nest=self.nest).astype(np.int64)
+
+        labs = label_of_pix[seed_pix]
+        valid_labs = labs[labs >= 0]
+        if valid_labs.size == 0:
+            print(f"Warning: no valid connected components found for injected sources at {frequency} GHz.")
+            return np.zeros_like(src_map, dtype=np.float64)
+
+        keep = np.isin(label_of_pix, np.unique(valid_labs))
+        extra_feature_map = np.zeros_like(src_map, dtype=np.float64)
+        extra_feature_map[keep] = src_map[keep]
+        return extra_feature_map
+
+
+class PixelPSInjector:
+    """
+    Build low-resolution extra-feature maps using a fixed reference-frequency
+    ratio pattern and per-frequency source-flux rescaling.
+    """
+
+    def __init__(
+        self,
+        *,
+        components: Sequence[str],
+        frequencies: Sequence[str],
+        ps_component: str,
+        desired_lmax: int,
+        map_loader,
+        reference_frequency: str = "030",
+        nest: bool = False,
+        threshold: float = 0.0,
+    ):
+        self.components = list(components)
+        self.frequencies = list(frequencies)
+        self.ps_component = ps_component
+        self.desired_lmax = int(desired_lmax)
+        self.map_loader = map_loader
+        self.reference_frequency = str(reference_frequency).zfill(3)
+        self.nest = nest
+        self.threshold = float(threshold)
+
+    def _foreground_components(self) -> list[str]:
+        excluded = {"cmb", "noise"}
+        resolved = []
+        for comp in self.components:
+            if comp in excluded:
+                continue
+            if comp == "extra_feature":
+                resolved.append(self.ps_component)
+            else:
+                resolved.append(comp)
+        return list(dict.fromkeys(resolved))
+
+    def _compute_inputs_for_frequency(
+        self,
+        *,
+        frequency: str,
+        realisation: int,
+        center_lon_deg: np.ndarray,
+        center_lat_deg: np.ndarray,
+        nside_out: int,
+    ) -> dict[str, np.ndarray]:
+        print(f"[pixel_ps] using ps_component='{self.ps_component}' at {frequency} GHz")
+        ps_map = self.map_loader(self.ps_component, frequency, realisation)
+        foreground_components = self._foreground_components()
+        if not foreground_components:
+            raise ValueError(
+                "pixel_ps injection requires at least one foreground component in `components` "
+                "besides 'cmb' and 'noise'."
+            )
+
+        foreground_maps = [
+            self.map_loader(comp, frequency, realisation)
+            for comp in foreground_components
+        ]
+        working_nside = min([hp.get_nside(ps_map)] + [hp.get_nside(m) for m in foreground_maps])
+        if nside_out > working_nside:
+            raise ValueError(
+                f"desired low-resolution nside_out={nside_out} exceeds working_nside={working_nside} "
+                f"for frequency {frequency}"
+            )
+
+        if hp.get_nside(ps_map) != working_nside:
+            ps_map = hp.ud_grade(ps_map, nside_out=working_nside, order_in="RING", order_out="RING", power=0)
+
+        foreground_sum = np.zeros(hp.nside2npix(working_nside), dtype=np.float64)
+        for comp, fg_map in zip(foreground_components, foreground_maps):
+            if hp.get_nside(fg_map) != working_nside:
+                fg_map = hp.ud_grade(fg_map, nside_out=working_nside, order_in="RING", order_out="RING", power=0)
+            foreground_sum += fg_map
+            print(f"[extra_feature:{frequency}] added foreground component '{comp}'")
+
+        label_of_pix, _ = precompute_component_sums(ps_map, nest=self.nest, threshold=self.threshold)
+        theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
+        phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
+        seed_pix_hi = hp.ang2pix(working_nside, theta, phi, nest=self.nest).astype(np.int64)
+
+        labs = label_of_pix[seed_pix_hi]
+        keep_labs = np.unique(labs[labs >= 0])
+        if keep_labs.size == 0:
+            zeros = np.zeros(hp.nside2npix(nside_out), dtype=np.float64)
+            return {
+                "sums_out": zeros.copy(),
+                "average_ratio": np.full_like(zeros, np.nan, dtype=np.float64),
+                "fg_lowres": zeros.copy(),
+            }
+
+        selected_pix_hi = np.where(np.isin(label_of_pix, keep_labs))[0]
+        sums_out = sum_selected_pixels_by_udgrade_region(ps_map, selected_pix_hi, nside_out, nest=self.nest)
+        counts = sum_selected_pixels_by_udgrade_region(np.ones_like(ps_map), selected_pix_hi, nside_out, nest=self.nest)
+
+        ratio_map_hi = np.full_like(ps_map, np.nan, dtype=np.float64)
+        valid_fg = np.isfinite(foreground_sum) & (foreground_sum != 0)
+        ratio_map_hi[selected_pix_hi] = np.divide(
+            ps_map[selected_pix_hi],
+            foreground_sum[selected_pix_hi],
+            out=np.full(selected_pix_hi.shape, np.nan, dtype=np.float64),
+            where=valid_fg[selected_pix_hi],
+        )
+        sums_ratio = sum_selected_pixels_by_udgrade_region(
+            np.nan_to_num(ratio_map_hi, nan=0.0, posinf=0.0, neginf=0.0),
+            selected_pix_hi,
+            nside_out,
+            nest=self.nest,
+        )
+
+        average_ratio = np.full_like(sums_ratio, np.nan, dtype=np.float64)
+        np.divide(sums_ratio, counts, out=average_ratio, where=counts > 0)
+        fg_lowres = hp.ud_grade(foreground_sum, nside_out=nside_out, order_in="RING", order_out="RING", power=0)
+
+        # Diagnostic: visualise the low-resolution PS/FG contamination ratio map.
+        #hp.mollview(
+        #    np.nan_to_num(average_ratio, nan=0.0, posinf=0.0, neginf=0.0),
+        #    title=f"[pixel_ps] average PS/FG ratio @ {frequency} GHz",
+        #    unit="",
+        #)
+        #plt.show()
+
+        return {
+            "sums_out": sums_out,
+            "average_ratio": average_ratio,
+            "fg_lowres": fg_lowres,
+        }
+
+    def build_maps(
+        self,
+        *,
+        realisation: int,
+        center_lon_deg: np.ndarray,
+        center_lat_deg: np.ndarray,
+    ) -> tuple[dict[str, np.ndarray], np.ndarray]:
+        nside_out = HPTools.get_nside_from_lmax(self.desired_lmax)
+        if self.reference_frequency not in self.frequencies:
+            raise ValueError(
+                f"Reference frequency '{self.reference_frequency}' is not in frequencies {self.frequencies}"
+            )
+
+        per_freq = {}
+        for frequency in self.frequencies:
+            print(f"[extra_feature] computing ratio-rescaled inputs for {frequency} GHz")
+            per_freq[frequency] = self._compute_inputs_for_frequency(
+                frequency=frequency,
+                realisation=realisation,
+                center_lon_deg=center_lon_deg,
+                center_lat_deg=center_lat_deg,
+                nside_out=nside_out,
+            )
+
+        ref_average_ratio = np.nan_to_num(
+            per_freq[self.reference_frequency]["average_ratio"],
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        ref_sums_out = per_freq[self.reference_frequency]["sums_out"]
+        ref_fg_lowres = per_freq[self.reference_frequency]["fg_lowres"]
+
+        extra_feature_maps = {}
+        sed_matrix = np.zeros((len(center_lon_deg), len(self.frequencies)), dtype=np.float64)
+        for i, frequency in enumerate(self.frequencies):
+            sums_out = per_freq[frequency]["sums_out"]
+            scale = np.divide(
+                sums_out,
+                ref_sums_out,
+                out=np.zeros_like(sums_out, dtype=np.float64),
+                where=ref_sums_out != 0,
+            )
+            extra_feature_map = ref_average_ratio * scale * ref_fg_lowres
+            extra_feature_maps[frequency] = np.asarray(extra_feature_map, dtype=np.float64)
+            sed_matrix[:, i] = measure_source_values(
+                extra_feature_maps[frequency],
+                center_lon_deg=center_lon_deg,
+                center_lat_deg=center_lat_deg,
+                nest=self.nest,
+                threshold=self.threshold,
+            )
+        return extra_feature_maps, sed_matrix

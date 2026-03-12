@@ -37,7 +37,10 @@ class Pipeline:
         F = None,
         reference_vectors = None,
         nsamp: float = 1200, 
+        # for adding extra point-source-like features:
+        ps_injection_mode: Literal["circular_ps", "pixel_ps"] = "circular_ps",
         ps_component: str = "faintradiops",
+        # for 'circular_ps' usage: 
         n_points: int = 10,
         lon_range: tuple[float, float] | None = None,
         lat_range: tuple[float, float] = (20.0, 90.0),
@@ -45,12 +48,6 @@ class Pipeline:
         mode: Literal["random", "brightest"] = "random",
         random_seed: int = 1,
         factor: int | float = 50.0,
-        #feature_center_lon_deg: list = [45, 60], 
-        #feature_center_lat_deg: list = [10, 30], 
-        #feature_radius_deg: list = [5, 5], 
-        #feature_value: list = [700e-6, 700e-6], 
-        #feature_sed: list = [[2, 0, 1], [1, 2, 0]]
-        #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
         self.wavelet_components = wavelet_components
@@ -72,12 +69,6 @@ class Pipeline:
         #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
         self.nsamp = nsamp
-        # arguements for adding extra features
-        #self.feature_center_lon_deg = feature_center_lon_deg
-        #self.feature_center_lat_deg = feature_center_lat_deg
-        #self.feature_radius_deg = feature_radius_deg
-        #self.feature_value = feature_value
-        #self.feature_sed = feature_sed
         self.ps_component = ps_component
         self.n_points = int(n_points)
         self.lon_range = lon_range
@@ -86,6 +77,7 @@ class Pipeline:
         self.mode = mode
         self.random_seed = int(random_seed)
         self.factor = factor
+        self.ps_injection_mode = ps_injection_mode
 
         
 
@@ -140,6 +132,7 @@ class Pipeline:
             mode = self.mode,
             random_seed = self.random_seed,
             factor = self.factor,
+            ps_injection_mode = self.ps_injection_mode,
 
         )
         processor.produce_and_save_maps()
@@ -172,6 +165,7 @@ class Pipeline:
             mode = self.mode,
             random_seed = self.random_seed,
             factor = self.factor,
+            ps_injection_mode = self.ps_injection_mode,
         )
         processor.produce_and_save_wavelet_transforms(
             self.N_directions,
@@ -704,6 +698,7 @@ def main():
             "    --mode random \\\n"
             "    --random-seed 1 \\\n"
             "    --factor 60 \\\n"
+            "    --ps-injection-mode pixel_ps \\\n"
             "    --overwrite \\\n"
             "    --steps process"
         ),
@@ -756,6 +751,10 @@ def main():
                         help="Random seed used when mode='random'.")
     parser.add_argument('--factor', type=float, default=50.0,
                         help="Feature size enlargement factor.")
+    parser.add_argument('--ps-injection-mode', type=str,
+                        choices=['circular_ps', 'pixel_ps'],
+                        default='circular_ps',
+                        help="How to build injected extra features.")
     
 
 
@@ -814,6 +813,7 @@ def main():
         mode=args.mode,
         random_seed=args.random_seed,
         factor=args.factor,
+        ps_injection_mode=args.ps_injection_mode,
     )
     pipeline.run(steps=args.steps)
 
