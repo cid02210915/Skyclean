@@ -65,6 +65,16 @@ class CMBFreeILC():
         self.produce_residuals()  # Create residual maps for all realisations
         #self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
 
+    def _split_indices(self):
+        """Return deterministic train/validation/test indices for the configured split."""
+        idx = np.arange(self.realisations)
+        n_train = int(self.split[0] * self.realisations)
+        n_val = int(self.split[1] * self.realisations)
+        train_idx = idx[:n_train]
+        val_idx = idx[n_train:n_train + n_val]
+        test_idx = idx[n_train + n_val:]
+        return train_idx, val_idx, test_idx
+
     def create_random_mwss_maps(self, realisation: int):
         """Generate and save random foreground and residual maps in MWSS sampling format for testing purposes.
 
@@ -149,7 +159,8 @@ class CMBFreeILC():
             tf.Tensor: Transformed and normalized tensor.
         """
         if not hasattr(self, "_cached_stats"):
-            self._cached_stats = self.find_dataset_mean_std()
+            train_idx, _, _ = self._split_indices()
+            self._cached_stats = self.find_dataset_mean_std(indices=train_idx)
         (self.signed_log_F_mean,
          self.signed_log_R_mean,
          self.signed_log_F_std,
@@ -276,12 +287,11 @@ class CMBFreeILC():
         NOTE: It is recommended to run produce_residuals before running this in the training code.
         """
         random = self.random
-        idx = np.arange(self.realisations)
-        n_train = int(self.split[0] * self.realisations)
-        n_val = int(self.split[1] * self.realisations)
-        train_idx = idx[:n_train]
-        val_idx = idx[n_train:n_train + n_val]
-        test_idx = idx[n_train + n_val:]
+        train_idx, val_idx, test_idx = self._split_indices()
+
+        # Freeze normalization on the training split only, then reuse it for all splits.
+        if not random:
+            self._cached_stats = self.find_dataset_mean_std(indices=train_idx)
 
         # TODO: k-fold cross-validation is better.
         train_ds = self._make_dataset(train_idx, random, drop_remainder=True)
@@ -299,22 +309,30 @@ class CMBFreeILC():
         print("Data generators prepared. Train size:", len(train_idx), "Validation size:", len(val_idx), "Test size:", len(test_idx))
         return train_ds, val_ds, test_ds, len(train_idx), len(val_idx), len(test_idx), drop_remainder_val, drop_remainder_test
 
-    def find_dataset_mean_std(self): 
-        """Compute the mean and standard deviation of the inputs (channel-wise) and outputs (single channel). 
+    def find_dataset_mean_std(self, indices=None): 
+        """Compute normalization statistics for a chosen subset of realizations.
         
         Returns:
             tuple: A tuple containing 4 numpy arrays: (F_mean, R_mean, F_std, R_std).
             F_mean, F_std (np.ndarray) have shape (num_channels,).
             R_mean, R_std (np.ndarray) have shape (1,).
         """
-        if hasattr(self, "_cached_stats"):
-            return self._cached_stats
+        if indices is None:
+            if hasattr(self, "_cached_stats"):
+                return self._cached_stats
+            indices, _, _ = self._split_indices()
+
+        indices = np.asarray(indices, dtype=int)
+        if indices.size == 0:
+            raise ValueError("Cannot compute normalization statistics from an empty split.")
+
         F_mean_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel mean
         R_mean_sum = 0 # only one output channel
         F_std_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel std
         R_std_sum = 0 # only one output channel
 
-        for realisation in range(self.realisations):
+        print(f"[Data] Fitting normalization stats on {indices.size} training realisations.")
+        for realisation in indices:
             F, R, _ = self.create_residual_mwss_maps(realisation) # load maps
             signed_log_F = self.signed_log_transform(F)
             signed_log_R = self.signed_log_transform(R)
@@ -323,13 +341,16 @@ class CMBFreeILC():
             F_std_sum += np.std(signed_log_F, axis=(0, 1))  # Sum over H and W
             R_std_sum += np.std(signed_log_R, axis = (0, 1))
 
-        signed_log_F_mean = F_mean_sum / self.realisations
-        signed_log_R_mean = R_mean_sum / self.realisations
-        signed_log_F_std = F_std_sum / self.realisations
-        signed_log_R_std = R_std_sum / self.realisations
+        n_stats = float(indices.size)
+        signed_log_F_mean = F_mean_sum / n_stats
+        signed_log_R_mean = R_mean_sum / n_stats
+        signed_log_F_std = F_std_sum / n_stats
+        signed_log_R_std = R_std_sum / n_stats
 
-        self._cached_stats = (signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std)
-        return self._cached_stats
+        stats = (signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std)
+        if np.array_equal(indices, self._split_indices()[0]):
+            self._cached_stats = stats
+        return stats
     
 
     def load_mask_hp(self,fsky=0.7, apodization=2) -> np.ndarray:
