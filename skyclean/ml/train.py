@@ -69,7 +69,8 @@ class Train:
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0),
                  directory: str = "data/", resume_training: bool = False, loss_tag: str | None = 'pixel',
                  random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
-                 prefetch: bool = False, run_id: str | None = None):
+                 prefetch: bool = False, run_id: str | None = None,
+                 early_stopping_patience: int = 2, early_stopping_min_delta: float = 1e-3):
 
         self.component = component
         self.extract_comp = extract_comp
@@ -94,11 +95,21 @@ class Train:
         self.eval_steps = eval_steps
         self.prefetch = prefetch
         self.run_id = (run_id or datetime.now().strftime("%Y%m%d_%H%M%S")).strip()
+        self.early_stopping_patience = early_stopping_patience # how many epochs to wait for improvement before stopping
+        self.early_stopping_min_delta = early_stopping_min_delta # minimum improvement in eval loss to reset patience counter
 
         if self.loss_tag not in {"pixel", "harmonic"}:
             raise ValueError(f"Unsupported loss_tag={self.loss_tag!r}. Use 'pixel' or 'harmonic'.")
         if self.eval_every < 1:
             raise ValueError(f"eval_every must be >= 1, got {self.eval_every}.")
+        if self.early_stopping_patience < 1:
+            raise ValueError(
+                f"early_stopping_patience must be >= 1, got {self.early_stopping_patience}."
+            )
+        if self.early_stopping_min_delta < 0:
+            raise ValueError(
+                f"early_stopping_min_delta must be >= 0, got {self.early_stopping_min_delta}."
+            )
         if not self.run_id:
             raise ValueError("run_id cannot be empty.")
         self.random_generator = random_generator
@@ -268,6 +279,50 @@ class Train:
         os.makedirs(self.model_dir, exist_ok=True)
         np.save(self._training_log_path(), metrics_history)
         print(f"[Log] Training metrics saved to {self._training_log_path()}")
+
+    def _early_stopping_state_from_history(self, metrics_history: dict) -> tuple[float, int, int | None]:
+        """Recover early-stopping state from saved validation-loss history."""
+        best_eval_loss = float("inf")
+        epochs_without_improvement = 0
+        best_epoch = None
+
+        eval_losses = metrics_history.get("eval_loss", [])
+        for epoch, loss in enumerate(eval_losses, start=1):
+            if not np.isfinite(loss):
+                continue
+            if loss < best_eval_loss - self.early_stopping_min_delta:
+                best_eval_loss = float(loss)
+                epochs_without_improvement = 0
+                best_epoch = epoch
+            else:
+                epochs_without_improvement += 1
+
+        return best_eval_loss, epochs_without_improvement, best_epoch
+
+    def _finalize_training_outputs(
+        self,
+        metrics_history: dict,
+        model,
+        optimizer,
+        val_batch,
+        final_epoch: int,
+        checkpoint_epoch: int | None,
+        checkpoint_saved: bool,
+    ) -> None:
+        """Persist final plots, logs, and the selected checkpoint directory."""
+        outdir = os.path.join(self.model_dir, f"checkpoint_{final_epoch}")
+        os.makedirs(outdir, exist_ok=True)
+
+        np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
+        self.plot_training_metrics(metrics_history)
+        self.plot_examples(metrics_history, model, val_batch, n_examples=self.batch_size)
+
+        if checkpoint_saved and checkpoint_epoch is not None:
+            src_ckpt = self._get_ckpt_path(checkpoint_epoch)
+            dst_ckpt = os.path.join(outdir, src_ckpt.name)
+            if Path(src_ckpt) != Path(dst_ckpt):
+                shutil.copy(src_ckpt, dst_ckpt)
+            print(f"[Checkpoint] Copied to {dst_ckpt}")
 
     # ========== Loss & Accuracy Functions ==========
     @staticmethod
@@ -471,13 +526,19 @@ class Train:
                 metrics_history = loaded_history
                 print(f"[Train] Resumed metrics history from epoch {loaded_epoch}")
 
+        best_eval_loss, epochs_without_improvement, best_epoch = self._early_stopping_state_from_history(
+            metrics_history
+        )
+        best_checkpoint_saved = best_epoch is not None
+        final_epoch = start_epoch - 1
+
         print("[Metrics] Configuring training metrics...")
         metrics = nnx.MultiMetric(
             loss=nnx.metrics.Average("loss"),
             accuracy=nnx.metrics.Average("accuracy"),
         )
 
-        test_batch = next(iter(val_ds))
+        val_batch = next(iter(val_ds))
         norm_quad_weights = model.input_conv.conv.quad_weights.value / (4 * L)
         graphdef, state = nnx.split((model, optimizer, metrics))
 
@@ -533,7 +594,26 @@ class Train:
                     metrics_history[f"eval_{metric}"].append(self._to_host_scalar(value))
                 metrics.reset()
 
-                eval_loss = f"{metrics_history['eval_loss'][-1]:.3f}"
+                current_eval_loss = metrics_history["eval_loss"][-1]
+                if current_eval_loss < best_eval_loss - self.early_stopping_min_delta:
+                    best_eval_loss = current_eval_loss
+                    epochs_without_improvement = 0
+                    best_epoch = epoch
+                    best_checkpoint_saved = self.save_model(model, optimizer, epoch)
+                    if best_checkpoint_saved:
+                        print(
+                            f"[EarlyStopping] New best val loss {best_eval_loss:.6f} at epoch {epoch}."
+                        )
+                else:
+                    epochs_without_improvement += 1
+                    print(
+                        f"[EarlyStopping] No val-loss improvement at epoch {epoch} "
+                        f"({epochs_without_improvement}/{self.early_stopping_patience}); "
+                        f"best={best_eval_loss:.6f}, current={current_eval_loss:.6f}, "
+                        f"min_delta={self.early_stopping_min_delta:.1e}"
+                    )
+
+                eval_loss = f"{current_eval_loss:.3f}"
                 eval_acc = f"{metrics_history['eval_accuracy'][-1]:.3f}"
             else:
                 metrics_history["eval_loss"].append(float("nan"))
@@ -554,33 +634,34 @@ class Train:
 
             # Save intermediate log
             self._save_training_log(metrics_history)
+            final_epoch = epoch
 
-            # Final save (last epoch only)
-            if epoch == self.epochs:
-                # Save model + optimizer
-                save_ok = self.save_model(model, optimizer, epoch)
+            if do_eval and epochs_without_improvement >= self.early_stopping_patience:
+                print(
+                    f"[EarlyStopping] Stopping at epoch {epoch} after "
+                    f"{epochs_without_improvement} non-improving validation checks. "
+                    f"Best epoch: {best_epoch}, best val loss: {best_eval_loss:.6f}"
+                )
+                break
 
-                # Save final metrics and plots
-                outdir = os.path.join(self.model_dir, f"checkpoint_{epoch}")
-                os.makedirs(outdir, exist_ok=True)
+        if not best_checkpoint_saved:
+            best_epoch = final_epoch
+            best_checkpoint_saved = self.save_model(model, optimizer, final_epoch)
 
-                np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
-
-                # Generate plots
-                self.plot_training_metrics(metrics_history)
-                self.plot_examples(metrics_history, model, test_batch, n_examples=self.batch_size)
-
-                if save_ok:
-                    # 把msgpack也复制到checkpoint_目录里，方便推理找
-                    src_ckpt = self._get_ckpt_path(epoch)
-                    dst_ckpt = os.path.join(outdir, src_ckpt.name)
-                    shutil.copy(src_ckpt, dst_ckpt)
-                    print(f"[Checkpoint] Copied to {dst_ckpt}")
+        self._finalize_training_outputs(
+            metrics_history=metrics_history,
+            model=model,
+            optimizer=optimizer,
+            val_batch=val_batch,
+            final_epoch=final_epoch,
+            checkpoint_epoch=best_epoch,
+            checkpoint_saved=best_checkpoint_saved,
+        )
 
         print("[Train] Training procedure completed successfully!")
         print(f"[Train] All results saved to: {self.model_dir}")
 
-    # ========== Visualization Functions ==========
+
     def plot_training_metrics(self, metrics_history: dict) -> None:
         """Plot training/evaluation loss and accuracy curves."""
         fig, (ax1, ax3) = plt.subplots(1, 2, figsize=(10, 4))
@@ -661,11 +742,11 @@ class Train:
 
             im0 = ax[row, 0].imshow(input_ex, vmin=vmin, vmax=vmax)
             plt.colorbar(im0, ax=ax[row, 0], shrink=0.6)
-            ax[row, 0].set_title(f"Input (Example {row + 1})")
+            ax[row, 0].set_title(f"Input: CFN - ILC (Example {row + 1})")
 
             im1 = ax[row, 1].imshow(output_ex, vmin=vmin, vmax=vmax)
             plt.colorbar(im1, ax=ax[row, 1], shrink=0.6)
-            ax[row, 1].set_title(f"Ground Truth (Example {row + 1})")
+            ax[row, 1].set_title(f"Target: ILC - CMB (Example {row + 1})")
 
             im2 = ax[row, 2].imshow(pred_ex, vmin=vmin, vmax=vmax)
             plt.colorbar(im2, ax=ax[row, 2], shrink=0.6)
@@ -673,7 +754,7 @@ class Train:
 
             im3 = ax[row, 3].imshow(residual_ex, vmin=res_vmin, vmax=res_vmax, cmap='RdBu_r')
             plt.colorbar(im3, ax=ax[row, 3], shrink=0.6)
-            ax[row, 3].set_title(f"Residual (Example {row + 1})")
+            ax[row, 3].set_title(f"Residual: Prediction - Target (Example {row + 1})")
 
             ax[row, 4].hist(output_ex.flatten(), bins=30, alpha=0.6, color='red', density=True, label='Ground Truth')
             ax[row, 4].hist(pred_ex.flatten(), bins=30, alpha=0.6, color='blue', density=True, label='Prediction')
