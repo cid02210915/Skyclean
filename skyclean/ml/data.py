@@ -17,7 +17,7 @@ jax.config.update("jax_enable_x64", False)
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
                  nsamp: int = 1200, constraint: bool = False, 
-                 batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False):
+                 batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False):
         """
         Parameters:
             extract_comp (str): Component to be extracted. e.g. "cmb"
@@ -31,7 +31,6 @@ class CMBFreeILC():
             constraint (bool): Mode for the constrainted ILC method. 
             batch_size (int): Size of the batches for training.
             split (list): List of train/validation/test split ratios.
-            shuffle (bool): Whether to shuffle the dataset.
             directory (str): Directory where data is stored / saved to.
             random (bool): Whether to create random maps for testing purposes. True/False.
         """ 
@@ -42,7 +41,6 @@ class CMBFreeILC():
         self.N_directions = N_directions
         self.lam = lam
         self.batch_size = batch_size
-        self.shuffle = shuffle
         self.split = self._normalize_split(split)
         self.directory = directory
         self.component = component
@@ -74,6 +72,15 @@ class CMBFreeILC():
         val_idx = idx[n_train:n_train + n_val]
         test_idx = idx[n_train + n_val:]
         return train_idx, val_idx, test_idx
+
+    def get_split_indices(self):
+        """Expose the configured train/validation/test realisation IDs."""
+        train_idx, val_idx, test_idx = self._split_indices()
+        return {
+            "train": train_idx.copy(),
+            "val": val_idx.copy(),
+            "test": test_idx.copy(),
+        }
 
     def create_random_mwss_maps(self, realisation: int):
         """Generate and save random foreground and residual maps in MWSS sampling format for testing purposes.
@@ -245,8 +252,6 @@ class CMBFreeILC():
             lambda: self._data_generator(indices, random=random),
             output_signature=signature
         )
-        if self.shuffle:
-            ds = ds.shuffle(buffer_size=len(indices))
         ds = ds.batch(self.batch_size, drop_remainder=drop_remainder)
         if getattr(self, "prefetch", False):
             ds = ds.prefetch(tf.data.AUTOTUNE)
@@ -331,7 +336,7 @@ class CMBFreeILC():
         F_std_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel std
         R_std_sum = 0 # only one output channel
 
-        print(f"[Data] Fitting normalization stats on {indices.size} training realisations.")
+        # fit normalization on the training set only, then reuse for val and test.
         for realisation in indices:
             F, R, _ = self.create_residual_mwss_maps(realisation) # load maps
             signed_log_F = self.signed_log_transform(F)

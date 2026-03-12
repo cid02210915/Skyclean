@@ -3,6 +3,8 @@ import os
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # helps OOM/fragmentation
+# use gpu1
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
 
 import jax
 jax.config.update("jax_enable_x64", False)
@@ -124,7 +126,6 @@ def parse_args():
 
 
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--no-shuffle", action="store_true")
     parser.add_argument(
         "--split",
         nargs="+",
@@ -139,7 +140,6 @@ def parse_args():
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64])
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
-    # ziming: `--random` 是纯 flag（store_true），调用方应仅传 `--random`，不要传 `--random True`。
     parser.add_argument("--random", dest="random", action="store_true",
                         help="Enable random map generation for tests.")
     parser.add_argument("--no-random", dest="random", action="store_false",
@@ -156,9 +156,6 @@ def parse_args():
     parser.add_argument("--loss-tag", type=str, default=None)
 
     # ----- inference controls -----
-    parser.add_argument("--realisation-infer", type=int, default=0)
-    parser.add_argument("--plot", action="store_true", default=False)
-
     parser.add_argument("--model-dir", type=str, default="",
             help="Override model directory containing checkpoint_<epoch> folders. "
              "If empty, derived from FileTemplates(directory) like Train.")
@@ -202,8 +199,6 @@ def step_train(args) -> str:
     """
     Train model and return the resolved model_dir where checkpoints were saved.
     """
-    shuffle = not args.no_shuffle
-
     trainer = Train(
         extract_comp=args.extract_comp,
         component=args.component,
@@ -215,7 +210,6 @@ def step_train(args) -> str:
         nsamp=args.nsamp,
         constraint=args.constraint,
         batch_size=args.batch_size,
-        shuffle=shuffle,
         split=args.split,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -241,7 +235,6 @@ def step_train(args) -> str:
 def infer_args_from_checkpoint(
     ckpt_dir: str,
     *,
-    realisation_infer: int | None = None,
     directory: str | None = None,
 ):
     """
@@ -249,6 +242,7 @@ def infer_args_from_checkpoint(
     """
     ckpt_path = Path(ckpt_dir).resolve()
     ckpt_name = ckpt_path.name
+    run_id = ckpt_path.parent.name if ckpt_name.startswith("checkpoint_") else ckpt_name
 
     m_ckpt = re.search(r"checkpoint_(\d+)", ckpt_name)
     ckpt_epoch = int(m_ckpt.group(1)) if m_ckpt else None
@@ -263,7 +257,7 @@ def infer_args_from_checkpoint(
             directory = str(ckpt_path.parent.parent.parent)
 
     files = FileTemplates(directory)
-    improved_dir = files.output_directories["ilc_improved_maps"]
+    improved_dir = os.path.join(files.output_directories["cmb_prediction"], run_id)
     candidates = sorted(glob.glob(os.path.join(improved_dir, "*.npy")))
     if not candidates:
         raise FileNotFoundError(f"No ilc_improved maps found in: {improved_dir}")
@@ -302,13 +296,11 @@ def infer_args_from_checkpoint(
 
     chosen = max(epoch_matches, key=lambda p: os.path.getmtime(p["path"]))
 
-    inferred_realisation = int(chosen["real"])
     args = argparse.Namespace(
         extract_comp=chosen["extract"],
         component=chosen["component"],
         frequencies=chosen["freqs"].split("_"),
         realisations=int(chosen["rn"]),
-        realisation_infer=inferred_realisation if realisation_infer is None else int(realisation_infer),
         lmax=int(chosen["lmax"]),
         N_directions=1,
         lam=float(chosen["lam"]),
@@ -321,7 +313,6 @@ def infer_args_from_checkpoint(
         chs=[int(x) for x in chosen["chs"].split("_")],
         directory=directory,
         mode="evaluate",
-        no_shuffle=False,
         split=[0.8, 0.2],
         seed=42,
         random=False,
@@ -331,7 +322,7 @@ def infer_args_from_checkpoint(
         eval_every=1,
         eval_steps=-1,
         prefetch=False,
-        plot=False,
+        run_id=run_id,
     )
 
     print(f"[infer_args_from_checkpoint] checkpoint: {ckpt_dir}")
@@ -369,7 +360,18 @@ def step_spec(args=None, ckpt_dir: str | None = None):
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
-    realisation = int(args.realisation_infer)
+    if hasattr(args, "realisation") and args.realisation is not None:
+        realisation = int(args.realisation)
+    else:
+        split = np.asarray(args.split, dtype=float)
+        if len(split) == 2:
+            split = np.asarray([split[0], split[1] / 2.0, split[1] / 2.0], dtype=float)
+        n_train = int(split[0] * args.realisations)
+        n_val = int(split[1] * args.realisations)
+        test_ids = np.arange(args.realisations)[n_train + n_val:]
+        if len(test_ids) == 0:
+            raise ValueError("step_spec could not determine a test realisation because the test split is empty.")
+        realisation = int(test_ids[0])
     lmax = int(args.lmax)
     nsamp = int(args.nsamp)
 
@@ -415,7 +417,7 @@ def step_spec(args=None, ckpt_dir: str | None = None):
     }
 
     # 3) ilc_improved (MW) -> alm -> C_ell
-    improved_map_path = ft["ilc_improved"].format(
+    improved_filename = os.path.basename(ft["ilc_improved"].format(
         mode=mode,
         extract_comp=args.extract_comp,
         component=args.component,
@@ -430,7 +432,8 @@ def step_spec(args=None, ckpt_dir: str | None = None):
         lr=args.learning_rate,
         momentum=args.momentum,
         chs=chs,
-    )
+    ))
+    improved_map_path = os.path.join(files.output_directories["cmb_prediction"], args.run_id, improved_filename)
     print(f"[step_spec] loading ilc_improved map from: {improved_map_path}")
     if not os.path.exists(improved_map_path):
         if ckpt_dir is None:
@@ -458,6 +461,7 @@ def step_spec(args=None, ckpt_dir: str | None = None):
             epochs=args.epochs,
             learning_rate=args.learning_rate,
             momentum=args.momentum,
+            run_id=args.run_id,
         )
         model = inference.load_model(force_load=True)
         if model is None:
@@ -556,12 +560,9 @@ def step_spec(args=None, ckpt_dir: str | None = None):
 
 def step_evaluate(args, ckpt_dir: str | None = None):
     """
-    Load latest checkpoint and run evaluation.
+    Load latest checkpoint and save predictions for the held-out test split.
     """
-    #if model_dir is None:
-    #    model_dir = args.model_dir.strip() or resolve_model_dir_from_directory(args.directory)
 
-    #latest_ckpt = find_latest_checkpoint_dir(model_dir)
     inference = Inference(
         extract_comp=args.extract_comp,
         component=args.component,
@@ -580,6 +581,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         momentum=args.momentum,
+        run_id=args.run_id,
     )
 
     print("[evaluate] Loading model from latest checkpoint...")
@@ -587,44 +589,13 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     if not model:
         raise RuntimeError("[infer] Model failed to load (load_model returned falsy).")
 
-    print(f"[evaluate] Predicting CMB for realisation={args.realisation_infer} ...")
-    cmb_improved = inference.predict_cmb(realisation=args.realisation_infer)
-    spec = step_spec(args, ckpt_dir=ckpt_dir)
-
-    if ckpt_dir:
-        ell = spec["processed_cmb"]["ell"]
-        cl_processed = spec["processed_cmb"]["cl"]
-        cl_ilc_synth = spec["ilc_synth"]["cl"]
-        cl_ilc_improved = spec["ilc_improved"]["cl"]
-        ratio_synth = cl_ilc_synth / cl_processed
-        ratio_improved = cl_ilc_improved / cl_processed
-
-        np.savez(
-            os.path.join(ckpt_dir, "component_ratio_spectra.npz"),
-            ell=ell,
-            ilc_synth_over_processed_cmb=ratio_synth,
-            ilc_improved_over_processed_cmb=ratio_improved,
-        )
-        print(f"[evaluate] wrote ratio spectra: {os.path.join(ckpt_dir, 'component_ratio_spectra.npz')}")
-
-    import matplotlib.pyplot as plt
-    from skyclean.silc.map_tools import SamplingConverters
-    if args.plot:
-        import healpy as hp
-        from skyclean.silc.map_tools import SamplingConverters
-
-        hp_map = SamplingConverters.mw_map_2_hp_map(cmb_improved, lmax=args.lmax)
-        hp.mollview(hp_map, unit="K", cbar=True)
-        if args.constraint == True:
-            mode="cILC"
-        else:
-            mode="ILC"
-        plt.title(f"Improved {mode} map\nlmax{args.lmax}, {args.extract_comp}, {args.frequencies}, r{args.realisation_infer}, lam{args.lam}, nsamp{args.nsamp})")
-        plt.tight_layout()
-        plt.savefig(f'{ckpt_dir}/ILC_improved.png', dpi=300)
-        plt.show()
+    test_ids = inference.data_handler.get_split_indices()["test"]
+    print(f"[evaluate] Predicting CMB for {len(test_ids)} test realisations...")
+    inference.predict_test_set(save_result=True)
+    metrics_rows = inference.save_test_metrics_table()
+    inference.save_test_scatter_plots(metrics_rows)
     
-    return cmb_improved
+    return test_ids
 
 
 def resolve_checkpoint_dir(args, model_dir: str) -> str:
@@ -692,27 +663,4 @@ if __name__ == "__main__":
 
 # Example usage:
 # 030 044 070 100 143 217 353 545 857
-# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 2 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --nsamp 1200 --epochs 10 --eval-every 5 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --plot --run-id testing --random 
-
-
-''' Example usage:
-python3 -m skyclean.ml.pipeline_ml \
-  --mode train+evaluate \
-  --extract-comp cmb \
-  --component cfn \
-  --frequencies 030 044 070 100 143 217 353 545 857 \
-  --realisations 100 \
-  --lmax 511 \
-  --N-directions 1 \
-  --lam 2.0 \
-  --nsamp 1200 \
-  --batch-size 5 \
-  --epochs 200 \
-  --learning-rate 1e-3 \
-  --momentum 0.90 \
-  --eval-every 5 \
-  --eval-batches 10 \
-  --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \
-  --prefetch \
-  --run-id 20260226_1
-'''
+# python3 -m skyclean.ml.pipeline_ml --mode evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 15 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 10 --nsamp 1200 --epochs 100 --eval-every 5 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id CFN_r500_511

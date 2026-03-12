@@ -2,8 +2,10 @@
 CMB-Free ILC Model Inference Class.
 """
 
+import csv
 import os
 import re
+import matplotlib.pyplot as plt
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -21,7 +23,8 @@ class Inference:
     def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None,
                  directory="data/", seed=0, model_path=None,
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3,
-                 momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False):
+                 momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False,
+                 run_id: str | None = None):
 
         self.extract_comp = extract_comp
         self.component = component
@@ -41,6 +44,9 @@ class Inference:
         self.momentum = momentum
         self.nsamp = nsamp
         self.constraint = constraint
+        self.run_id = (run_id or "").strip()
+        if not self.run_id:
+            raise ValueError("run_id must be provided for inference outputs.")
 
         self.file_templates = FileTemplates(directory)
         self.model = None
@@ -215,11 +221,24 @@ class Inference:
             else:
                 self._save_cmb_prediction(cmb_mw, realisation)
 
-        print(f"CMB prediction completed for realisation {realisation}")
-        print(f"Prediction shape: {cmb_mw.shape}")
-        print(f"Value range: [{cmb_mw.min():.3e}, {cmb_mw.max():.3e}]")
+        #print(f"CMB prediction completed for realisation {realisation}.")
+        #print(f"Prediction shape: {cmb_mw.shape}")
+        #print(f"Value range: [{cmb_mw.min():.3e}, {cmb_mw.max():.3e}]")
 
         return cmb_mw
+
+    def predict_test_set(self, save_result=True, masked=False):
+        """Predict CMB for every held-out test realisation."""
+        test_ids = self.data_handler.get_split_indices()["test"]
+        outputs = {}
+        for realisation in test_ids:
+            outputs[int(realisation)] = self.predict_cmb(
+                realisation=int(realisation),
+                save_result=save_result,
+                masked=masked,)
+        print(f"[Inference] Saved test-set predictions to: "
+              f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id)}")
+        return outputs
 
     def compute_mse(self, comp, realisation, save_result=True, masked=False):
         """Compute pixel-space MSE for a single realisation."""
@@ -245,12 +264,8 @@ class Inference:
             mask = None
 
         if comp == "ilc":
-            print(f"Calculating MSE(ILC) for realisation {realisation}...")
             diff = R
-
         else:
-            print(f"Calculating MSE(NN) for realisation {realisation}...")
-
             if self.model is None:
                 print("Loading model...")
                 self.model = self.load_model()
@@ -276,6 +291,128 @@ class Inference:
         print(f"MSE for realisation {realisation}: {mse:.6e}")
         return mse
 
+    def save_test_metrics_table(self, masked=False):
+        """Save per-realisation MSE metrics for the held-out test split."""
+        test_ids = self.data_handler.get_split_indices()["test"]
+        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id)
+        os.makedirs(out_dir, exist_ok=True)
+        csv_path = os.path.join(out_dir, "test_metrics.csv")
+
+        def _moments(x):
+            x = np.asarray(x, dtype=np.float64).ravel()
+            mean = float(np.mean(x))
+            std = float(np.std(x))
+            if std < 1e-24:
+                return 0.0, 0.0
+            z = (x - mean) / std
+            skew = float(np.mean(z ** 3))
+            kurtosis = float(np.mean(z ** 4) - 3.0)
+            return skew, kurtosis
+
+        rows = []
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "realisation",
+                "mse_ilc",
+                "mse_ml",
+                "skew_ilc",
+                "skew_ml",
+                "kurtosis_ilc",
+                "kurtosis_ml",
+            ])
+
+            for realisation in test_ids:
+                realisation = int(realisation)
+                _, residual, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
+                residual = np.asarray(residual)
+                ilc_mwss = np.asarray(ilc_mwss)
+                if residual.ndim == 3 and residual.shape[-1] == 1:
+                    residual = residual[..., 0]
+                if ilc_mwss.ndim == 3 and ilc_mwss.shape[-1] == 1:
+                    ilc_mwss = ilc_mwss[..., 0]
+
+                pred_mw = self.predict_cmb(realisation=realisation, save_result=False, masked=masked)
+                pred_mwss = SamplingConverters.mw_map_2_mwss_map(np.asarray(pred_mw), L=self.lmax + 1)
+
+                mse_ilc = self.compute_mse("ilc", realisation=realisation, masked=masked)
+                mse_ml = self.compute_mse("nn", realisation=realisation, masked=masked)
+                skew_ilc, kurtosis_ilc = _moments(ilc_mwss)
+                skew_ml, kurtosis_ml = _moments(pred_mwss)
+                writer.writerow([
+                    realisation,
+                    mse_ilc,
+                    mse_ml,
+                    skew_ilc,
+                    skew_ml,
+                    kurtosis_ilc,
+                    kurtosis_ml,
+                ])
+                rows.append({
+                    "realisation": realisation,
+                    "mse_ilc": mse_ilc,
+                    "mse_ml": mse_ml,
+                    "skew_ilc": skew_ilc,
+                    "skew_ml": skew_ml,
+                    "kurtosis_ilc": kurtosis_ilc,
+                    "kurtosis_ml": kurtosis_ml,
+                })
+
+        print(f"[Inference] Saved test metrics table to: {csv_path}")
+        return rows
+
+    def save_test_scatter_plots(self, rows):
+        """Save MSE and skewness scatter plots for the held-out test split."""
+        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id)
+        os.makedirs(out_dir, exist_ok=True)
+
+        def _scatter(x_key, y_key, title, xlabel, ylabel, filename):
+            x = np.asarray([row[x_key] for row in rows], dtype=float)
+            y = np.asarray([row[y_key] for row in rows], dtype=float)
+            if x.size == 0:
+                print(f"[Inference] No rows available for {filename}; skipping plot.")
+                return
+
+            lo = float(min(np.min(x), np.min(y)))
+            hi = float(max(np.max(x), np.max(y)))
+            if np.isclose(lo, hi):
+                pad = 1e-12 if hi == 0.0 else abs(hi) * 0.05
+                lo -= pad
+                hi += pad
+
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.scatter(x, y, s=36, alpha=0.8)
+            ax.plot([lo, hi], [lo, hi], "k--", linewidth=1)
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_title(title)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+
+            plot_path = os.path.join(out_dir, filename)
+            fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"[Inference] Saved plot to: {plot_path}")
+
+        _scatter(
+            "mse_ilc",
+            "mse_ml",
+            "Test MSE Scatter",
+            "MSE before ML (ILC)",
+            "MSE after ML",
+            "mse_scatter.png",
+        )
+        _scatter(
+            "skew_ilc",
+            "skew_ml",
+            "Test Skewness Scatter",
+            "Skewness before ML (ILC)",
+            "Skewness after ML",
+            "skewness_scatter.png",
+        )
+
     def _save_cmb_prediction(self, cmb_prediction, realisation):
         """Save CMB prediction using FileTemplates."""
         try:
@@ -286,25 +423,31 @@ class Inference:
             else:
                 mode = "uncon"
             frequencies = '_'.join(self.frequencies)
-
-            save_path = self.file_templates.file_templates["ilc_improved"].format(
-                mode=mode,
-                extract_comp=self.extract_comp,
-                frequencies=frequencies,
-                component=self.component,
-                realisation=realisation,
-                lmax=self.lmax,
-                lam=self.lam,
-                nsamp=self.nsamp,
-                rn=self.rn,
-                batch=self.batch,
-                epochs=self.epochs,
-                lr=self.lr,
-                momentum=self.momentum,
-                chs=chs,
+            save_dir = os.path.join(
+                self.file_templates.output_directories["cmb_prediction"],
+                self.run_id,
+            )
+            filename = os.path.basename(
+                self.file_templates.file_templates["ilc_improved"].format(
+                    mode=mode,
+                    extract_comp=self.extract_comp,
+                    frequencies=frequencies,
+                    component=self.component,
+                    realisation=realisation,
+                    lmax=self.lmax,
+                    lam=self.lam,
+                    nsamp=self.nsamp,
+                    rn=self.rn,
+                    batch=self.batch,
+                    epochs=self.epochs,
+                    lr=self.lr,
+                    momentum=self.momentum,
+                    chs=chs,
+                )
             )
 
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            save_path = os.path.join(save_dir, filename)
+            os.makedirs(save_dir, exist_ok=True)
             np.save(save_path, cmb_prediction)
 
             print(f"Saved CMB prediction to: {save_path}")
@@ -365,7 +508,8 @@ if __name__ == "__main__":
         lmax=lmax,
         N_directions=N_directions,
         lam=lam,
-        directory=directory
+        directory=directory,
+        run_id="example_run",
     )
 
     print("\n1. Model Information:")

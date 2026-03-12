@@ -65,7 +65,7 @@ def print_gpu_usage(stage_name: str, jax_device_id: int = 0):
 class Train:
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int,
                  lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, nsamp: int = 1200, constraint: bool = False,
-                 batch_size: int = 32, shuffle: bool = True, split: list = [0.8, 0.1, 0.1], epochs: int = 120,
+                 batch_size: int = 32, split: list = [0.8, 0.1, 0.1], epochs: int = 120,
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0),
                  directory: str = "data/", resume_training: bool = False, loss_tag: str | None = 'pixel',
                  random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
@@ -81,7 +81,6 @@ class Train:
         self.lam = lam
         self.nsamp = nsamp
         self.batch_size = batch_size
-        self.shuffle = shuffle
         self.split = split
         self.epochs = epochs
         self.learning_rate = learning_rate
@@ -115,7 +114,7 @@ class Train:
         self.random_generator = random_generator
 
         self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam,
-                                  nsamp, constraint, batch_size, shuffle, split, directory, random=random_generator)
+                                  nsamp, constraint, batch_size, split, directory, random=random_generator)
 
         files = FileTemplates(directory)
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
@@ -478,6 +477,7 @@ class Train:
         print("[Data] Constructing CMB-Free ILC dataset...")
 
         train_ds, val_ds, test_ds, n_train, n_val, n_test, drop_remainder_val, drop_remainder_test = self.dataset.prepare_data()
+        split_indices = self.dataset.get_split_indices()
 
         if self.prefetch:
             train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
@@ -488,6 +488,12 @@ class Train:
             print("[Data] Prefetch disabled.")
 
         print(f"[Data] Dataset ready - Train: {n_train} samples | Validation: {n_val} samples | Test: {n_test} samples")
+        print(
+            "[Data] Persisted split IDs - "
+            f"Train: {len(split_indices['train'])} | "
+            f"Validation: {len(split_indices['val'])} | "
+            f"Test: {len(split_indices['test'])}"
+        )
         print_gpu_usage("After dataset creation")
 
         if n_val == 0:

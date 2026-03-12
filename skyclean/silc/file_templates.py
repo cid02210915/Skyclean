@@ -38,6 +38,7 @@ class FileTemplates():
             # ML 
             "ml_maps": os.path.join(directory, "ML/maps"),
             "ml_models": os.path.join(directory, "ML/models"),
+            "cmb_prediction": os.path.join(directory, "ML/cmb_prediction"),
             "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps"),
             "ilc_improved_spec": os.path.join(directory, "SILC/ilc_improved_spec"),
             # ML maps (randomly generated) for monitoring the pipeline memory usage
