@@ -198,20 +198,8 @@ class Inference:
             print("Loaded model.")
 
         print(f"Predicting CMB for realisation {realisation}...")
-
-        F, _, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
-
-        F = self.data_handler.transform(F).astype(np.float32)
-        F = jnp.expand_dims(F, axis=0)
-
-        R_pred_norm = self.model(F)
-
-        R_pred = self.data_handler.inverse_transform(R_pred_norm)
-        R_pred = jnp.squeeze(R_pred, axis=(0, 3))
-
-        cmb_pred = ilc_mwss - R_pred
-
-        cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred, L=self.lmax + 1)
+        outputs = self._predict_realisation_outputs(realisation)
+        cmb_mw = outputs["cmb_mw"]
 
         if save_result:
             if masked:
@@ -227,15 +215,44 @@ class Inference:
 
         return cmb_mw
 
+    def _predict_realisation_outputs(self, realisation):
+        """Run a single forward pass and return prediction artefacts."""
+        if self.model is None:
+            print("Loading model...")
+            self.model = self.load_model()
+            print("Loaded model.")
+
+        F, R, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
+        F_norm = self.data_handler.transform(F).astype(np.float32)
+        F_norm = jnp.expand_dims(F_norm, axis=0)
+
+        R_pred_norm = self.model(F_norm)
+        R_pred = self.data_handler.inverse_transform(R_pred_norm)
+        R_pred = jnp.squeeze(R_pred, axis=(0, 3))
+
+        residual = np.asarray(R)
+        ilc_mwss = np.asarray(ilc_mwss)
+        if residual.ndim == 3 and residual.shape[-1] == 1:
+            residual = residual[..., 0]
+        if ilc_mwss.ndim == 3 and ilc_mwss.shape[-1] == 1:
+            ilc_mwss = ilc_mwss[..., 0]
+
+        pred_mwss = np.asarray(R_pred)
+        cmb_pred_mwss = ilc_mwss - pred_mwss
+        cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred_mwss, L=self.lmax + 1)
+        return {
+            "residual": residual,
+            "ilc_mwss": ilc_mwss,
+            "pred_mwss": pred_mwss,
+            "cmb_mw": cmb_mw,
+        }
+
     def predict_test_set(self, save_result=True, masked=False):
         """Predict CMB for every held-out test realisation."""
         test_ids = self.data_handler.get_split_indices()["test"]
         outputs = {}
         for realisation in test_ids:
-            outputs[int(realisation)] = self.predict_cmb(
-                realisation=int(realisation),
-                save_result=save_result,
-                masked=masked,)
+            outputs[int(realisation)] = self.predict_cmb(realisation=int(realisation), save_result=save_result, masked=masked)
         print(f"[Inference] Saved test-set predictions to: "
               f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id)}")
         return outputs
@@ -266,19 +283,8 @@ class Inference:
         if comp == "ilc":
             diff = R
         else:
-            if self.model is None:
-                print("Loading model...")
-                self.model = self.load_model()
-                print("Loaded model.")
-
-            F = self.data_handler.transform(F).astype(np.float32)
-            F = jnp.expand_dims(F, axis=0)
-
-            R_pred_norm = self.model(F)
-            R_pred = self.data_handler.inverse_transform(R_pred_norm)
-            R_pred = jnp.squeeze(R_pred, axis=(0, 3))
-
-            diff = R - np.asarray(R_pred)
+            pred_outputs = self._predict_realisation_outputs(realisation)
+            diff = R - np.asarray(pred_outputs["pred_mwss"])
 
         if mask is None:
             mse = float(np.mean(diff ** 2))
@@ -287,12 +293,11 @@ class Inference:
             num = np.sum(w * diff ** 2)
             denom = np.sum(w) + 1e-12
             mse = float(num / denom)
-
-        print(f"MSE for realisation {realisation}: {mse:.6e}")
+            
         return mse
 
-    def save_test_metrics_table(self, masked=False):
-        """Save per-realisation MSE metrics for the held-out test split."""
+    def save_test_metrics_table(self, masked=False, save_predictions=True):
+        """Save per-realisation metrics for the held-out test split."""
         test_ids = self.data_handler.get_split_indices()["test"]
         out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id)
         os.makedirs(out_dir, exist_ok=True)
@@ -324,21 +329,29 @@ class Inference:
 
             for realisation in test_ids:
                 realisation = int(realisation)
-                _, residual, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
-                residual = np.asarray(residual)
-                ilc_mwss = np.asarray(ilc_mwss)
-                if residual.ndim == 3 and residual.shape[-1] == 1:
-                    residual = residual[..., 0]
-                if ilc_mwss.ndim == 3 and ilc_mwss.shape[-1] == 1:
-                    ilc_mwss = ilc_mwss[..., 0]
-
-                pred_mw = self.predict_cmb(realisation=realisation, save_result=False, masked=masked)
-                pred_mwss = SamplingConverters.mw_map_2_mwss_map(np.asarray(pred_mw), L=self.lmax + 1)
-
-                mse_ilc = self.compute_mse("ilc", realisation=realisation, masked=masked)
-                mse_ml = self.compute_mse("nn", realisation=realisation, masked=masked)
+                outputs = self._predict_realisation_outputs(realisation)
+                ilc_mwss = outputs["ilc_mwss"]
+                residual = outputs["residual"]
+                pred_mwss = outputs["pred_mwss"]
+                if masked:
+                    mask = np.asarray(self.data_handler.mask_mwss_beamed())
+                    if mask.ndim == 3 and mask.shape[-1] == 1:
+                        mask = mask[..., 0]
+                    mse_ilc = float(np.sum(mask * (residual ** 2)) / (np.sum(mask) + 1e-12))
+                    mse_ml = float(np.sum(mask * ((residual - pred_mwss) ** 2)) / (np.sum(mask) + 1e-12))
+                else:
+                    mse_ilc = float(np.mean(residual ** 2))
+                    mse_ml = float(np.mean((residual - pred_mwss) ** 2))
                 skew_ilc, kurtosis_ilc = _moments(ilc_mwss)
                 skew_ml, kurtosis_ml = _moments(pred_mwss)
+                if save_predictions:
+                    cmb_mw = outputs["cmb_mw"]
+                    if masked:
+                        mask_mw = self.data_handler.mask_mw_beamed()
+                        cmb_mw = cmb_mw * mask_mw
+                        self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw)
+                    else:
+                        self._save_cmb_prediction(cmb_mw, realisation)
                 writer.writerow([
                     realisation,
                     mse_ilc,
@@ -366,15 +379,30 @@ class Inference:
         out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id)
         os.makedirs(out_dir, exist_ok=True)
 
-        def _scatter(x_key, y_key, title, xlabel, ylabel, filename):
+        def _scatter(
+            x_key,
+            y_key,
+            title,
+            xlabel,
+            ylabel,
+            filename,
+            origin_zero=False,
+            double_max=False,
+        ):
             x = np.asarray([row[x_key] for row in rows], dtype=float)
             y = np.asarray([row[y_key] for row in rows], dtype=float)
             if x.size == 0:
                 print(f"[Inference] No rows available for {filename}; skipping plot.")
                 return
+            x *= 1e12
+            y *= 1e12
 
             lo = float(min(np.min(x), np.min(y)))
             hi = float(max(np.max(x), np.max(y)))
+            if origin_zero:
+                lo = min(0.0, lo)
+            if double_max:
+                hi = max(0.0, hi) * 2.0
             if np.isclose(lo, hi):
                 pad = 1e-12 if hi == 0.0 else abs(hi) * 0.05
                 lo -= pad
@@ -400,8 +428,8 @@ class Inference:
             "mse_ilc",
             "mse_ml",
             "Test MSE Scatter",
-            "MSE before ML (ILC)",
-            "MSE after ML",
+            "ILC MSE [μK^2]",
+            "ML MSE [μK^2]",
             "mse_scatter.png",
         )
         _scatter(
@@ -411,6 +439,8 @@ class Inference:
             "Skewness before ML (ILC)",
             "Skewness after ML",
             "skewness_scatter.png",
+            origin_zero=True,
+            double_max=True,
         )
 
     def _save_cmb_prediction(self, cmb_prediction, realisation):

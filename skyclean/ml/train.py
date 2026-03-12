@@ -303,7 +303,8 @@ class Train:
         metrics_history: dict,
         model,
         optimizer,
-        val_batch,
+        test_batch,
+        test_realisation_ids,
         final_epoch: int,
         checkpoint_epoch: int | None,
         checkpoint_saved: bool,
@@ -314,7 +315,16 @@ class Train:
 
         np.save(os.path.join(outdir, "training_log.npy"), metrics_history)
         self.plot_training_metrics(metrics_history)
-        self.plot_examples(metrics_history, model, val_batch, n_examples=self.batch_size)
+        if test_batch is not None and len(test_realisation_ids) > 0:
+            self.plot_examples(
+                metrics_history,
+                model,
+                test_batch,
+                test_realisation_ids,
+                n_examples=self.batch_size,
+            )
+        else:
+            print("[Plot] Skipping final example plot because the test split is empty.")
 
         if checkpoint_saved and checkpoint_epoch is not None:
             src_ckpt = self._get_ckpt_path(checkpoint_epoch)
@@ -544,7 +554,8 @@ class Train:
             accuracy=nnx.metrics.Average("accuracy"),
         )
 
-        val_batch = next(iter(val_ds))
+        test_batch = next(iter(test_ds)) if n_test > 0 else None
+        test_realisation_ids = split_indices["test"]
         norm_quad_weights = model.input_conv.conv.quad_weights.value / (4 * L)
         graphdef, state = nnx.split((model, optimizer, metrics))
 
@@ -658,7 +669,8 @@ class Train:
             metrics_history=metrics_history,
             model=model,
             optimizer=optimizer,
-            val_batch=val_batch,
+            test_batch=test_batch,
+            test_realisation_ids=test_realisation_ids,
             final_epoch=final_epoch,
             checkpoint_epoch=best_epoch,
             checkpoint_saved=best_checkpoint_saved,
@@ -721,50 +733,56 @@ class Train:
         plt.close()
         print(f"[Plot] Training metrics saved to {plot_path}")
 
-    def plot_examples(self, metrics_history, model, test_batch, n_examples: int = 1):
+    def plot_examples(self, metrics_history, model, test_batch, realisation_ids, n_examples: int = 1):
         """Plot input/output/prediction examples."""
         foreground, residual = test_batch
         batch_n = int(foreground.shape[0])
-        n_plot = min(n_examples, batch_n)
+        n_plot = min(n_examples, batch_n, len(realisation_ids))
 
         if n_plot == 0:
             print("[Plot] No examples to plot (empty test batch)")
             return
 
+        display_channel = 0
+        display_frequency = self.frequencies[display_channel]
         fig, ax = plt.subplots(n_plot, 5, figsize=(25, 5 * n_plot))
         if n_plot == 1:
             ax = ax.reshape(1, -1)
 
         for row in range(n_plot):
-            input_ex = jnp.asarray(foreground[row, :, :, 0])
+            realisation_id = int(realisation_ids[row])
+            input_display = jnp.asarray(foreground[row, :, :, display_channel])
+            model_input = jnp.asarray(foreground[row:row + 1, :, :, :])
             output_ex = jnp.asarray(residual[row, :, :, 0])
-            pred_ex = model(input_ex[None, :, :, None])[0, :, :, 0]
+            pred_ex = model(model_input)[0, :, :, 0]
             residual_ex = pred_ex - output_ex
 
-            vmin = min(jnp.min(input_ex), jnp.min(output_ex), jnp.min(pred_ex))
-            vmax = max(jnp.max(input_ex), jnp.max(output_ex), jnp.max(pred_ex))
+            input_vmin = float(jnp.min(input_display))
+            input_vmax = float(jnp.max(input_display))
+            target_pred_vmin = float(min(jnp.min(output_ex), jnp.min(pred_ex)))
+            target_pred_vmax = float(max(jnp.max(output_ex), jnp.max(pred_ex)))
             res_max = max(abs(jnp.min(residual_ex)), abs(jnp.max(residual_ex)))
-            res_vmin, res_vmax = -res_max, res_max
+            res_vmin, res_vmax = float(-res_max), float(res_max)
 
-            im0 = ax[row, 0].imshow(input_ex, vmin=vmin, vmax=vmax)
+            im0 = ax[row, 0].imshow(input_display, vmin=input_vmin, vmax=input_vmax)
             plt.colorbar(im0, ax=ax[row, 0], shrink=0.6)
-            ax[row, 0].set_title(f"Input: CFN - ILC (Example {row + 1})")
+            ax[row, 0].set_title(f"Input: CFN - ILC (f{display_frequency}, Realisation {realisation_id})")
 
-            im1 = ax[row, 1].imshow(output_ex, vmin=vmin, vmax=vmax)
+            im1 = ax[row, 1].imshow(output_ex, vmin=target_pred_vmin, vmax=target_pred_vmax)
             plt.colorbar(im1, ax=ax[row, 1], shrink=0.6)
-            ax[row, 1].set_title(f"Target: ILC - CMB (Example {row + 1})")
+            ax[row, 1].set_title(f"Target: ILC - CMB (Realisation {realisation_id})")
 
-            im2 = ax[row, 2].imshow(pred_ex, vmin=vmin, vmax=vmax)
+            im2 = ax[row, 2].imshow(pred_ex, vmin=target_pred_vmin, vmax=target_pred_vmax)
             plt.colorbar(im2, ax=ax[row, 2], shrink=0.6)
-            ax[row, 2].set_title(f"Prediction (Example {row + 1})")
+            ax[row, 2].set_title(f"Prediction (Realisation {realisation_id})")
 
             im3 = ax[row, 3].imshow(residual_ex, vmin=res_vmin, vmax=res_vmax, cmap='RdBu_r')
             plt.colorbar(im3, ax=ax[row, 3], shrink=0.6)
-            ax[row, 3].set_title(f"Residual: Prediction - Target (Example {row + 1})")
+            ax[row, 3].set_title(f"Residual: Prediction - Target (Realisation {realisation_id})")
 
             ax[row, 4].hist(output_ex.flatten(), bins=30, alpha=0.6, color='red', density=True, label='Ground Truth')
             ax[row, 4].hist(pred_ex.flatten(), bins=30, alpha=0.6, color='blue', density=True, label='Prediction')
-            ax[row, 4].set_title(f"Distribution (Example {row + 1})")
+            ax[row, 4].set_title(f"Distribution (Realisation {realisation_id})")
             ax[row, 4].set_xlabel("Pixel Value")
             ax[row, 4].set_ylabel("Density")
             ax[row, 4].grid(True, alpha=0.3)

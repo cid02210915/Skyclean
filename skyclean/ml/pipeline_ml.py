@@ -591,8 +591,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
     test_ids = inference.data_handler.get_split_indices()["test"]
     print(f"[evaluate] Predicting CMB for {len(test_ids)} test realisations...")
-    inference.predict_test_set(save_result=True)
-    metrics_rows = inference.save_test_metrics_table()
+    metrics_rows = inference.save_test_metrics_table(save_predictions=True)
     inference.save_test_scatter_plots(metrics_rows)
     
     return test_ids
