@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+from turtle import mode
 import numpy as np
 import jax
 import subprocess, sys
@@ -287,7 +288,8 @@ class Pipeline:
         field: int = 0,
         nsamp: float | int | None = None,
         overwrite: bool | None = None,
-        constraint: bool | None = None,       
+        constraint: bool | None = None,   
+        mode: str | None = None,    
     ):
         """
         Compute TT C_ell (and plot D_ell). Returns (ell, cl).
@@ -334,10 +336,13 @@ class Pipeline:
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
                 realisation=r, lmax=lmax_, lam=lam_,
-                nsamp=nsamp_, constraint=constraint_,   # <<< USE THIS
+                nsamp=nsamp_, constraint=constraint_, mode=mode,
             )
             src = "ilc_synth"
-            label = f"ILC-synth ({tgt})"
+            if mode is not None:
+                label = f"{mode}-synth ({tgt})"
+            else:
+                label = f"{'cILC' if constraint_ else 'ILC'}-synth ({tgt})"
 
         elif source == "processed":
             if component is not None:
@@ -375,11 +380,15 @@ class Pipeline:
 
         # ---------- save spectrum arrays to .npy for ILC_synth ----------
         if source == "ilc_synth" and "ilc_spectrum" in ft:
-            mode = "con" if constraint_ else "uncon"   # <<< USE THIS
+            if mode is not None:
+                save_mode = mode
+            else:
+                save_mode = "cilc" if constraint_ else "ilc"
+        
             freq_tag = "_".join(freqs)
-
+        
             spec_path = ft["ilc_spectrum"].format(
-                mode=mode,
+                mode=save_mode,
                 extract_comp=tgt,
                 component=comp_in,
                 frequencies=freq_tag,
@@ -391,7 +400,7 @@ class Pipeline:
             os.makedirs(os.path.dirname(spec_path), exist_ok=True)
             if overwrite or not os.path.exists(spec_path):
                 np.save(spec_path, {"ell": ell, "cl": cl, "Dl": Dl})
-
+        
             if save_path is None:
                 png_path = spec_path.replace(".npy", ".png")
             else:
@@ -434,6 +443,7 @@ class Pipeline:
         frequencies_X: list[str] | None = None,
         frequency_X: str | int | None = None,
         realisation_X: int | None = None,
+        mode_X: str | None = None,
         # Y side
         source_Y: str = "auto",
         component_Y: str | None = None,
@@ -441,6 +451,7 @@ class Pipeline:
         frequencies_Y: list[str] | None = None,
         frequency_Y: str | int | None = None,
         realisation_Y: int | None = None,
+        mode_Y: str | None = None,
         # shared
         realisation: int | None = None,
         lmax: int | None = None,
@@ -486,7 +497,7 @@ class Pipeline:
                 return "downloaded"
     
         # loader (single place)
-        def load_one(source, component, extract_comp, frequencies, frequency, r_use):
+        def load_one(source, component, extract_comp, frequencies, frequency, r_use, mode_use):
             src = pick_source(source)
             if src == "ilc_synth":
                 comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")
@@ -495,9 +506,14 @@ class Pipeline:
                     component=comp_in, source="ilc_synth",
                     extract_comp=tgt, frequencies=frequencies,
                     realisation=r_use, lmax=lmax_, lam=lam_,
-                    nsamp=nsamp_, constraint=constraint_
+                    nsamp=nsamp_, constraint=constraint_,  mode=mode_use
                 )
-                label = f"ILC-synth ({tgt})"; fmt = "mw" if out["format"] == "mw" else "hp"
+                if mode_use is not None:
+                    label = f"{mode_use}-synth ({tgt})"
+                else:
+                    label = f"{'cILC' if constraint_ else 'ILC'}-synth ({tgt})"
+                fmt = "mw" if out["format"] == "mw" else "hp"
+
             elif src == "processed":
                 comp_use = component or ("cfn" if has_processed_cfn else "cmb")
                 out = conv.to_alm(
@@ -515,8 +531,8 @@ class Pipeline:
             return out, label, fmt
     
         # load X and Y
-        outX, labelX, fmtX = load_one(source_X, component_X, extract_comp_X, fX, frequency_X, rX)
-        outY, labelY, fmtY = load_one(source_Y, component_Y, extract_comp_Y, fY, frequency_Y, rY)
+        outX, labelX, fmtX = load_one(source_X, component_X, extract_comp_X, fX, frequency_X, rX, mode_X)
+        outY, labelY, fmtY = load_one(source_Y, component_Y, extract_comp_Y, fY, frequency_Y, rY, mode_Y)
 
         print(f"[DEBUG xspec] X: {labelX} fmt={fmtX} path={outX.get('path')}")
         print(f"[DEBUG xspec] Y: {labelY} fmt={fmtY} path={outY.get('path')}")
