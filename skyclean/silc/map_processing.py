@@ -1,8 +1,7 @@
-
-
 import os, glob
 import numpy as np
 import healpy as hp
+import matplotlib.pyplot as plt
 from .file_templates import FileTemplates
 from .map_tools import *
 from .add_point_source import (CircularPSInjector, PixelPSInjector, PointSource, measure_source_values)
@@ -43,14 +42,15 @@ class ProcessMaps():
                  directory: str = "data/", 
                  method = "jax_cuda", 
                  overwrite: bool = False, 
-                 ps_component: str = 'faintradiops',
+                 ps_component: str = 'strongirps',
                  n_points: int = 10,
                  lon_range: tuple = None,
-                 lat_range: tuple = (20.0, 90.0),
+                 lat_range: tuple = (-90.0, 90.0), # fixed for pipeline
                  brightness_percentile: tuple = (75.0, 100.0),
                  mode: str = "random",
                  random_seed: int = 1,
-                 factor: int | float = 50.0,
+                 ps_radius_range: tuple = (1.0, 1.0),
+                 ps_brightness_scale: float = 1.0,
                  ps_injection_mode: str = "circular_ps",
                 ): 
         """
@@ -77,6 +77,19 @@ class ProcessMaps():
         self.overwrite = overwrite
         self.templates = FileTemplates(directory=directory)
         files = FileTemplates(directory)
+        self.ps = PointSource(
+                    ps_component=ps_component,
+                    frequencies=frequencies,
+                    n_points=n_points,
+                    lon_range=lon_range,
+                    lat_range=lat_range,
+                    brightness_percentile=brightness_percentile,
+                    mode=mode,
+                    random_seed=random_seed,
+                    ps_radius_range=ps_radius_range,
+                    ps_brightness_scale=ps_brightness_scale,
+                    directory=directory,
+                )
 
         self.file_templates = files.file_templates
         self.download_templates = files.download_templates
@@ -89,15 +102,9 @@ class ProcessMaps():
             self.brightness_percentile = brightness_percentile
             self.mode = mode
             self.random_seed = random_seed
-            self.factor = factor
+            self.ps_radius_range = tuple(ps_radius_range)
+            self.ps_brightness_scale = float(ps_brightness_scale)
             self.ps_injection_mode = str(ps_injection_mode)
-
-            #self.pointsource = PointSource(directory=directory)
-            self.ps_lon = None
-            self.ps_lat = None
-            self.ps_rad = None
-            self.ps_val = None
-            self.ps_sed_lists = None
 
 
     def _repair_and_read_map(self, path: str, comp: str, frequency: str, realisation: int):
@@ -135,40 +142,6 @@ class ProcessMaps():
                     f"frequency='{frequency}', realisation={realisation}: {repair_exc}"
                 ) from repair_exc
             
-    
-    def build_point_sources(self):
-        """
-        Build a point-source catalogue (positions, sizes, amplitudes, and SEDs)
-
-        Returns:
-        lon_deg (array): 1D array of longitudes in degrees, shapeshape = (N,). N = number of features per frequency map.
-        lat_deg (array): 1D array of latitudes in degrees, shape shape = (N,).
-        rad_deg (array): 1D array of (possibly enlarged) equivalent radii in degrees, shape = (N,).
-                                 If a size-enlargement factor is used, this corresponds to rad_deg_original * factor.
-        val_ref (array): 1D array of summed component values in the reference frequency (usually the first frequency), shape = (N,).
-        sed_lists (list): List of length N; each entry is a list of length N_freq containing per-frequency summed values in the order of the frequencies list.
-        """
-        ps = PointSource(
-            ps_component=self.ps_component,
-            frequencies=self.frequencies,
-            n_points=self.n_points,
-            lon_range=self.lon_range,
-            lat_range=self.lat_range,
-            brightness_percentile=self.brightness_percentile,
-            mode=self.mode,
-            random_seed=self.random_seed,
-            factor=self.factor,
-            directory=self.directory,
-        )
-        lon, lat, rad, val, sed_lists = ps.create_and_output_catalogue()
-        self.ps_lon = lon
-        self.ps_lat = lat
-        self.ps_rad = rad
-        self.ps_val = val
-        self.ps_sed_lists = sed_lists
-        return lon, lat, rad, val, sed_lists
-    
-
     def _find_max_noise_realisation(self, frequency: str):
         """
         Find the maximum noise realisation number available for a given frequency.
@@ -351,6 +324,11 @@ class ProcessMaps():
                     save_map(output_path, hp_map_reduced, self.overwrite)
             print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
             print(f"Shape of component '{comp}': {hp_map_reduced.shape}")
+            hp.mollview(
+                hp_map_reduced,
+                title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)",
+            )
+            plt.show()
             cfn += hp_map_reduced
         return cfn
 
@@ -358,7 +336,6 @@ class ProcessMaps():
                                       center_lon_deg: list | None = None, center_lat_deg: list | None = None, radius_deg: list | None = None,
                                       value: list | None = None, sed_factors: np.ndarray | None = None,
                                       extra_feature_map: np.ndarray | None = None,
-                                      extra_feature_is_processed: bool = False,
                                       save=True,
                                       return_components: bool = True):
         """
@@ -469,22 +446,11 @@ class ProcessMaps():
                     )
                 elif comp == "extra_feature":
                     if extra_feature_map is not None:
-                        hp_map = extra_feature_map
-                        if extra_feature_is_processed:
-                            if hp.get_nside(hp_map) != nside:
-                                raise ValueError(
-                                    f"Processed extra_feature map nside={hp.get_nside(hp_map)} "
-                                    f"does not match target nside={nside}."
-                                )
-                            hp_map_reduced = HPTools.beam_convolve(
-                                hp_map,
-                                lmax=desired_lmax,
-                                standard_fwhm_rad=standard_fwhm_rad,
-                            )
-                        else:
-                            hp_map_reduced = HPTools.convolve_and_reduce(
-                                hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
-                            )
+                        hp_map = np.asarray(extra_feature_map, dtype=np.float64) * self.ps_brightness_scale
+                        if self.ps_injection_mode == "pixel_ps":
+                            hp_map_reduced = HPTools.beam_convolve(hp_map, lmax=desired_lmax, standard_fwhm_rad=standard_fwhm_rad)
+                        else: # "circular_ps"
+                            hp_map_reduced = HPTools.convolve_and_reduce(hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad)
                     else:
                         # Fallback to the original uniform-disc injection if no real source map is supplied.
                         hp_map = np.zeros(hp.nside2npix(nside), dtype=np.float64)
@@ -494,7 +460,12 @@ class ProcessMaps():
                             )
                         for i in range(len(center_lon_deg)):
                             self.add_filled_circle_hp(
-                                hp_map, nside, center_lon_deg[i], center_lat_deg[i], radius_deg[i], value[i] * sed_factors[i]
+                                hp_map,
+                                nside,
+                                center_lon_deg[i],
+                                center_lat_deg[i],
+                                radius_deg[i],
+                                self.ps_brightness_scale * value[i] * sed_factors[i],
                             )
                         hp_map_reduced = HPTools.convolve_and_reduce(
                             hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
@@ -509,10 +480,11 @@ class ProcessMaps():
             if return_components and comp == "extra_feature":
                 # Only expose the processed extra-feature map (not other components).
                 processed_component_maps["extra_feature"] = np.asarray(hp_map_reduced, dtype=np.float64)
-            #hp.mollview(
-            #    hp_map_reduced,
-            #    title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)"
-            #)
+            hp.mollview(
+                hp_map_reduced,
+                title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)",
+            )
+            plt.show()
             print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
             cfn += hp_map_reduced
         if return_components:
@@ -637,11 +609,17 @@ class ProcessMaps():
         """
         desired_lmax = self.desired_lmax
         frequencies = self.frequencies
+        target_nside = HPTools.get_nside_from_lmax(desired_lmax)
+        output_key = "cfne_circ" if (
+            'extra_feature' in self.components and self.ps_injection_mode == "circular_ps"
+        ) else ("cfne" if 'extra_feature' in self.components else "cfn")
         for realisation in range(self.realisations):
             i=0
             realisation += self.start_realisation  # Adjust for starting realisation
             if 'extra_feature' in self.components:
-                center_lon_deg, center_lat_deg, _, _, _ = self.build_point_sources() # returns ps positions
+                center_theta, center_phi, radius_deg, _, sed_lists = self.ps.create_and_output_catalogue()
+                center_pix = hp.ang2pix(target_nside, center_theta, center_phi).astype(np.int64)
+                center_pixel_sed = np.full((len(center_theta), len(frequencies)), np.nan, dtype=np.float64)
                 if self.ps_injection_mode == "pixel_ps":
                     pixel_injector = PixelPSInjector(
                         components=self.components,
@@ -652,8 +630,8 @@ class ProcessMaps():
                     )
                     extra_feature_maps_by_freq, sed_matrix = pixel_injector.build_maps(
                         realisation=realisation,
-                        center_lon_deg=center_lon_deg,
-                        center_lat_deg=center_lat_deg,
+                        center_theta=center_theta,
+                        center_phi=center_phi,
                     )
                 else:
                     circular_injector = CircularPSInjector(
@@ -661,46 +639,47 @@ class ProcessMaps():
                         map_loader=self._load_component_map_in_K,
                     )
                     extra_feature_maps_by_freq = None
-                    sed_matrix = np.zeros((len(center_lon_deg), len(frequencies)), dtype=np.float64)
+                    sed_matrix = np.zeros((len(center_theta), len(frequencies)), dtype=np.float64)
             for (i, frequency) in enumerate(frequencies):
                 if 'extra_feature' in self.components:
-                    cfn_output_path = self.file_templates["cfne"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                    cfn_output_path = self.file_templates[output_key].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                     if os.path.exists(cfn_output_path) and self.overwrite == False:
-                        print(f"CFNE map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
+                        print(f"{output_key.upper()} map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                         continue
-                    print(f'Creating CFNE with injected feature at {frequency} GHz...')
+                    print(f"Creating {output_key.upper()} with injected feature at {frequency} GHz...")
                     if self.ps_injection_mode == "pixel_ps":
                         extra_feature_map = extra_feature_maps_by_freq[frequency]
-                        extra_feature_is_processed = True
                     else:
+                        source_values = np.asarray([sed[i] for sed in sed_lists], dtype=np.float64)
                         extra_feature_map = circular_injector.build_map(
                             frequency=frequency,
                             realisation=realisation,
-                            center_lon_deg=center_lon_deg,
-                            center_lat_deg=center_lat_deg,
+                            center_theta=center_theta,
+                            center_phi=center_phi,
+                            radius_deg=radius_deg,
+                            values=source_values,
                         )
-                        extra_feature_is_processed = False
                     cfn_map, processed_maps = self.create_cfn_with_extra_features(
                         frequency,
                         realisation,
                         save=True,
-                        center_lon_deg=center_lon_deg,
-                        center_lat_deg=center_lat_deg,
                         extra_feature_map=extra_feature_map,
-                        extra_feature_is_processed=extra_feature_is_processed,
                         return_components=True,
                     )
+                    # Extract SED after beam convolution and resolution reduction
+                    if "extra_feature" in processed_maps:
+                        center_pixel_sed[:, i] = processed_maps["extra_feature"][center_pix]
                     if self.ps_injection_mode == "pixel_ps":
                         sed_matrix[:, i] = measure_source_values(
                             extra_feature_map,
-                            center_lon_deg=center_lon_deg,
-                            center_lat_deg=center_lat_deg,
+                            center_theta=center_theta,
+                            center_phi=center_phi,
                         )
-                    elif "extra_feature" in processed_maps:
+                    if self.ps_injection_mode != "pixel_ps" and "extra_feature" in processed_maps:
                         sed_matrix[:, i] = measure_source_values(
                             processed_maps["extra_feature"],
-                            center_lon_deg=center_lon_deg,
-                            center_lat_deg=center_lat_deg,
+                            center_theta=center_theta,
+                            center_phi=center_phi,
                         )
                     # visualise the map to check
                     # hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
@@ -717,16 +696,46 @@ class ProcessMaps():
                 sed_path = os.path.join(
                     self.directory,
                     "processed_maps",
-                    f"processed_extra_feature_sed_r{realisation:04d}_lmax{desired_lmax}.npz",
+                    f"processed_extra_feature_sed_{output_key}_r{realisation:04d}_lmax{desired_lmax}.npz",
                 )
                 np.savez(
                     sed_path,
                     frequencies=np.array(frequencies),
-                    lon_deg=np.asarray(center_lon_deg, dtype=np.float64),
-                    lat_deg=np.asarray(center_lat_deg, dtype=np.float64),
+                    theta=np.asarray(center_theta, dtype=np.float64),
+                    phi=np.asarray(center_phi, dtype=np.float64),
                     sed=sed_matrix,
+                    center_pixel_sed=center_pixel_sed,
                 )
                 print(f"Saved processed extra-feature per-source SED to {sed_path}")
+                if center_pixel_sed.size > 0 and np.isfinite(center_pixel_sed).any():
+                    ref_vals = center_pixel_sed[:, [0]]
+                    center_pixel_sed_norm = np.divide(
+                        center_pixel_sed,
+                        ref_vals,
+                        out=np.full_like(center_pixel_sed, np.nan, dtype=np.float64),
+                        where=np.isfinite(ref_vals) & (ref_vals != 0),
+                    )
+                    n_plot = min(5, center_pixel_sed_norm.shape[0])
+                    freq_axis = np.asarray([int(f) for f in frequencies], dtype=np.int64)
+                    plt.figure(figsize=(8, 5))
+                    for src_idx in range(n_plot):
+                        plt.plot(freq_axis, center_pixel_sed_norm[src_idx], marker="o", label=(f"PS {src_idx} "
+                                f"(theta={center_theta[src_idx]:.2f}, phi={center_phi[src_idx]:.2f})"))
+                    plt.axhline(1.0, color="k", linewidth=1.0, linestyle="--")
+                    plt.xlabel("Frequency [GHz]")
+                    plt.ylabel(f"Center-pixel SED / {frequencies[0]} GHz")
+                    plt.title(f"Processed center-pixel SEDs ({output_key}, first {n_plot} PS, r{realisation:04d})")
+                    plt.legend(fontsize=8)
+                    plt.tight_layout()
+                    sed_plot_path = os.path.join(
+                        self.directory,
+                        "processed_maps",
+                        f"processed_extra_feature_center_pixel_sed_{output_key}_r{realisation:04d}_lmax{desired_lmax}.png",
+                    )
+                    plt.savefig(sed_plot_path, dpi=150, bbox_inches="tight")
+                    plt.show()
+                    plt.close()
+                    print(f"Saved processed center-pixel SED plot to {sed_plot_path}")
 
 
     def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, 

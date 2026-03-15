@@ -84,7 +84,7 @@ def build_catalog_from_reference_map(
     threshold: float = 0.0,
 ) -> dict[str, np.ndarray]:
     """
-    Build a source catalogue from a reference map by connected components.
+    Build a point source catalogue from a reference map by connected components.
 
     Returns a dict with:
       label, npix, val(sum), peak, peak_pix, lon_deg, lat_deg, rad_deg
@@ -204,13 +204,8 @@ def select_sources(
     return rng.choice(idx, size=N, replace=False).astype(np.int64)
 
 
-def increase_size_deg(rad_deg: np.ndarray, factor: int | float) -> np.ndarray:
-    """
-    Your original logic:
-      ell ~ 180 / rad_deg / factor
-      rad_new = 180 / ell = rad_deg * factor
-    """
-    return np.asarray(rad_deg, dtype=np.float64) * float(factor)
+def scale_radius_deg(rad_deg: np.ndarray, scale: np.ndarray | float) -> np.ndarray:
+    return np.asarray(rad_deg, dtype=np.float64) * np.asarray(scale, dtype=np.float64)
 
 
 def sum_selected_pixels_by_udgrade_region(
@@ -240,8 +235,8 @@ def sum_selected_pixels_by_udgrade_region(
 
 def measure_source_values(
     hp_map: np.ndarray,
-    center_lon_deg: np.ndarray,
-    center_lat_deg: np.ndarray,
+    center_theta: np.ndarray,
+    center_phi: np.ndarray,
     *,
     nest: bool = False,
     threshold: float = 0.0,
@@ -251,8 +246,8 @@ def measure_source_values(
     """
     label_of_pix, sum_per = precompute_component_sums(hp_map, nest=nest, threshold=threshold)
     nside = hp.get_nside(hp_map)
-    theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
-    phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
+    theta = np.asarray(center_theta, dtype=np.float64)
+    phi = np.asarray(center_phi, dtype=np.float64)
     seed_pix = hp.ang2pix(nside, theta, phi, nest=nest).astype(np.int64)
     labs = label_of_pix[seed_pix]
     vals = np.zeros(labs.size, dtype=np.float64)
@@ -278,7 +273,7 @@ def print_results_table(results_df: pd.DataFrame, comp: str, frequencies: Sequen
     val_cols = [f"val_{fre}" for fre in frequencies]
     cols = base_cols + val_cols
 
-    print(f"\n=== {comp} ===")
+    print(f"\n=== {comp} === after radius and brightness scaling === ")
     header = "  i  " + "  ".join([f"{c:>12s}" for c in cols])
     print(header)
     print("-" * len(header))
@@ -306,11 +301,12 @@ class PointSource:
         frequencies: Sequence[str],
         n_points: int = 10,
         lon_range: Optional[Tuple[float, float]] = None,
-        lat_range: Tuple[float, float] = (20.0, 90.0),
+        lat_range: Tuple[float, float] = (-90.0, 90.0),
         brightness_percentile: Optional[Tuple[float, float]] = (75.0, 100.0),
         mode: Literal["random", "brightest"] = "random",
         random_seed: int = 1,
-        factor: int | float = 50.0,
+        ps_radius_range: Tuple[float, float] = (1.0, 1.0),
+        ps_brightness_scale: float = 1.0,
         file_templates: FileTemplates | None = None,
         directory: str = "data/",
         nest: bool = False,
@@ -324,7 +320,8 @@ class PointSource:
         self.brightness_percentile = brightness_percentile
         self.mode = mode
         self.random_seed = int(random_seed)
-        self.factor = factor
+        self.ps_radius_range = tuple(float(x) for x in ps_radius_range)
+        self.ps_brightness_scale = float(ps_brightness_scale)
         self.directory = directory
         self.nest = nest
         self.threshold = float(threshold)
@@ -344,7 +341,7 @@ class PointSource:
     def create_and_output_catalogue(self):
         """
         Returns:
-          lon_list, lat_list, rad_list, val_list, sed_lists
+          theta_list, phi_list, rad_list, val_list, sed_lists
         where val_list is from the reference frequency (frequencies[0]).
         """
         if len(self.frequencies) == 0:
@@ -374,11 +371,19 @@ class PointSource:
             print_results_table(empty, self.ps_component, frequencies)
             return np.array([]), np.array([]), np.array([]), np.array([]), []
 
+        rmin, rmax = self.ps_radius_range
+        if rmin <= 0 or rmax <= 0:
+            raise ValueError("ps_radius_range values must be > 0.")
+        if rmin > rmax:
+            raise ValueError("ps_radius_range must satisfy min <= max.")
+
         # fixed per-source geometry from reference catalogue
         lon_sel = cat["lon_deg"][idx_sel].astype(np.float64)
         lat_sel = cat["lat_deg"][idx_sel].astype(np.float64)
         rad_sel = cat["rad_deg"][idx_sel].astype(np.float64)
         lab_sel = cat["label"][idx_sel].astype(np.int32)
+        rng = np.random.default_rng(self.random_seed)
+        radius_scales = rng.uniform(rmin, rmax, size=rad_sel.size)
 
         # --- per-frequency precompute once, then O(1) lookup per source ---
         out = {
@@ -408,23 +413,31 @@ class PointSource:
             out[f"val_{fre}"] = vals
 
         results = pd.DataFrame(out)
-        
-        #print_results_table(results, self.ps_component, frequencies)
 
-        # outputs matching your original return
+        # Use a display copy for the printed table; keep returned values in single-scaled physical units.
+        display_results = results.copy()
+        display_results["rad_deg"] = scale_radius_deg(
+            display_results["rad_deg"].to_numpy(dtype=np.float64),
+            radius_scales,
+        )
+        for fre in frequencies:
+            col = f"val_{fre}"
+            display_results[col] = (display_results[col].to_numpy(dtype=np.float64) * self.ps_brightness_scale)
+        print_results_table(display_results, self.ps_component, frequencies) 
+
+        # output arrays for injection
         sed_lists = create_sed_lists_from_results(results, frequencies)
         val_list = results[f"val_{ref_fre}"].to_numpy(dtype=np.float64)
-        lon_list = results["lon_deg"].to_numpy(dtype=np.float64)
-        lat_list = results["lat_deg"].to_numpy(dtype=np.float64)
-        rad_list = increase_size_deg(results["rad_deg"].to_numpy(dtype=np.float64), self.factor)
+        theta_list = np.deg2rad(90.0 - results["lat_deg"].to_numpy(dtype=np.float64))
+        phi_list = np.deg2rad(results["lon_deg"].to_numpy(dtype=np.float64))
+        rad_list = scale_radius_deg(results["rad_deg"].to_numpy(dtype=np.float64), radius_scales)
 
-        return lon_list, lat_list, rad_list, val_list, sed_lists
+        return theta_list, phi_list, rad_list, val_list, sed_lists
 
 
 class CircularPSInjector:
     """
-    Build extra-feature maps by copying the full connected components of a base
-    point-source map around selected source seeds.
+    Build extra-feature maps as filled discs centred on the selected source positions.
     """
 
     def __init__(
@@ -432,40 +445,33 @@ class CircularPSInjector:
         *,
         ps_component: str,
         map_loader,
-        nest: bool = False,
-        threshold: float = 0.0,
     ):
         self.ps_component = ps_component
         self.map_loader = map_loader
-        self.nest = nest
-        self.threshold = float(threshold)
 
     def build_map(
         self,
         *,
         frequency: str,
         realisation: int,
-        center_lon_deg: np.ndarray,
-        center_lat_deg: np.ndarray,
+        center_theta: np.ndarray,
+        center_phi: np.ndarray,
+        radius_deg: np.ndarray,
+        values: np.ndarray,
     ) -> np.ndarray:
         print(f"[circular_ps] using ps_component='{self.ps_component}' at {frequency} GHz")
         src_map = self.map_loader(self.ps_component, frequency, realisation)
         nside = hp.get_nside(src_map)
-        label_of_pix, _ = precompute_component_sums(src_map, nest=self.nest, threshold=self.threshold)
-
-        theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
-        phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
-        seed_pix = hp.ang2pix(nside, theta, phi, nest=self.nest).astype(np.int64)
-
-        labs = label_of_pix[seed_pix]
-        valid_labs = labs[labs >= 0]
-        if valid_labs.size == 0:
-            print(f"Warning: no valid connected components found for injected sources at {frequency} GHz.")
-            return np.zeros_like(src_map, dtype=np.float64)
-
-        keep = np.isin(label_of_pix, np.unique(valid_labs))
         extra_feature_map = np.zeros_like(src_map, dtype=np.float64)
-        extra_feature_map[keep] = src_map[keep]
+        for theta, phi, rad_deg, value in zip(
+            np.asarray(center_theta, dtype=np.float64),
+            np.asarray(center_phi, dtype=np.float64),
+            np.asarray(radius_deg, dtype=np.float64),
+            np.asarray(values, dtype=np.float64),
+        ):
+            vec = hp.ang2vec(theta, phi)
+            pix = hp.query_disc(nside, vec, np.deg2rad(rad_deg))
+            extra_feature_map[pix] = value
         return extra_feature_map
 
 
@@ -513,8 +519,8 @@ class PixelPSInjector:
         *,
         frequency: str,
         realisation: int,
-        center_lon_deg: np.ndarray,
-        center_lat_deg: np.ndarray,
+        center_theta: np.ndarray,
+        center_phi: np.ndarray,
         nside_out: int,
     ) -> dict[str, np.ndarray]:
         print(f"[pixel_ps] using ps_component='{self.ps_component}' at {frequency} GHz")
@@ -548,8 +554,8 @@ class PixelPSInjector:
             print(f"[extra_feature:{frequency}] added foreground component '{comp}'")
 
         label_of_pix, _ = precompute_component_sums(ps_map, nest=self.nest, threshold=self.threshold)
-        theta = np.deg2rad(90.0 - np.asarray(center_lat_deg, dtype=np.float64))
-        phi = np.deg2rad(np.asarray(center_lon_deg, dtype=np.float64))
+        theta = np.asarray(center_theta, dtype=np.float64)
+        phi = np.asarray(center_phi, dtype=np.float64)
         seed_pix_hi = hp.ang2pix(working_nside, theta, phi, nest=self.nest).astype(np.int64)
 
         labs = label_of_pix[seed_pix_hi]
@@ -603,8 +609,8 @@ class PixelPSInjector:
         self,
         *,
         realisation: int,
-        center_lon_deg: np.ndarray,
-        center_lat_deg: np.ndarray,
+        center_theta: np.ndarray,
+        center_phi: np.ndarray,
     ) -> tuple[dict[str, np.ndarray], np.ndarray]:
         nside_out = HPTools.get_nside_from_lmax(self.desired_lmax)
         if self.reference_frequency not in self.frequencies:
@@ -618,10 +624,10 @@ class PixelPSInjector:
             per_freq[frequency] = self._compute_inputs_for_frequency(
                 frequency=frequency,
                 realisation=realisation,
-                center_lon_deg=center_lon_deg,
-                center_lat_deg=center_lat_deg,
+                center_theta=center_theta,
+                center_phi=center_phi,
                 nside_out=nside_out,
-            )
+            ) 
 
         ref_average_ratio = np.nan_to_num(
             per_freq[self.reference_frequency]["average_ratio"],
@@ -633,7 +639,7 @@ class PixelPSInjector:
         ref_fg_lowres = per_freq[self.reference_frequency]["fg_lowres"]
 
         extra_feature_maps = {}
-        sed_matrix = np.zeros((len(center_lon_deg), len(self.frequencies)), dtype=np.float64)
+        sed_matrix = np.zeros((len(center_theta), len(self.frequencies)), dtype=np.float64)
         for i, frequency in enumerate(self.frequencies):
             sums_out = per_freq[frequency]["sums_out"]
             scale = np.divide(
@@ -646,8 +652,8 @@ class PixelPSInjector:
             extra_feature_maps[frequency] = np.asarray(extra_feature_map, dtype=np.float64)
             sed_matrix[:, i] = measure_source_values(
                 extra_feature_maps[frequency],
-                center_lon_deg=center_lon_deg,
-                center_lat_deg=center_lat_deg,
+                center_theta=center_theta,
+                center_phi=center_phi,
                 nest=self.nest,
                 threshold=self.threshold,
             )

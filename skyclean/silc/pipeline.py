@@ -38,16 +38,16 @@ class Pipeline:
         reference_vectors = None,
         nsamp: float = 1200, 
         # for adding extra point-source-like features:
-        ps_injection_mode: Literal["circular_ps", "pixel_ps"] = "circular_ps",
-        ps_component: str = "faintradiops",
+        ps_injection_mode: Literal["circular_ps", "pixel_ps"] = "pixel_ps",
+        ps_component: str = "strongirps",
         # for 'circular_ps' usage: 
         n_points: int = 10,
         lon_range: tuple[float, float] | None = None,
-        lat_range: tuple[float, float] = (20.0, 90.0),
         brightness_percentile: tuple[float, float] | None = (75.0, 100.0),
         mode: Literal["random", "brightest"] = "random",
         random_seed: int = 1,
-        factor: int | float = 50.0,
+        ps_radius_range: tuple[float, float] = (1.0, 1.0),
+        ps_brightness_scale: float = 1.0,
     ):
         self.components = components
         self.wavelet_components = wavelet_components
@@ -72,11 +72,11 @@ class Pipeline:
         self.ps_component = ps_component
         self.n_points = int(n_points)
         self.lon_range = lon_range
-        self.lat_range = lat_range
         self.brightness_percentile = brightness_percentile
         self.mode = mode
         self.random_seed = int(random_seed)
-        self.factor = factor
+        self.ps_radius_range = tuple(ps_radius_range)
+        self.ps_brightness_scale = float(ps_brightness_scale)
         self.ps_injection_mode = ps_injection_mode
 
         
@@ -127,11 +127,12 @@ class Pipeline:
             ps_component = self.ps_component, 
             n_points = self.n_points,
             lon_range = self.lon_range,
-            lat_range = self.lat_range,
+            lat_range = (-90.0, 90.0),
             brightness_percentile = self.brightness_percentile,
             mode = self.mode,
             random_seed = self.random_seed,
-            factor = self.factor,
+            ps_radius_range = self.ps_radius_range,
+            ps_brightness_scale = self.ps_brightness_scale,
             ps_injection_mode = self.ps_injection_mode,
 
         )
@@ -160,11 +161,12 @@ class Pipeline:
             ps_component = self.ps_component, 
             n_points = self.n_points,
             lon_range = self.lon_range,
-            lat_range = self.lat_range,
+            lat_range = (-90.0, 90.0),
             brightness_percentile = self.brightness_percentile,
             mode = self.mode,
             random_seed = self.random_seed,
-            factor = self.factor,
+            ps_radius_range = self.ps_radius_range,
+            ps_brightness_scale = self.ps_brightness_scale,
             ps_injection_mode = self.ps_injection_mode,
         )
         processor.produce_and_save_wavelet_transforms(
@@ -735,25 +737,25 @@ def main():
                         help="If set, overwrite existing files.")
     parser.add_argument('--directory', type=str, default='/Scratch/agnes/data',
                         help="Base directory for input/output data.")
-    parser.add_argument('--ps-component', type=str, default='faintradiops',
+    parser.add_argument('--ps-component', type=str, default='strongirps',
                         help="Point-source component template key used for injected extra features.")
     parser.add_argument('--n-points', type=int, default=10,
                         help="Number of point sources to inject.")
     parser.add_argument('--lon-range', nargs=2, type=float, default=None, metavar=('LON_MIN', 'LON_MAX'),
                         help="Longitude range in degrees for source selection. Omit to use full range.")
-    parser.add_argument('--lat-range', nargs=2, type=float, default=(20.0, 90.0), metavar=('LAT_MIN', 'LAT_MAX'),
-                        help="Latitude range in degrees for source selection.")
     parser.add_argument('--brightness-percentile', nargs=2, type=float, default=(75.0, 100.0), metavar=('PCT_MIN', 'PCT_MAX'),
                         help="Brightness percentile range used to preselect candidate sources.")
     parser.add_argument('--mode', type=str, choices=['random', 'brightest'], default='random',
                         help="Source selection mode.")
     parser.add_argument('--random-seed', type=int, default=1,
                         help="Random seed used when mode='random'.")
-    parser.add_argument('--factor', type=float, default=50.0,
-                        help="Feature size enlargement factor.")
+    parser.add_argument('--ps-radius-range', nargs=2, type=float, default=(1.0, 1.0), metavar=('RMIN', 'RMAX'),
+                        help="Uniform sampling range for per-source point-source radius scale factors.")
+    parser.add_argument('--ps-brightness-scale', type=float, default=1.0,
+                        help="Global multiplicative brightness scale for injected point sources.")
     parser.add_argument('--ps-injection-mode', type=str,
                         choices=['circular_ps', 'pixel_ps'],
-                        default='circular_ps',
+                        default='pixel_ps',
                         help="How to build injected extra features.")
     
 
@@ -808,14 +810,24 @@ def main():
         ps_component=args.ps_component,
         n_points=args.n_points,
         lon_range=tuple(args.lon_range) if args.lon_range is not None else None,
-        lat_range=tuple(args.lat_range),
         brightness_percentile=tuple(args.brightness_percentile),
         mode=args.mode,
         random_seed=args.random_seed,
-        factor=args.factor,
+        ps_radius_range=tuple(args.ps_radius_range),
+        ps_brightness_scale=args.ps_brightness_scale,
         ps_injection_mode=args.ps_injection_mode,
     )
     pipeline.run(steps=args.steps)
 
 if __name__ == "__main__": # Run main() only when the file is executed as a script, e.g. python3 -m skyclean.silc.pipeline
     main()    
+
+# example usage:
+# 1. CFN with multiple components (no extra feature injection)
+# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --overwrite --steps process wavelets ilc
+#
+# 2. CFNE using pixel point-source injection
+# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 1.0 --ps-brightness-scale 1.0 --ps-injection-mode pixel_ps --overwrite --steps process wavelets ilc
+#
+# 3. CFNE_CIRC using circular point-source injection
+# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne_circ --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 3.0 --ps-brightness-scale 5.0 --ps-injection-mode circular_ps --overwrite --steps process wavelets ilc

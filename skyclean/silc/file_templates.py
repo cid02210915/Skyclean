@@ -20,6 +20,7 @@ class FileTemplates():
             # processed maps
             "cfn": os.path.join(directory, "CFN_realisations"),
             "cfne": os.path.join(directory, "CFN_realisations"),
+            "cfne_circ": os.path.join(directory, "CFN_realisations"),
             "processed_maps": os.path.join(directory, "processed_maps"),
             # wavelet transforms
             "wavelet_coeffs": os.path.join(directory, "wavelet_transforms/wavelet_coeffs"),
@@ -111,6 +112,7 @@ class FileTemplates():
 
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
         "cfne":            os.path.join(self.output_directories["cfne"],           "cfne_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
+        "cfne_circ":       os.path.join(self.output_directories["cfne_circ"],      "cfne_circ_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
         # ---------------- wavelet transforms ----------------
         "wavelet_coeffs": os.path.join(
