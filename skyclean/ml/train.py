@@ -114,7 +114,8 @@ class Train:
         self.random_generator = random_generator
 
         self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam,
-                                  nsamp, constraint, batch_size, split, directory, random=random_generator)
+                                  nsamp, constraint, batch_size, split, directory, random=random_generator,
+                                  prefetch=prefetch)
 
         files = FileTemplates(directory)
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
@@ -489,13 +490,7 @@ class Train:
         train_ds, val_ds, test_ds, n_train, n_val, n_test, drop_remainder_val, drop_remainder_test = self.dataset.prepare_data()
         split_indices = self.dataset.get_split_indices()
 
-        if self.prefetch:
-            train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-            val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
-            test_ds = test_ds.prefetch(tf.data.AUTOTUNE)
-            print("[Data] Prefetch enabled.")
-        else:
-            print("[Data] Prefetch disabled.")
+        print(f"[Data] Prefetch {'enabled' if self.prefetch else 'disabled'}.")
 
         print(f"[Data] Dataset ready - Train: {n_train} samples | Validation: {n_val} samples | Test: {n_test} samples")
         print(
@@ -808,7 +803,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train CMB-Free ILC S2_UNET model")
 
     parser.add_argument('--extract-comp', type=str, default="cmb", help='Component to extract')
-    parser.add_argument('--component', type=str, default="cfn", help='Components to use (cfn/cfne)')
+    parser.add_argument('--component', type=str, default="cfn", help='Components to use (cfn/cfne/cfne_circ)')
     parser.add_argument('--frequencies', nargs='+', default=["030", "044", "070"], help='List of frequencies')
     parser.add_argument('--realisations', type=int, default=1000, help='Number of data realisations')
     parser.add_argument('--lmax', type=int, default=1023, help='Maximum multipole')
@@ -820,6 +815,18 @@ def main():
     parser.add_argument('--loss-tag', type=str, default='pixel', choices=['pixel', 'harmonic'], help='Loss type')
     parser.add_argument('--learning-rate', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--resume-training', action='store_true', help='Resume from latest checkpoint')
+    parser.add_argument(
+        '--early-stopping-patience',
+        type=int,
+        default=2,
+        help='Number of non-improving validation checks allowed before stopping',
+    )
+    parser.add_argument(
+        '--early-stopping-min-delta',
+        type=float,
+        default=1e-3,
+        help='Minimum validation-loss improvement required to reset early stopping',
+    )
     parser.add_argument('--chs', nargs='+', type=int, default=[512, 256, 128, 64], help='Channel configuration')
 
     args = parser.parse_args()
@@ -838,7 +845,9 @@ def main():
         loss_tag=args.loss_tag,
         learning_rate=args.learning_rate,
         resume_training=args.resume_training,
-        chs=args.chs
+        chs=args.chs,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
     )
 
     trainer.save_run_config(vars(args))

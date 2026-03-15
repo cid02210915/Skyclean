@@ -17,11 +17,12 @@ jax.config.update("jax_enable_x64", False)
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
                  nsamp: int = 1200, constraint: bool = False, 
-                 batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False):
+                 batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False,
+                 prefetch: bool = False):
         """
         Parameters:
             extract_comp (str): Component to be extracted. e.g. "cmb"
-            component (str): Maps with components before going to silc. e.g. "cfn", "cfne".
+            component (str): Maps with components before going to silc. e.g. "cfn", "cfne", "cfne_circ".
             frequencies (list): List of frequency channels for the maps.
             realisations (int): Number of realisations to process.
             lmax (int): The maximum multipole for the wavelet transform.    
@@ -33,6 +34,7 @@ class CMBFreeILC():
             split (list): List of train/validation/test split ratios.
             directory (str): Directory where data is stored / saved to.
             random (bool): Whether to create random maps for testing purposes. True/False.
+            prefetch (bool): Whether to enable tf.data prefetch on the batched datasets.
         """ 
         self.frequencies = frequencies
         self.n_channels_in = len(frequencies)
@@ -47,6 +49,7 @@ class CMBFreeILC():
         self.extract_comp = extract_comp
         self.nsamp = nsamp
         self.random = random
+        self.prefetch = prefetch
         if constraint == True:
             self.mode = "con"
         else: 

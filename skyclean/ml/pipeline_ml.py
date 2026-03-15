@@ -3,8 +3,8 @@ import os
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # helps OOM/fragmentation
-# use gpu1
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
+# use gpi1
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 import jax
 jax.config.update("jax_enable_x64", False)
@@ -112,7 +112,8 @@ def parse_args():
 
     # ----- match Train signature -----
     parser.add_argument("--extract-comp", type=str, default="cmb")
-    parser.add_argument("--component", type=str, default="cfn")
+    parser.add_argument("--component", type=str, default="cfn",
+                        help="Input map product key, e.g. cfn, cfne, or cfne_circ.")
 
     parser.add_argument("--frequencies", nargs="+", default=["030", "100", "353"])
     parser.add_argument("--realisations", type=int, default=1000)
@@ -169,6 +170,19 @@ def parse_args():
     # ----- evaluation controls -----
     parser.add_argument("--eval-every", type=int, default=1, 
             help="Run evaluation every N epochs (default: 1 = every epoch).")
+    
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=2,
+        help="Number of non-improving validation checks allowed before stopping.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=1e-3,
+        help="Minimum validation-loss improvement required to reset early stopping.",
+    )
     parser.add_argument(
         "--eval-batches",
         "--eval-steps",
@@ -179,15 +193,8 @@ def parse_args():
     )
     parser.add_argument(
         "--prefetch",
-        dest="prefetch",
         action="store_true",
-        help="Enable tf.data prefetching in training.",
-    )
-    parser.add_argument(
-        "--no-prefetch",
-        dest="prefetch",
-        action="store_false",
-        help="Disable tf.data prefetching in training.",
+        help="Enable tf.data prefetching in training. Default is disabled unless this flag is passed.",
     )
     parser.set_defaults(prefetch=False)
     parser.set_defaults(random=False)
@@ -224,6 +231,8 @@ def step_train(args) -> str:
         eval_steps=args.eval_batches,
         prefetch=args.prefetch,
         run_id=(args.run_id.strip() or None),
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
     )
     cfg_path = trainer.save_run_config(vars(args))
     print(f"[train] run_id={trainer.run_id}")
@@ -232,105 +241,8 @@ def step_train(args) -> str:
     return trainer.model_dir
 
 
-def infer_args_from_checkpoint(
-    ckpt_dir: str,
-    *,
-    directory: str | None = None,
-):
-    """
-    Infer pipeline args from checkpoint path by parsing ilc_improved map filenames.
-    """
-    ckpt_path = Path(ckpt_dir).resolve()
-    ckpt_name = ckpt_path.name
-    run_id = ckpt_path.parent.name if ckpt_name.startswith("checkpoint_") else ckpt_name
 
-    m_ckpt = re.search(r"checkpoint_(\d+)", ckpt_name)
-    ckpt_epoch = int(m_ckpt.group(1)) if m_ckpt else None
-
-    if directory is None:
-        s = str(ckpt_path)
-        if "/ML/models/" in s:
-            directory = s.split("/ML/models/")[0]
-        elif "/ML/model/" in s:
-            directory = s.split("/ML/model/")[0]
-        else:
-            directory = str(ckpt_path.parent.parent.parent)
-
-    files = FileTemplates(directory)
-    improved_dir = os.path.join(files.output_directories["cmb_prediction"], run_id)
-    candidates = sorted(glob.glob(os.path.join(improved_dir, "*.npy")))
-    if not candidates:
-        raise FileNotFoundError(f"No ilc_improved maps found in: {improved_dir}")
-
-    pat = re.compile(
-        r"^(?P<mode>con|uncon)_(?P<extract>[^_]+)_from-(?P<component>[^_]+)_improved_"
-        r"f(?P<freqs>\d+(?:_\d+)*)_r(?P<real>\d+)_lmax(?P<lmax>\d+)_lam(?P<lam>[0-9.]+)_"
-        r"nsamp(?P<nsamp>\d+)_rn(?P<rn>\d+)_batch(?P<batch>\d+)_epo(?P<epo>\d+)_"
-        r"lr(?P<lr>[-+0-9.eE]+)_mom(?P<mom>[-+0-9.eE]+)_chs(?P<chs>\d+(?:_\d+)*)\.npy$"
-    )
-
-    parsed = []
-    for fp in candidates:
-        m = pat.match(os.path.basename(fp))
-        if not m:
-            continue
-        d = m.groupdict()
-        d["path"] = fp
-        d["epo"] = int(d["epo"])
-        parsed.append(d)
-
-    if not parsed:
-        raise RuntimeError(
-            f"Found files in {improved_dir}, but none matched expected improved-map filename pattern."
-        )
-
-    if ckpt_epoch is not None:
-        epoch_matches = [p for p in parsed if p["epo"] == ckpt_epoch]
-    else:
-        epoch_matches = parsed
-
-    if not epoch_matches:
-        raise RuntimeError(
-            f"No improved-map filename matched checkpoint epoch={ckpt_epoch} in {improved_dir}."
-        )
-
-    chosen = max(epoch_matches, key=lambda p: os.path.getmtime(p["path"]))
-
-    args = argparse.Namespace(
-        extract_comp=chosen["extract"],
-        component=chosen["component"],
-        frequencies=chosen["freqs"].split("_"),
-        realisations=int(chosen["rn"]),
-        lmax=int(chosen["lmax"]),
-        N_directions=1,
-        lam=float(chosen["lam"]),
-        nsamp=int(chosen["nsamp"]),
-        constraint=(chosen["mode"] == "con"),
-        batch_size=int(chosen["batch"]),
-        epochs=int(chosen["epo"]),
-        learning_rate=float(chosen["lr"]),
-        momentum=float(chosen["mom"]),
-        chs=[int(x) for x in chosen["chs"].split("_")],
-        directory=directory,
-        mode="evaluate",
-        split=[0.8, 0.2],
-        seed=42,
-        random=False,
-        resume_training=False,
-        loss_tag=None,
-        model_dir="",
-        eval_every=1,
-        eval_steps=-1,
-        prefetch=False,
-        run_id=run_id,
-    )
-
-    print(f"[infer_args_from_checkpoint] checkpoint: {ckpt_dir}")
-    print(f"[infer_args_from_checkpoint] matched improved map: {chosen['path']}")
-    return args
-
-
-def step_spec(args=None, ckpt_dir: str | None = None):
+def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
     """
     Compute TT power spectra for:
       - processed_cmb (HEALPix)
@@ -342,15 +254,11 @@ def step_spec(args=None, ckpt_dir: str | None = None):
     -------
     dict:
         {
-          "processed_cmb": {"ell", "cl", "Dl", "path"},
-          "ilc_synth":     {"ell", "cl", "Dl", "path"},
-          "ilc_improved":  {"ell", "cl", "Dl", "path"},
+          "processed_cmb": {"ell", "cl", "path"},
+          "ilc_synth":     {"ell", "cl", "path"},
+          "ilc_improved":  {"ell", "cl", "path"},
         }
     """
-    if args is None:
-        if ckpt_dir is None:
-            raise ValueError("step_spec requires either args or ckpt_dir.")
-        args = infer_args_from_checkpoint(ckpt_dir)
 
     files = FileTemplates(args.directory)
     ft = files.file_templates
@@ -384,13 +292,11 @@ def step_spec(args=None, ckpt_dir: str | None = None):
         realisation=realisation,
         lmax=lmax,
     )
-    print(f"[step_spec] loading processed_cmb map from: {out_proc['path']}")
+    print(f"[spectrum] loading processed_cmb map from: {out_proc['path']}")
     ell_proc, cl_proc = PowerSpectrumTT.from_healpy_alm(out_proc["alm"])
-    Dl_proc = PowerSpectrumTT.cl_to_Dl(ell_proc, cl_proc, input_unit="K")
     results["processed_cmb"] = {
         "ell": ell_proc,
         "cl": cl_proc,
-        "Dl": Dl_proc,
         "path": out_proc["path"],
     }
 
@@ -406,15 +312,14 @@ def step_spec(args=None, ckpt_dir: str | None = None):
         nsamp=nsamp,
         constraint=args.constraint,
     )
-    print(f"[step_spec] loading ilc_synth map from: {out_synth['path']}")
+    print(f"[spectrum] loading ilc_synth map from: {out_synth['path']}")
     ell_synth, cl_synth = PowerSpectrumTT.from_mw_alm(np.asarray(out_synth["alm"]))
-    Dl_synth = PowerSpectrumTT.cl_to_Dl(ell_synth, cl_synth, input_unit="K")
     results["ilc_synth"] = {
         "ell": ell_synth,
         "cl": cl_synth,
-        "Dl": Dl_synth,
         "path": out_synth["path"],
     }
+
 
     # 3) ilc_improved (MW) -> alm -> C_ell
     improved_filename = os.path.basename(ft["ilc_improved"].format(
@@ -433,16 +338,15 @@ def step_spec(args=None, ckpt_dir: str | None = None):
         momentum=args.momentum,
         chs=chs,
     ))
-    improved_map_path = os.path.join(files.output_directories["cmb_prediction"], args.run_id, improved_filename)
-    print(f"[step_spec] loading ilc_improved map from: {improved_map_path}")
+    improved_map_path = os.path.join(
+        files.output_directories["cmb_prediction"], args.run_id, "ilc_improved_maps", improved_filename
+    )
+    print(f"[spectrum] loading ilc_improved map from: {improved_map_path}")
     if not os.path.exists(improved_map_path):
         if ckpt_dir is None:
-            raise FileNotFoundError(
-                f"[step_spec] improved map not found: {improved_map_path}. "
-                "Provide ckpt_dir so step_spec can generate it via inference."
-            )
+            raise FileNotFoundError(f"[spectrum] improved map not found: {improved_map_path}. ")
 
-        print("[step_spec] improved map missing. Generating it via existing inference pipeline...")
+        print("[spectrum] ML map missing. Generating it via existing inference pipeline...")
         inference = Inference(
             extract_comp=args.extract_comp,
             component=args.component,
@@ -465,14 +369,12 @@ def step_spec(args=None, ckpt_dir: str | None = None):
         )
         model = inference.load_model(force_load=True)
         if model is None:
-            raise RuntimeError(
-                f"[step_spec] failed to load model from checkpoint: {ckpt_dir}"
-            )
+            raise RuntimeError(f"[spectrum] failed to load model from checkpoint: {ckpt_dir}")
         inference.predict_cmb(realisation=realisation)
 
         if not os.path.exists(improved_map_path):
             raise FileNotFoundError(
-                "[step_spec] improved map still missing after inference generation: "
+                "[spectrum] improved map still missing after inference generation: "
                 f"{improved_map_path}"
             )
 
@@ -481,82 +383,13 @@ def step_spec(args=None, ckpt_dir: str | None = None):
     arr = np.asarray(np.real(np.squeeze(improved_map)), dtype=np.float64, order="C")
     alm_mw = s2fft.forward(arr, L=L)
     ell_improved, cl_improved = PowerSpectrumTT.from_mw_alm(np.asarray(alm_mw))
-    Dl_improved = PowerSpectrumTT.cl_to_Dl(ell_improved, cl_improved, input_unit="K")
     results["ilc_improved"] = {
         "ell": ell_improved,
         "cl": cl_improved,
-        "Dl": Dl_improved,
         "path": improved_map_path,
     }
 
-    # Save improved spectrum in canonical SILC location (kept for compatibility).
-    improved_spec_path = ft["ilc_improved_spectrum"].format(
-        mode=mode,
-        extract_comp=args.extract_comp,
-        component=args.component,
-        frequencies=freq_tag,
-        realisation=realisation,
-        lmax=lmax,
-        lam=lam_str,
-        nsamp=nsamp,
-        rn=int(args.realisations),
-        batch=int(args.batch_size),
-        epochs=int(args.epochs),
-        lr=args.learning_rate,
-        momentum=args.momentum,
-        chs=chs,
-    )
-    os.makedirs(os.path.dirname(improved_spec_path), exist_ok=True)
-    np.save(
-        improved_spec_path,
-        {"ell": ell_improved, "cl": cl_improved, "Dl": Dl_improved},
-    )
-    print(f"[step_spec] saved improved spectrum to: {improved_spec_path}")
-
-    if ckpt_dir:
-        ckpt_npz = os.path.join(ckpt_dir, "all_component_spectra.npz")
-        np.savez(
-            ckpt_npz,
-            ell_processed=results["processed_cmb"]["ell"],
-            cl_processed=results["processed_cmb"]["cl"],
-            Dl_processed=results["processed_cmb"]["Dl"],
-            ell_ilc_synth=results["ilc_synth"]["ell"],
-            cl_ilc_synth=results["ilc_synth"]["cl"],
-            Dl_ilc_synth=results["ilc_synth"]["Dl"],
-            ell_ilc_improved=results["ilc_improved"]["ell"],
-            cl_ilc_improved=results["ilc_improved"]["cl"],
-            Dl_ilc_improved=results["ilc_improved"]["Dl"],
-        )
-        print(f"[step_spec] wrote checkpoint copy: {ckpt_npz}")
-
-        plot_path = os.path.join(ckpt_dir, "all_component_spectra.png")
-        PowerSpectrumTT.plot_Dl_series(
-            [
-                {
-                    "ell": results["processed_cmb"]["ell"],
-                    "Dl": results["processed_cmb"]["Dl"],
-                    "label": "Processed CMB",
-                    "source": "processed",
-                },
-                {
-                    "ell": results["ilc_synth"]["ell"],
-                    "Dl": results["ilc_synth"]["Dl"],
-                    "label": "ILC-synth",
-                    "source": "ilc_synth",
-                },
-                {
-                    "ell": results["ilc_improved"]["ell"],
-                    "Dl": results["ilc_improved"]["Dl"],
-                    "label": "ILC-improved",
-                    "source": "ilc_improved",
-                },
-            ],
-            save_path=plot_path,
-            show=False,
-        )
-
     return results
-
 
 def step_evaluate(args, ckpt_dir: str | None = None):
     """
@@ -587,12 +420,98 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     print("[evaluate] Loading model from latest checkpoint...")
     model = inference.load_model(force_load=True)
     if not model:
-        raise RuntimeError("[infer] Model failed to load (load_model returned falsy).")
+        raise RuntimeError("[evaluate] Model failed to load (load_model returned falsy).")
 
     test_ids = inference.data_handler.get_split_indices()["test"]
     print(f"[evaluate] Predicting CMB for {len(test_ids)} test realisations...")
     metrics_rows = inference.save_test_metrics_table(save_predictions=True)
     inference.save_test_scatter_plots(metrics_rows)
+
+    ratio_ilc_all = []
+    ratio_ml_all = []
+    out_dir = os.path.join(inference.file_templates.output_directories["cmb_prediction"], args.run_id, "evaluation")
+    os.makedirs(out_dir, exist_ok=True)
+
+    for realisation in test_ids:
+        spec_args = argparse.Namespace(**vars(args))
+        spec_args.realisation = int(realisation)
+        spec = generate_spectrum_for_one(spec_args, ckpt_dir=ckpt_dir)
+        bundle_path = os.path.join(out_dir, f"component_spectra_r{int(realisation):04d}.npz")
+        np.savez(
+            bundle_path,
+            ell=np.asarray(spec["processed_cmb"]["ell"], dtype=float),
+            processed_cmb_cl=np.asarray(spec["processed_cmb"]["cl"], dtype=float),
+            ilc_synth_cl=np.asarray(spec["ilc_synth"]["cl"], dtype=float),
+            ilc_improved_cl=np.asarray(spec["ilc_improved"]["cl"], dtype=float),
+        )
+        print(f"[evaluate] wrote component spectra bundle: {bundle_path}")
+
+        ell = np.asarray(spec["processed_cmb"]["ell"], dtype=float)
+        cl_processed = np.asarray(spec["processed_cmb"]["cl"], dtype=float)
+        print(f'range of processed_cmb C_ell: {cl_processed.min():.3e} to {cl_processed.max():.3e}')
+        cl_ilc_synth = np.asarray(spec["ilc_synth"]["cl"], dtype=float)
+        print(f'range of ilc_synth C_ell: {cl_ilc_synth.min():.3e} to {cl_ilc_synth.max():.3e}')
+        cl_ilc_improved = np.asarray(spec["ilc_improved"]["cl"], dtype=float)
+        print(f'range of ilc_improved C_ell: {cl_ilc_improved.min():.3e} to {cl_ilc_improved.max():.3e}')
+
+        ratio_ilc = cl_ilc_synth / cl_processed
+        ratio_ml = cl_ilc_improved / cl_processed
+        ratio_ilc_all.append(ratio_ilc)
+        ratio_ml_all.append(ratio_ml)
+
+    ratio_ilc_all = np.asarray(ratio_ilc_all, dtype=float)
+    ratio_ml_all = np.asarray(ratio_ml_all, dtype=float)
+    ratio_ilc_mean = np.mean(ratio_ilc_all, axis=0)
+    ratio_ilc_std = np.std(ratio_ilc_all, axis=0)
+    ratio_ml_mean = np.mean(ratio_ml_all, axis=0)
+    ratio_ml_std = np.std(ratio_ml_all, axis=0)
+
+    ratio_npz = os.path.join(out_dir, "mean_ratio_spectra.npz")
+    np.savez(
+        ratio_npz,
+        test_ids=np.asarray(test_ids, dtype=int),
+        ell=ell,
+        ratio_ilc_all=ratio_ilc_all,
+        ratio_ml_all=ratio_ml_all,
+        ratio_ilc_mean=ratio_ilc_mean,
+        ratio_ilc_std=ratio_ilc_std,
+        ratio_ml_mean=ratio_ml_mean,
+        ratio_ml_std=ratio_ml_std,
+    )
+    print(f"[evaluate] wrote ratio spectra over {len(test_ids)} test realisations: {ratio_npz}")
+
+    import matplotlib.pyplot as plt
+
+    plot_path = os.path.join(out_dir, "mean_ratio_spectra.png")
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(ell, ratio_ilc_mean, label="ILC mean", color="tab:orange")
+    ax.fill_between(
+        ell,
+        ratio_ilc_mean - ratio_ilc_std,
+        ratio_ilc_mean + ratio_ilc_std,
+        color="tab:orange",
+        alpha=0.2,
+        label="ILC std",
+    )
+    ax.plot(ell, ratio_ml_mean, label="ML mean", color="tab:blue")
+    ax.fill_between(
+        ell,
+        ratio_ml_mean - ratio_ml_std,
+        ratio_ml_mean + ratio_ml_std,
+        color="tab:blue",
+        alpha=0.2,
+        label="ML std",
+    )
+    ax.axhline(1.0, color="k", linestyle="--", linewidth=1)
+    ax.set_xlabel(r"$\ell$")
+    ax.set_ylabel("Ratio to processed CMB")
+    ax.set_title(f"Component Ratio Spectra Across Test Realisations")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[evaluate] wrote ratio plot for {len(test_ids)} test realisations: {plot_path}")
     
     return test_ids
 
@@ -662,4 +581,4 @@ if __name__ == "__main__":
 
 # Example usage:
 # 030 044 070 100 143 217 353 545 857
-# python3 -m skyclean.ml.pipeline_ml --mode evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 15 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 10 --nsamp 1200 --epochs 100 --eval-every 5 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id CFN_r500_511
+# python3 -m skyclean.ml.pipeline_ml --mode evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 7 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 10 --split 0.1 0.1 0.8 --nsamp 1200 --epochs 100 --eval-every 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id CFN_r500_511

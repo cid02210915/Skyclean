@@ -254,7 +254,7 @@ class Inference:
         for realisation in test_ids:
             outputs[int(realisation)] = self.predict_cmb(realisation=int(realisation), save_result=save_result, masked=masked)
         print(f"[Inference] Saved test-set predictions to: "
-              f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id)}")
+              f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id, 'ilc_improved_maps')}")
         return outputs
 
     def compute_mse(self, comp, realisation, save_result=True, masked=False):
@@ -299,7 +299,7 @@ class Inference:
     def save_test_metrics_table(self, masked=False, save_predictions=True):
         """Save per-realisation metrics for the held-out test split."""
         test_ids = self.data_handler.get_split_indices()["test"]
-        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id)
+        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id, "evaluation")
         os.makedirs(out_dir, exist_ok=True)
         csv_path = os.path.join(out_dir, "test_metrics.csv")
 
@@ -376,7 +376,7 @@ class Inference:
 
     def save_test_scatter_plots(self, rows):
         """Save MSE and skewness scatter plots for the held-out test split."""
-        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id)
+        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id, "evaluation")
         os.makedirs(out_dir, exist_ok=True)
 
         def _scatter(
@@ -456,6 +456,7 @@ class Inference:
             save_dir = os.path.join(
                 self.file_templates.output_directories["cmb_prediction"],
                 self.run_id,
+                "ilc_improved_maps",
             )
             filename = os.path.basename(
                 self.file_templates.file_templates["ilc_improved"].format(
@@ -490,11 +491,11 @@ class Inference:
         try:
             chs = "_".join(str(n) for n in self.chs)
             model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}_chs{chs}"
-            save_path = self.file_templates.file_templates["ilc_improved_masked_map"].format(
-                realisation=realisation,
-                lmax=self.lmax,
-                lam=self.lam,
-                model_config=model_config
+            save_path = os.path.join(
+                self.file_templates.output_directories["cmb_prediction"],
+                self.run_id,
+                "ilc_improved_maps",
+                f"masked_ilc_improved_r{int(realisation):04d}_{model_config}.npy",
             )
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             np.save(save_path, cmb_prediction)
