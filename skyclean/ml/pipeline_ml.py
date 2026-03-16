@@ -26,7 +26,7 @@ tf.config.set_visible_devices([], "GPU")
 from skyclean.ml.train import Train
 from skyclean.ml.inference import Inference
 from skyclean.silc.file_templates import FileTemplates
-from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumTT
+from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
 
 
 def find_latest_checkpoint_dir(model_dir: str) -> str:
@@ -394,7 +394,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
     }
 
     # 4) cross-spectra: ilc vs processed_cmb (MW x HEALPix) -> C_ell
-    ell_cross_ilc, cl_cross_ilc = PowerSpectrumTT.from_any_alms(
+    ell_cross_ilc, cl_cross_ilc = PowerSpectrumCrossTT.from_any_alms(
         alm_X = out_synth["alm"],
         fmt_X = "mw",
         alm_Y = out_proc["alm"],
@@ -407,7 +407,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
     }
 
     # 5) cross-spectra: ml vs processed_cmb (MW x HEALPix) -> C_ell
-    ell_cross_ml, cl_cross_ml = PowerSpectrumTT.from_any_alms(
+    ell_cross_ml, cl_cross_ml = PowerSpectrumCrossTT.from_any_alms(
         alm_X = alm_mw,
         fmt_X = "mw",
         alm_Y = out_proc["alm"],
