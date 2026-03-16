@@ -324,11 +324,8 @@ class ProcessMaps():
                     save_map(output_path, hp_map_reduced, self.overwrite)
             print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
             print(f"Shape of component '{comp}': {hp_map_reduced.shape}")
-            hp.mollview(
-                hp_map_reduced,
-                title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)",
-            )
-            plt.show()
+            #hp.mollview(hp_map_reduced,title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)",)
+            #plt.show()
             cfn += hp_map_reduced
         return cfn
 
@@ -480,12 +477,9 @@ class ProcessMaps():
             if return_components and comp == "extra_feature":
                 # Only expose the processed extra-feature map (not other components).
                 processed_component_maps["extra_feature"] = np.asarray(hp_map_reduced, dtype=np.float64)
-            hp.mollview(
-                hp_map_reduced,
-                title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)",
-            )
-            plt.show()
-            print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
+            #hp.mollview(hp_map_reduced,title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)",)
+            #plt.show()
+            #print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
             cfn += hp_map_reduced
         if return_components:
             return cfn, processed_component_maps
