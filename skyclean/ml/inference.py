@@ -388,6 +388,8 @@ class Inference:
             filename,
             origin_zero=False,
             double_max=False,
+            figsize=(6, 6),
+            diag_label=None,
         ):
             x = np.asarray([row[x_key] for row in rows], dtype=float)
             y = np.asarray([row[y_key] for row in rows], dtype=float)
@@ -400,7 +402,7 @@ class Inference:
             lo = float(min(np.min(x), np.min(y)))
             hi = float(max(np.max(x), np.max(y)))
             if origin_zero:
-                lo = min(0.0, lo)
+                lo = 0.0
             if double_max:
                 hi = max(0.0, hi) * 2.0
             if np.isclose(lo, hi):
@@ -408,15 +410,18 @@ class Inference:
                 lo -= pad
                 hi += pad
 
-            fig, ax = plt.subplots(figsize=(6, 6))
-            ax.scatter(x, y, s=36, alpha=0.8)
-            ax.plot([lo, hi], [lo, hi], "k--", linewidth=1)
-            ax.set_xlim(lo, hi)
-            ax.set_ylim(lo, hi)
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.scatter(x, y, s=36, alpha=0.5)
+            hi_plot = hi * 1.1 if origin_zero else hi
+            ax.plot([lo, hi_plot], [lo, hi_plot], "k--", linewidth=1, label=diag_label)
+            ax.set_xlim(lo, hi_plot)
+            ax.set_ylim(lo, hi_plot)
             ax.set_title(title)
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabel)
             ax.grid(True, alpha=0.3)
+            if diag_label is not None:
+                ax.legend()
             fig.tight_layout()
 
             plot_path = os.path.join(out_dir, filename)
@@ -427,10 +432,13 @@ class Inference:
         _scatter(
             "mse_ilc",
             "mse_ml",
-            "Test MSE Scatter",
+            "MSE comparison",
             "ILC MSE [μK^2]",
             "ML MSE [μK^2]",
             "mse_scatter.png",
+            origin_zero=True,
+            figsize=(7, 4),
+            diag_label="y=x",
         )
         _scatter(
             "skew_ilc",

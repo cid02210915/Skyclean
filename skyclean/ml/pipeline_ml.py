@@ -248,7 +248,9 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
       - processed_cmb (HEALPix)
       - ilc_synth (MW)
       - ilc_improved (MW)
-    using the same core flow as SILC step_power_spec: map -> alm -> C_ell -> D_ell.
+    Also compute cross power spectra for:
+      - ilc vs processed_cmb (MW x HEALPix)
+      - ml vs processed_cmb (MW x HEALPix)
 
     Returns
     -------
@@ -257,6 +259,8 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
           "processed_cmb": {"ell", "cl", "path"},
           "ilc_synth":     {"ell", "cl", "path"},
           "ilc_improved":  {"ell", "cl", "path"},
+          "ilc-cmb":       {"ell", "cl", "path"},
+          "ml-cmb":        {"ell", "cl", "path"},
         }
     """
 
@@ -285,7 +289,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
 
     results = {}
 
-    # 1) processed_cmb (HEALPix) -> alm -> C_ell
+    # 1) auto-spectra: processed_cmb (HEALPix) -> alm -> C_ell
     out_proc = conv.to_alm(
         component="cmb",
         source="processed",
@@ -300,7 +304,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         "path": out_proc["path"],
     }
 
-    # 2) ilc_synth (MW) -> alm -> C_ell
+    # 2) auto-spectra: ilc_synth (MW) -> alm -> C_ell
     out_synth = conv.to_alm(
         component=args.component,
         source="ilc_synth",
@@ -321,7 +325,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
     }
 
 
-    # 3) ilc_improved (MW) -> alm -> C_ell
+    # 3) auto-spectra: ilc_improved (MW) -> alm -> C_ell
     improved_filename = os.path.basename(ft["ilc_improved"].format(
         mode=mode,
         extract_comp=args.extract_comp,
@@ -389,6 +393,32 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         "path": improved_map_path,
     }
 
+    # 4) cross-spectra: ilc vs processed_cmb (MW x HEALPix) -> C_ell
+    ell_cross_ilc, cl_cross_ilc = PowerSpectrumTT.from_any_alms(
+        alm_X = out_synth["alm"],
+        fmt_X = "mw",
+        alm_Y = out_proc["alm"],
+        fmt_Y = "healpy",
+    )
+    results["ilc-cmb"] = {
+        "ell": ell_cross_ilc,
+        "cl": cl_cross_ilc,
+        "path": out_synth["path"],
+    }
+
+    # 5) cross-spectra: ml vs processed_cmb (MW x HEALPix) -> C_ell
+    ell_cross_ml, cl_cross_ml = PowerSpectrumTT.from_any_alms(
+        alm_X = alm_mw,
+        fmt_X = "mw",
+        alm_Y = out_proc["alm"],
+        fmt_Y = "healpy",
+    )
+    results["ml-cmb"] = {
+        "ell": ell_cross_ml,
+        "cl": cl_cross_ml,
+        "path": improved_map_path,
+    }
+
     return results
 
 def step_evaluate(args, ckpt_dir: str | None = None):
@@ -424,8 +454,38 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
     test_ids = inference.data_handler.get_split_indices()["test"]
     print(f"[evaluate] Predicting CMB for {len(test_ids)} test realisations...")
-    metrics_rows = inference.save_test_metrics_table(save_predictions=True)
-    inference.save_test_scatter_plots(metrics_rows)
+    mode = "con" if args.constraint else "uncon"
+    freq_tag = "_".join(str(x) for x in args.frequencies)
+    chs = "_".join(str(n) for n in args.chs)
+    lam_str = f"{float(args.lam):.1f}"
+    save_dir = os.path.join(inference.file_templates.output_directories["cmb_prediction"], args.run_id, "ilc_improved_maps")
+    missing_prediction = False
+    for realisation in test_ids:
+        filename = os.path.basename(inference.file_templates.file_templates["ilc_improved"].format(
+            mode=mode,
+            extract_comp=args.extract_comp,
+            component=args.component,
+            frequencies=freq_tag,
+            realisation=int(realisation),
+            lmax=int(args.lmax),
+            lam=lam_str,
+            nsamp=int(args.nsamp),
+            rn=int(args.realisations),
+            batch=int(args.batch_size),
+            epochs=int(args.epochs),
+            lr=args.learning_rate,
+            momentum=args.momentum,
+            chs=chs,
+        ))
+        if not os.path.exists(os.path.join(save_dir, filename)):
+            missing_prediction = True
+            break
+
+    if missing_prediction:
+        metrics_rows = inference.save_test_metrics_table(save_predictions=True)
+        inference.save_test_scatter_plots(metrics_rows)
+    else:
+        print("[evaluate] Existing CMB prediction files found for all test realisations; skipping prediction generation.")
 
     ratio_ilc_all = []
     ratio_ml_all = []
@@ -443,6 +503,8 @@ def step_evaluate(args, ckpt_dir: str | None = None):
             processed_cmb_cl=np.asarray(spec["processed_cmb"]["cl"], dtype=float),
             ilc_synth_cl=np.asarray(spec["ilc_synth"]["cl"], dtype=float),
             ilc_improved_cl=np.asarray(spec["ilc_improved"]["cl"], dtype=float),
+            ilc_cmb_cl=np.asarray(spec["ilc-cmb"]["cl"], dtype=float),
+            ml_cmb_cl=np.asarray(spec["ml-cmb"]["cl"], dtype=float),
         )
         print(f"[evaluate] wrote component spectra bundle: {bundle_path}")
 
@@ -483,31 +545,31 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     import matplotlib.pyplot as plt
 
     plot_path = os.path.join(out_dir, "mean_ratio_spectra.png")
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(ell, ratio_ilc_mean, label="ILC mean", color="tab:orange")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(ell, ratio_ilc_mean, label="ILC Synth / Observed", color="blue")
     ax.fill_between(
         ell,
         ratio_ilc_mean - ratio_ilc_std,
         ratio_ilc_mean + ratio_ilc_std,
-        color="tab:orange",
-        alpha=0.2,
-        label="ILC std",
+        color="blue",
+        alpha=0.1,
     )
-    ax.plot(ell, ratio_ml_mean, label="ML mean", color="tab:blue")
+    ax.plot(ell, ratio_ml_mean, label="ML Improved / Observed", color="red")
     ax.fill_between(
         ell,
         ratio_ml_mean - ratio_ml_std,
         ratio_ml_mean + ratio_ml_std,
-        color="tab:blue",
-        alpha=0.2,
-        label="ML std",
+        color="red",
+        alpha=0.1,
     )
-    ax.axhline(1.0, color="k", linestyle="--", linewidth=1)
-    ax.set_xlabel(r"$\ell$")
-    ax.set_ylabel("Ratio to processed CMB")
-    ax.set_title(f"Component Ratio Spectra Across Test Realisations")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.axhline(1.0, color="grey", linestyle=":", linewidth=1)
+    ax.set_ylim(0.95, 1.05)
+    ax.set_xlim(2, 250)
+    ax.set_xlabel(r"$\ell$", fontsize=14)
+    ax.set_ylabel(r"$C_\ell^{\mathrm{ratio}}$", fontsize=14)
+    ax.set_title(f"Power Spectrum Ratio with Uncertainty ({args.run_id})", fontsize=15)
+    ax.grid(True, which="both", linestyle=":", linewidth=0.5)
+    ax.legend(fontsize=14)
     fig.tight_layout()
     fig.savefig(plot_path, dpi=250, bbox_inches="tight")
     plt.close(fig)
