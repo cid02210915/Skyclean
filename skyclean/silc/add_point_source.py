@@ -87,7 +87,7 @@ def build_catalog_from_reference_map(
     Build a point source catalogue from a reference map by connected components.
 
     Returns a dict with:
-      label, npix, val(sum), peak, peak_pix, lon_deg, lat_deg, rad_deg
+      label, npix, val(sum), peak, peak_pix, theta, phi, lon_deg, lat_deg, rad_deg
     """
     nside = hp.get_nside(hp_map)
     pixarea_sr = hp.nside2pixarea(nside)
@@ -103,6 +103,8 @@ def build_catalog_from_reference_map(
             "val": np.array([], dtype=np.float64),
             "peak": np.array([], dtype=np.float64),
             "peak_pix": np.array([], dtype=np.int64),
+            "theta": np.array([], dtype=np.float64),
+            "phi": np.array([], dtype=np.float64),
             "lon_deg": np.array([], dtype=np.float64),
             "lat_deg": np.array([], dtype=np.float64),
             "rad_deg": np.array([], dtype=np.float64),
@@ -144,6 +146,8 @@ def build_catalog_from_reference_map(
         "val": sum_per.astype(np.float64),
         "peak": peak_val.astype(np.float64),
         "peak_pix": peak_pix.astype(np.int64),
+        "theta": theta.astype(np.float64),
+        "phi": phi.astype(np.float64),
         "lon_deg": lon_deg.astype(np.float64),
         "lat_deg": lat_deg.astype(np.float64),
         "rad_deg": rad_deg.astype(np.float64),
@@ -202,10 +206,6 @@ def select_sources(
     if N >= idx.size:
         return idx.astype(np.int64)
     return rng.choice(idx, size=N, replace=False).astype(np.int64)
-
-
-def scale_radius_deg(rad_deg: np.ndarray, scale: np.ndarray | float) -> np.ndarray:
-    return np.asarray(rad_deg, dtype=np.float64) * np.asarray(scale, dtype=np.float64)
 
 
 def sum_selected_pixels_by_udgrade_region(
@@ -348,7 +348,7 @@ class PointSource:
             raise ValueError("frequencies is empty")
 
         frequencies = self.frequencies
-        ref_fre = frequencies[0]
+        ref_fre = frequencies[2]
 
         # --- reference map -> catalogue ---
         ref_path = self._path_for_freq(ref_fre)
@@ -378,6 +378,8 @@ class PointSource:
             raise ValueError("ps_radius_range must satisfy min <= max.")
 
         # fixed per-source geometry from reference catalogue
+        theta_sel = cat["theta"][idx_sel].astype(np.float64)
+        phi_sel = cat["phi"][idx_sel].astype(np.float64)
         lon_sel = cat["lon_deg"][idx_sel].astype(np.float64)
         lat_sel = cat["lat_deg"][idx_sel].astype(np.float64)
         rad_sel = cat["rad_deg"][idx_sel].astype(np.float64)
@@ -400,10 +402,7 @@ class PointSource:
             label_of_pix, sum_per = precompute_component_sums(m, nest=self.nest, threshold=self.threshold)
             nside = hp.get_nside(m)
 
-            # vectorised seed pixels
-            theta = np.deg2rad(90.0 - lat_sel)
-            phi = np.deg2rad(lon_sel)
-            seed_pix = hp.ang2pix(nside, theta, phi, nest=self.nest).astype(np.int64)
+            seed_pix = hp.ang2pix(nside, theta_sel, phi_sel, nest=self.nest).astype(np.int64)
 
             labs = label_of_pix[seed_pix]
             vals = np.zeros(labs.size, dtype=np.float64)
@@ -414,25 +413,24 @@ class PointSource:
 
         results = pd.DataFrame(out)
 
-        # Use a display copy for the printed table; keep returned values in single-scaled physical units.
-        display_results = results.copy()
-        display_results["rad_deg"] = scale_radius_deg(
-            display_results["rad_deg"].to_numpy(dtype=np.float64),
-            radius_scales,
-        )
+        # apply same brightness scaling to all ps across all frequencies, to preserve SED shapes
         for fre in frequencies:
             col = f"val_{fre}"
-            display_results[col] = (display_results[col].to_numpy(dtype=np.float64) * self.ps_brightness_scale)
-        print_results_table(display_results, self.ps_component, frequencies) 
+            results[col] = (results[col].to_numpy(dtype=np.float64) * self.ps_brightness_scale)
+        # apply random radius scaling to each ps
+        results["rad_deg"] = (results["rad_deg"].to_numpy(dtype=np.float64) * radius_scales)
+
+        # print the resulting catalogue
+        print_results_table(results, self.ps_component, frequencies) 
 
         # output arrays for injection
-        sed_lists = create_sed_lists_from_results(results, frequencies)
-        val_list = results[f"val_{ref_fre}"].to_numpy(dtype=np.float64)
-        theta_list = np.deg2rad(90.0 - results["lat_deg"].to_numpy(dtype=np.float64))
-        phi_list = np.deg2rad(results["lon_deg"].to_numpy(dtype=np.float64))
-        rad_list = scale_radius_deg(results["rad_deg"].to_numpy(dtype=np.float64), radius_scales)
+        theta_list = theta_sel
+        phi_list = phi_sel
+        rad_list = results["rad_deg"].to_numpy(dtype=np.float64)
+        #sed_lists = create_sed_lists_from_results(results, frequencies)
+        sed_lists = results[[f"val_{fre}" for fre in frequencies]].to_numpy(dtype=float).tolist()
 
-        return theta_list, phi_list, rad_list, val_list, sed_lists
+        return theta_list, phi_list, rad_list, sed_lists
 
 
 class CircularPSInjector:

@@ -617,7 +617,7 @@ class ProcessMaps():
             i=0
             realisation += self.start_realisation  # Adjust for starting realisation
             if 'extra_feature' in self.components:
-                center_theta, center_phi, radius_deg, _, sed_lists = self.ps.create_and_output_catalogue()
+                center_theta, center_phi, radius_deg, sed_lists = self.ps.create_and_output_catalogue()
                 center_pix = hp.ang2pix(target_nside, center_theta, center_phi).astype(np.int64)
                 center_pixel_sed = np.full((len(center_theta), len(frequencies)), np.nan, dtype=np.float64)
                 if self.ps_injection_mode == "pixel_ps":
