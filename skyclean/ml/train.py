@@ -236,7 +236,7 @@ class Train:
         """Copy a checkpoint into the canonical checkpoint_<epoch> directory."""
         outdir = self._get_epoch_output_dir(epoch)
         outdir.mkdir(parents=True, exist_ok=True)
-        dst_ckpt = outdir / checkpoint_path.name
+        dst_ckpt = self._get_ckpt_path(epoch)
         if checkpoint_path.resolve() != dst_ckpt.resolve():
             shutil.copy2(checkpoint_path, dst_ckpt)
         return dst_ckpt
@@ -258,7 +258,7 @@ class Train:
             # 3. 只用你环境里绝对有的flax.serialization保存
             bytes_data = serialization.to_bytes(ckpt_data)
 
-            ckpt_path = self._get_ckpt_path(epoch)
+            ckpt_path = Path(self.model_dir) / "checkpoint_latest.msgpack"
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
             with open(ckpt_path, "wb") as f:
                 f.write(bytes_data)
@@ -275,12 +275,12 @@ class Train:
         try:
             latest_dir, latest_file, latest_epoch = resolve_checkpoint_target(self.model_dir)
         except FileNotFoundError:
-            print("[Checkpoint] No checkpoint directories found, starting from epoch 0.")
-            return 0
+            raise FileNotFoundError(f"[Checkpoint] Resume requested but no checkpoint could be resolved under: {self.model_dir}")
 
         print(f"[Checkpoint] Loading from {latest_file}")
         try:
-            # 1. 构建与保存时一致的纯 dict 模板
+            # Build the template from the joint split because the serialized optimizer
+            # state shape differs from splitting the optimizer in isolation.
             _, empty_state = nnx.split((model, optimizer))
             pure_state = nnx.to_pure_dict(empty_state)
             template = {
@@ -295,18 +295,22 @@ class Train:
 
             restored = serialization.from_bytes(template, bytes_data)
 
-            # 3. 用纯 dict 恢复 state，再写回模型和优化器
-            nnx.replace_by_pure_dict(empty_state, (restored["model"], restored["opt"]))
+            restored_epoch = restored["epoch"]
+            if int(restored_epoch) != int(latest_epoch):
+                raise ValueError(
+                    f"[Checkpoint] Loaded epoch {restored_epoch} does not match latest detected epoch {latest_epoch} "
+                    f"from {latest_file}")
+
+            # Restore each piece into the joint split layout saved in the checkpoint.
+            nnx.replace_by_pure_dict(empty_state[0], restored["model"])
+            nnx.replace_by_pure_dict(empty_state[1], restored["opt"])
             nnx.update((model, optimizer), empty_state)
 
-            print(f"[Checkpoint] Loaded successfully from epoch {restored['epoch']}")
-            return restored["epoch"]
+            print(f"[Checkpoint] Loaded successfully from epoch {restored_epoch}")
+            return restored_epoch
 
         except Exception as e:
-            print(f"[WARN] Failed to load checkpoint: {e}")
-            import traceback
-            traceback.print_exc()
-            return 0
+            raise RuntimeError(f"[Checkpoint] Failed to load resume checkpoint from {latest_file}") from e
 
     # ========== 补全所有辅助方法 ==========
     def save_run_config(self, config: dict) -> str:
@@ -353,7 +357,6 @@ class Train:
         """Save training metrics history to disk."""
         os.makedirs(self.model_dir, exist_ok=True)
         np.save(self._training_log_path(), metrics_history)
-        print(f"[Log] Training metrics saved to {self._training_log_path()}")
 
     def _early_stopping_state_from_history(self, metrics_history: dict) -> tuple[float, int, int | None]:
         """Recover early-stopping state from saved validation-loss history."""
@@ -404,8 +407,10 @@ class Train:
             print("[Plot] Skipping final example plot because the test split is empty.")
 
         if latest_checkpoint_saved and latest_checkpoint_epoch is not None:
-            latest_ckpt = self._get_ckpt_path(latest_checkpoint_epoch)
-            exported_path = self._export_checkpoint_to_epoch_dir(latest_ckpt, final_epoch)
+            latest_ckpt = Path(self.model_dir) / "checkpoint_latest.msgpack"
+            self._export_checkpoint_to_epoch_dir(latest_ckpt, final_epoch)
+            if latest_ckpt.is_file():
+                latest_ckpt.unlink()
 
         summary = {
             "final_epoch": final_epoch,
@@ -694,11 +699,8 @@ class Train:
                     best_eval_loss = current_eval_loss
                     epochs_without_improvement = 0
                     best_epoch = epoch
-                    best_checkpoint_saved = self.save_model(model, optimizer, epoch)
-                    if best_checkpoint_saved:
-                        print(
-                            f"[EarlyStopping] New best val loss {best_eval_loss:.6f} at epoch {epoch}."
-                        )
+                    best_checkpoint_saved = True
+                    print(f"[EarlyStopping] New best val loss {best_eval_loss:.6f} at epoch {epoch}.")
                 else:
                     epochs_without_improvement += 1
                     print(
@@ -729,6 +731,7 @@ class Train:
 
             # Save intermediate log
             self._save_training_log(metrics_history)
+            self.save_model(model, optimizer, epoch)
             final_epoch = epoch
 
             if do_eval and epochs_without_improvement >= self.early_stopping_patience:
