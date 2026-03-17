@@ -23,51 +23,10 @@ import glob
 import tensorflow as tf
 tf.config.set_visible_devices([], "GPU")
 
-from skyclean.ml.train import Train
+from skyclean.ml.train import Train, resolve_checkpoint_target
 from skyclean.ml.inference import Inference
 from skyclean.silc.file_templates import FileTemplates
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
-
-
-def find_latest_checkpoint_dir(model_dir: str) -> str:
-    model_dir = Path(model_dir)
-    if not model_dir.exists():
-        raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
-
-    pat = re.compile(r"^checkpoint_(\d+)$")
-    candidates = []
-    for p in model_dir.iterdir():
-        if not p.is_dir():
-            continue
-        m = pat.match(p.name)
-        if not m:
-            continue
-        # Accept Orbax or fallback serializer checkpoints, skip plot-only folders.
-        names = {x.name for x in p.iterdir()}
-        valid = (
-            (p / "_METADATA").exists()
-            or (p / "_CHECKPOINT_METADATA").exists()
-            or (p / "state.msgpack").exists()
-            or any(n not in {"prediction.png", "training_metrics.png", "training_log.npy", "spectrum.png"} for n in names)
-        )
-        if valid:
-            candidates.append((int(m.group(1)), p))
-
-    if not candidates:
-        raise FileNotFoundError(
-            f"No valid checkpoint_<epoch> folders found in {model_dir}. "
-            f"Expected: {model_dir}/checkpoint_<epoch>"
-        )
-
-    candidates.sort(key=lambda t: t[0])
-    epoch, ckpt_path = candidates[-1]
-    print(f"[checkpoint] Latest checkpoint detected: epoch={epoch}, path={ckpt_path}")
-    return str(ckpt_path)
-
-
-def resolve_model_dir_from_directory(directory: str) -> str:
-    files = FileTemplates(directory)
-    return os.path.abspath(files.output_directories["ml_models"])
 
 
 def resolve_evaluate_target(args) -> str:
@@ -78,22 +37,20 @@ def resolve_evaluate_target(args) -> str:
     - `--model-dir` pointing to a run directory containing checkpoint_* folders
     - `--model-dir` pointing directly to a checkpoint_* directory
     - `--run-id` pointing to ML/models/<run_id>
-    - no `--run-id`, in which case ML/models itself is searched
     """
     if args.model_dir.strip():
         return os.path.abspath(args.model_dir.strip())
 
-    base_model_dir = resolve_model_dir_from_directory(args.directory)
+    files = FileTemplates(args.directory)
     run_id = args.run_id.strip()
     if not run_id:
-        return base_model_dir
-
+        raise ValueError("Evaluation requires either --run-id or --model-dir.")
+    base_model_dir = os.path.abspath(files.output_directories["ml_models"])
     run_dir = os.path.join(base_model_dir, run_id)
     if not os.path.isdir(run_dir):
         raise FileNotFoundError(
             f"Run directory does not exist: {run_dir}. "
-            "With --run-id, checkpoints are expected under ML/models/<run_id>/checkpoint_<epoch>."
-        )
+            "With --run-id, checkpoints are expected under ML/models/<run_id>/checkpoint_<epoch>.")
     return run_dir
 
 
@@ -296,7 +253,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         realisation=realisation,
         lmax=lmax,
     )
-    print(f"[spectrum] loading processed_cmb map from: {out_proc['path']}")
+    print(f"[Spectrum] loading processed_cmb map from: {out_proc['path']}")
     ell_proc, cl_proc = PowerSpectrumTT.from_healpy_alm(out_proc["alm"])
     results["processed_cmb"] = {
         "ell": ell_proc,
@@ -316,7 +273,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         nsamp=nsamp,
         constraint=args.constraint,
     )
-    print(f"[spectrum] loading ilc_synth map from: {out_synth['path']}")
+    print(f"[Spectrum] loading ilc_synth map from: {out_synth['path']}")
     ell_synth, cl_synth = PowerSpectrumTT.from_mw_alm(np.asarray(out_synth["alm"]))
     results["ilc_synth"] = {
         "ell": ell_synth,
@@ -342,15 +299,21 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         momentum=args.momentum,
         chs=chs,
     ))
+    if args.checkpoint_epoch is None:
+        raise ValueError("[spectrum] checkpoint_epoch is required for checkpoint-layered ML prediction paths.")
     improved_map_path = os.path.join(
-        files.output_directories["cmb_prediction"], args.run_id, "ilc_improved_maps", improved_filename
+        files.output_directories["cmb_prediction"],
+        args.run_id,
+        "ilc_improved_maps",
+        f"checkpoint_{int(args.checkpoint_epoch)}",
+        improved_filename.replace(".npy", f"_ckpt{int(args.checkpoint_epoch)}.npy"),
     )
-    print(f"[spectrum] loading ilc_improved map from: {improved_map_path}")
+    print(f"[Spectrum] loading ilc_improved map from: {improved_map_path}")
     if not os.path.exists(improved_map_path):
         if ckpt_dir is None:
-            raise FileNotFoundError(f"[spectrum] improved map not found: {improved_map_path}. ")
+            raise FileNotFoundError(f"[Spectrum] improved map not found: {improved_map_path}. ")
 
-        print("[spectrum] ML map missing. Generating it via existing inference pipeline...")
+        print("[Spectrum] ML map missing. Generating it via existing inference pipeline...")
         inference = Inference(
             extract_comp=args.extract_comp,
             component=args.component,
@@ -425,6 +388,16 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     """
     Load latest checkpoint and save predictions for the held-out test split.
     """
+    checkpoint_epoch = args.checkpoint_epoch
+    if checkpoint_epoch is None and ckpt_dir is not None:
+        ckpt_name = os.path.basename(os.path.normpath(ckpt_dir))
+        ckpt_match = re.match(r"checkpoint_(\d+)$", ckpt_name)
+        if ckpt_match is not None:
+            checkpoint_epoch = int(ckpt_match.group(1))
+        else:
+            file_match = re.match(r"checkpoint_epoch_(\d+)\.msgpack$", ckpt_name)
+            if file_match is not None:
+                checkpoint_epoch = int(file_match.group(1))
 
     inference = Inference(
         extract_comp=args.extract_comp,
@@ -446,19 +419,24 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         momentum=args.momentum,
         run_id=args.run_id,
     )
-
-    print("[evaluate] Loading model from latest checkpoint...")
     model = inference.load_model(force_load=True)
     if not model:
-        raise RuntimeError("[evaluate] Model failed to load (load_model returned falsy).")
+        raise RuntimeError("[Evaluate] Model failed to load (load_model returned falsy).")
 
     test_ids = inference.data_handler.get_split_indices()["test"]
-    print(f"[evaluate] Predicting CMB for {len(test_ids)} test realisations...")
+    print(f"[Evaluate] Predicting CMB for {len(test_ids)} test realisations...")
     mode = "con" if args.constraint else "uncon"
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
-    save_dir = os.path.join(inference.file_templates.output_directories["cmb_prediction"], args.run_id, "ilc_improved_maps")
+    if checkpoint_epoch is None:
+        raise ValueError("[Evaluate] checkpoint_epoch is required for checkpoint-layered prediction outputs.")
+    save_dir = os.path.join(
+        inference.file_templates.output_directories["cmb_prediction"],
+        args.run_id,
+        "ilc_improved_maps",
+        f"checkpoint_{checkpoint_epoch}",
+    )
     missing_prediction = False
     for realisation in test_ids:
         filename = os.path.basename(inference.file_templates.file_templates["ilc_improved"].format(
@@ -477,6 +455,8 @@ def step_evaluate(args, ckpt_dir: str | None = None):
             momentum=args.momentum,
             chs=chs,
         ))
+        stem, ext = os.path.splitext(filename)
+        filename = f"{stem}_ckpt{checkpoint_epoch}{ext}"
         if not os.path.exists(os.path.join(save_dir, filename)):
             missing_prediction = True
             break
@@ -489,12 +469,18 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
     ratio_ilc_all = []
     ratio_ml_all = []
-    out_dir = os.path.join(inference.file_templates.output_directories["cmb_prediction"], args.run_id, "evaluation")
+    out_dir = os.path.join(
+        inference.file_templates.output_directories["cmb_prediction"],
+        args.run_id,
+        "evaluation",
+        f"checkpoint_{checkpoint_epoch}",
+    )
     os.makedirs(out_dir, exist_ok=True)
 
     for realisation in test_ids:
         spec_args = argparse.Namespace(**vars(args))
         spec_args.realisation = int(realisation)
+        spec_args.checkpoint_epoch = checkpoint_epoch
         spec = generate_spectrum_for_one(spec_args, ckpt_dir=ckpt_dir)
         bundle_path = os.path.join(out_dir, f"component_spectra_r{int(realisation):04d}.npz")
         np.savez(
@@ -506,15 +492,12 @@ def step_evaluate(args, ckpt_dir: str | None = None):
             ilc_cmb_cl=np.asarray(spec["ilc-cmb"]["cl"], dtype=float),
             ml_cmb_cl=np.asarray(spec["ml-cmb"]["cl"], dtype=float),
         )
-        print(f"[evaluate] wrote component spectra bundle: {bundle_path}")
+        print(f"[Evaluate] wrote component spectra: {bundle_path}")
 
         ell = np.asarray(spec["processed_cmb"]["ell"], dtype=float)
         cl_processed = np.asarray(spec["processed_cmb"]["cl"], dtype=float)
-        print(f'range of processed_cmb C_ell: {cl_processed.min():.3e} to {cl_processed.max():.3e}')
         cl_ilc_synth = np.asarray(spec["ilc_synth"]["cl"], dtype=float)
-        print(f'range of ilc_synth C_ell: {cl_ilc_synth.min():.3e} to {cl_ilc_synth.max():.3e}')
         cl_ilc_improved = np.asarray(spec["ilc_improved"]["cl"], dtype=float)
-        print(f'range of ilc_improved C_ell: {cl_ilc_improved.min():.3e} to {cl_ilc_improved.max():.3e}')
 
         ratio_ilc = cl_ilc_synth / cl_processed
         ratio_ml = cl_ilc_improved / cl_processed
@@ -540,7 +523,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         ratio_ml_mean=ratio_ml_mean,
         ratio_ml_std=ratio_ml_std,
     )
-    print(f"[evaluate] wrote ratio spectra over {len(test_ids)} test realisations: {ratio_npz}")
+    print(f"[Evaluate] wrote ratio spectra over {len(test_ids)} test realisations: {ratio_npz}")
 
     import matplotlib.pyplot as plt
 
@@ -564,7 +547,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     )
     ax.axhline(1.0, color="grey", linestyle=":", linewidth=1)
     ax.set_ylim(0.95, 1.05)
-    ax.set_xlim(2, 250)
+    ax.set_xlim(2, ell.max())
     ax.set_xlabel(r"$\ell$", fontsize=14)
     ax.set_ylabel(r"$C_\ell^{\mathrm{ratio}}$", fontsize=14)
     ax.set_title(f"Power Spectrum Ratio with Uncertainty ({args.run_id})", fontsize=15)
@@ -573,30 +556,14 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     fig.tight_layout()
     fig.savefig(plot_path, dpi=250, bbox_inches="tight")
     plt.close(fig)
-    print(f"[evaluate] wrote ratio plot for {len(test_ids)} test realisations: {plot_path}")
+    print(f"[Evaluate] wrote ratio plot for {len(test_ids)} test realisations: {plot_path}")
     
     return test_ids
 
 
 def resolve_checkpoint_dir(args, model_dir: str) -> str:
-    model_path = Path(model_dir)
-    direct_ckpt_pat = re.compile(r"^checkpoint_(\d+)$")
-
-    if model_path.is_dir() and direct_ckpt_pat.match(model_path.name):
-        return str(model_path)
-
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"Run directory does not exist: {model_dir}. "
-            "Evaluation with --run-id requires an existing ML/models/<run_id> directory."
-        )
-
-    if args.checkpoint_epoch is not None:
-        ckpt_dir = os.path.join(model_dir, f"checkpoint_{args.checkpoint_epoch}")
-        if not os.path.isdir(ckpt_dir):
-            raise FileNotFoundError(f"Requested checkpoint does not exist: {ckpt_dir}")
-        return ckpt_dir
-    return find_latest_checkpoint_dir(model_dir)
+    ckpt_dir, _, _ = resolve_checkpoint_target(model_dir, epoch=args.checkpoint_epoch)
+    return str(ckpt_dir)
 
 
 def main():
@@ -605,36 +572,43 @@ def main():
     print(f"JAX 64-bit mode: {jax.config.jax_enable_x64}")
 
     args = parse_args()
+    if args.resume_training and args.mode not in {"train", "train+evaluate"}:
+        raise ValueError(
+            "--resume-training is only valid when --mode is 'train' or 'train+evaluate'."
+        )
+    if args.mode == "evaluate" and not args.run_id.strip() and not args.model_dir.strip():
+        raise ValueError(
+            "Evaluate mode requires either --run-id or --model-dir."
+        )
 
     model_dir_from_train = None
 
     if args.mode == "train":
-        print("[train] Starting training...")
+        print("[Train] Starting training...")
         model_dir_from_train = step_train(args)
-        print(f"[train] Done.")
+        print(f"[Train] Done.")
 
     if args.mode == "train+evaluate":
-        print("[train] Starting training...")
+        print("[Train] Starting training...")
         model_dir_from_train = step_train(args)
-        print(f"[train] Done.")
-        print("[evaluate] Starting evaluation...")
+        print(f"[Train] Done.")
+        print("[Evaluate] Starting evaluation...")
         ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
         step_evaluate(args, ckpt_dir=ckpt_dir)
-        print("[evaluate] Done.")
+        print("[Evaluate] Done.")
 
     if args.mode == "evaluate":
-        print("[evaluate] Starting evaluation...")
+        print("[Evaluate] Starting evaluation...")
         model_dir_from_train = resolve_evaluate_target(args)
         print(f"Model directory: {model_dir_from_train}")
         ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
-        print(f'loaded model from: {ckpt_dir}')
+        print(f'Loaded model from: {ckpt_dir}')
         step_evaluate(args, ckpt_dir=ckpt_dir)
-        print("[evaluate] Done.")
+        print("[Evaluate] Done.")
 
-    print("[done] Pipeline complete.")
     elapsed_seconds = time.perf_counter() - start_time
     elapsed_minutes = elapsed_seconds / 60.0
-    print(f"[time] Total pipeline time: {elapsed_minutes:.2f} minutes")
+    print(f"[Time] Total pipeline time: {elapsed_minutes:.2f} minutes")
 
 
 if __name__ == "__main__":
@@ -643,4 +617,5 @@ if __name__ == "__main__":
 
 # Example usage:
 # 030 044 070 100 143 217 353 545 857
-# python3 -m skyclean.ml.pipeline_ml --mode evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 7 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 10 --split 0.1 0.1 0.8 --nsamp 1200 --epochs 100 --eval-every 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id CFN_r500_511
+# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 7 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --split 0.3 0.3 0.4 --nsamp 1200 --epochs 2 --eval-every 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id test
+# --resume-training

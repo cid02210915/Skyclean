@@ -29,6 +29,87 @@ from skyclean.silc.utils import create_dir
 from skyclean.silc.file_templates import FileTemplates
 
 
+_CHECKPOINT_DIR_PATTERN = re.compile(r"^checkpoint_(\d+)$")
+
+
+def parse_checkpoint_epoch_from_dir(path: str | Path) -> int | None:
+    """Return the epoch encoded in a checkpoint_<epoch> directory name."""
+    match = _CHECKPOINT_DIR_PATTERN.match(Path(path).name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def checkpoint_dir_for_epoch(run_dir: str | Path, epoch: int) -> Path:
+    """Return the canonical checkpoint_<epoch> directory inside a run."""
+    return Path(run_dir) / f"checkpoint_{int(epoch)}"
+
+
+def checkpoint_file_for_epoch(run_dir: str | Path, epoch: int) -> Path:
+    """Return the canonical checkpoint file path inside a run."""
+    return checkpoint_dir_for_epoch(run_dir, epoch) / f"checkpoint_epoch_{int(epoch)}.msgpack"
+
+
+def find_latest_checkpoint_dir(run_dir: str | Path) -> tuple[Path, int]:
+    """Return the latest checkpoint_<epoch> directory inside a run."""
+    run_path = Path(run_dir)
+    if not run_path.is_dir():
+        raise FileNotFoundError(f"Run directory does not exist: {run_path}")
+    latest_epoch = -1
+    latest_dir = None
+    for path in run_path.iterdir():
+        if not path.is_dir():
+            continue
+        epoch = parse_checkpoint_epoch_from_dir(path)
+        if epoch is None:
+            continue
+        if epoch > latest_epoch:
+            latest_epoch = epoch
+            latest_dir = path
+    if latest_dir is None:
+        raise FileNotFoundError(f"No checkpoint_<epoch> directories found under: {run_path}")
+    return latest_dir, latest_epoch
+
+
+def resolve_checkpoint_dir(run_dir: str | Path, epoch: int | None = None) -> tuple[Path, int]:
+    """Resolve a checkpoint_<epoch> directory inside a run."""
+    if epoch is None:
+        return find_latest_checkpoint_dir(run_dir)
+    ckpt_dir = checkpoint_dir_for_epoch(run_dir, epoch)
+    if not ckpt_dir.is_dir():
+        raise FileNotFoundError(f"Checkpoint directory does not exist: {ckpt_dir}")
+    return ckpt_dir, int(epoch)
+
+
+def resolve_checkpoint_file(run_dir: str | Path, epoch: int | None = None) -> tuple[Path, int]:
+    """Resolve a checkpoint file inside a run."""
+    ckpt_dir, resolved_epoch = resolve_checkpoint_dir(run_dir, epoch)
+    ckpt_file = checkpoint_file_for_epoch(run_dir, resolved_epoch)
+    if not ckpt_file.is_file():
+        raise FileNotFoundError(f"Checkpoint file does not exist: {ckpt_file}")
+    return ckpt_file, resolved_epoch
+
+
+def resolve_checkpoint_target(path: str | Path, epoch: int | None = None) -> tuple[Path, Path, int]:
+    """Resolve a run dir or checkpoint_<epoch> dir to its canonical checkpoint file."""
+    target = Path(path)
+    if not target.exists():
+        raise FileNotFoundError(f"Checkpoint path does not exist: {target}")
+    direct_epoch = parse_checkpoint_epoch_from_dir(target)
+    if direct_epoch is not None:
+        if epoch is not None and int(epoch) != direct_epoch:
+            raise FileNotFoundError(
+                f"Requested checkpoint epoch {int(epoch)} does not match directory: {target}"
+            )
+        ckpt_file = checkpoint_file_for_epoch(target.parent, direct_epoch)
+        if not ckpt_file.is_file():
+            raise FileNotFoundError(f"Checkpoint file does not exist: {ckpt_file}")
+        return target, ckpt_file, direct_epoch
+    ckpt_file, resolved_epoch = resolve_checkpoint_file(target, epoch)
+    ckpt_dir = checkpoint_dir_for_epoch(target, resolved_epoch)
+    return ckpt_dir, ckpt_file, resolved_epoch
+
+
 def _get_physical_id(jax_device_id: int = 0) -> str:
     """Map JAX device ID to physical GPU ID using CUDA_VISIBLE_DEVICES."""
     vis = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -44,10 +125,8 @@ def print_gpu_usage(stage_name: str, jax_device_id: int = 0):
     if not gpus:
         print(f"[GPU Memory] {stage_name}: no GPU visible to JAX")
         return
-
     jax_device_id = min(jax_device_id, len(gpus) - 1)
     phys_id = _get_physical_id(jax_device_id)
-
     try:
         out = subprocess.check_output(
             ["nvidia-smi", f"--id={phys_id}", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
@@ -139,21 +218,38 @@ class Train:
     # ========== 核心：100%兼容flax 0.10.6的Checkpoint逻辑 ==========
     def _get_ckpt_path(self, epoch: int) -> Path:
         """Get path for checkpoint file."""
-        return Path(self.model_dir) / f"checkpoint_epoch_{epoch}.msgpack"
+        return self._get_epoch_output_dir(epoch) / f"checkpoint_epoch_{epoch}.msgpack"
+
+    def _get_epoch_output_dir(self, epoch: int) -> Path:
+        """Get the per-epoch output directory used for plots and exported checkpoints."""
+        return Path(self.model_dir) / f"checkpoint_{epoch}"
+
+    def _find_latest_checkpoint(self) -> tuple[Path | None, int]:
+        """Find the latest saved checkpoint in the run directory or nested epoch folders."""
+        try:
+            latest_file, latest_epoch = resolve_checkpoint_file(self.model_dir)
+        except FileNotFoundError:
+            return None, 0
+        return latest_file, latest_epoch
+
+    def _export_checkpoint_to_epoch_dir(self, checkpoint_path: Path, epoch: int) -> Path:
+        """Copy a checkpoint into the canonical checkpoint_<epoch> directory."""
+        outdir = self._get_epoch_output_dir(epoch)
+        outdir.mkdir(parents=True, exist_ok=True)
+        dst_ckpt = outdir / checkpoint_path.name
+        if checkpoint_path.resolve() != dst_ckpt.resolve():
+            shutil.copy2(checkpoint_path, dst_ckpt)
+        return dst_ckpt
 
     def save_model(self, model, optimizer, epoch) -> bool:
         """用flax原生serialization保存，彻底解决版本兼容问题"""
         try:
             # 1. 拆分模型和优化器，拿到纯state
-            #_, (model_state, opt_state) = nnx.split((model, optimizer))
             _, state = nnx.split((model, optimizer))
             pure_state = nnx.to_pure_dict(state)
 
             # 2. 构建checkpoint字典
             ckpt_data = {
-                #"model": model_state,
-                #"opt": opt_state,
-                #"epoch": epoch
                 "model": pure_state[0],
                 "opt": pure_state[1],
                 "epoch": epoch,
@@ -163,17 +259,10 @@ class Train:
             bytes_data = serialization.to_bytes(ckpt_data)
 
             ckpt_path = self._get_ckpt_path(epoch)
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
             with open(ckpt_path, "wb") as f:
                 f.write(bytes_data)
 
-            # 4. 清理旧checkpoint
-            pat = re.compile(r"checkpoint_epoch_(\d+)\.msgpack$")
-            for f in Path(self.model_dir).iterdir():
-                m = pat.match(f.name)
-                if m and int(m.group(1)) != epoch:
-                    os.remove(f)
-
-            print(f"[Checkpoint] Saved successfully at epoch {epoch} to {ckpt_path}")
             return True
         except Exception as e:
             print(f"[ERROR] Checkpoint save failed at epoch {epoch}: {e}")
@@ -182,36 +271,21 @@ class Train:
             return False
 
     def load_model_for_training(self, model, optimizer) -> int:
-        """加载最新的checkpoint，兼容flax 0.10.6"""
-        model_dir = Path(self.model_dir)
-        if not model_dir.exists():
-            print("[Checkpoint] No model directory found, starting from scratch.")
-            return 0
-
-        # 找最新的checkpoint文件
-        pat = re.compile(r"checkpoint_epoch_(\d+)\.msgpack$")
-        latest_epoch = 0
-        latest_file = None
-
-        for f in model_dir.iterdir():
-            m = pat.match(f.name)
-            if m:
-                ep = int(m.group(1))
-                if ep > latest_epoch:
-                    latest_epoch = ep
-                    latest_file = f
-
-        if latest_file is None:
-            print("[Checkpoint] No checkpoints found, starting from scratch.")
+        """Load the latest checkpoint (flax 0.10.6 compatible)"""
+        try:
+            latest_dir, latest_file, latest_epoch = resolve_checkpoint_target(self.model_dir)
+        except FileNotFoundError:
+            print("[Checkpoint] No checkpoint directories found, starting from epoch 0.")
             return 0
 
         print(f"[Checkpoint] Loading from {latest_file}")
         try:
-            # 1. 构建空模板
-            _, (empty_model_state, empty_opt_state) = nnx.split((model, optimizer))
+            # 1. 构建与保存时一致的纯 dict 模板
+            _, empty_state = nnx.split((model, optimizer))
+            pure_state = nnx.to_pure_dict(empty_state)
             template = {
-                "model": empty_model_state,
-                "opt": empty_opt_state,
+                "model": pure_state[0],
+                "opt": pure_state[1],
                 "epoch": 0
             }
 
@@ -221,8 +295,9 @@ class Train:
 
             restored = serialization.from_bytes(template, bytes_data)
 
-            # 3. 更新回模型和优化器
-            nnx.update((model, optimizer), (restored["model"], restored["opt"]))
+            # 3. 用纯 dict 恢复 state，再写回模型和优化器
+            nnx.replace_by_pure_dict(empty_state, (restored["model"], restored["opt"]))
+            nnx.update((model, optimizer), empty_state)
 
             print(f"[Checkpoint] Loaded successfully from epoch {restored['epoch']}")
             return restored["epoch"]
@@ -307,8 +382,9 @@ class Train:
         test_batch,
         test_realisation_ids,
         final_epoch: int,
-        checkpoint_epoch: int | None,
-        checkpoint_saved: bool,
+        latest_checkpoint_epoch: int | None,
+        latest_checkpoint_saved: bool,
+        best_epoch: int | None,
     ) -> None:
         """Persist final plots, logs, and the selected checkpoint directory."""
         outdir = os.path.join(self.model_dir, f"checkpoint_{final_epoch}")
@@ -327,12 +403,19 @@ class Train:
         else:
             print("[Plot] Skipping final example plot because the test split is empty.")
 
-        if checkpoint_saved and checkpoint_epoch is not None:
-            src_ckpt = self._get_ckpt_path(checkpoint_epoch)
-            dst_ckpt = os.path.join(outdir, src_ckpt.name)
-            if Path(src_ckpt) != Path(dst_ckpt):
-                shutil.copy(src_ckpt, dst_ckpt)
-            print(f"[Checkpoint] Copied to {dst_ckpt}")
+        if latest_checkpoint_saved and latest_checkpoint_epoch is not None:
+            latest_ckpt = self._get_ckpt_path(latest_checkpoint_epoch)
+            exported_path = self._export_checkpoint_to_epoch_dir(latest_ckpt, final_epoch)
+
+        summary = {
+            "final_epoch": final_epoch,
+            "best_epoch": best_epoch,
+            "latest_checkpoint_epoch": latest_checkpoint_epoch,
+        }
+        # Save summary to JSON for easy reference and potential programmatic access
+        summary_path = Path(outdir) / "checkpoint_summary.json"
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
 
     # ========== Loss & Accuracy Functions ==========
     @staticmethod
@@ -513,12 +596,10 @@ class Train:
 
         train_iter, val_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(val_ds))
 
-        print("[Model] Constructing S2_UNET model...")
         model = S2_UNET(L, len(self.frequencies), chs=self.chs, rngs=self.rngs)
         print(f"[Model] Channel configuration: {self.chs}")
         print_gpu_usage("After model creation")
 
-        print("[Optimizer] Configuring Adam optimizer...")
         optimizer = nnx.Optimizer(model, optax.adam(self.learning_rate))
         print_gpu_usage("After optimizer creation")
 
@@ -536,18 +617,21 @@ class Train:
             if loaded_history:
                 metrics_history = loaded_history
                 print(f"[Train] Resumed metrics history from epoch {loaded_epoch}")
+            if loaded_epoch >= self.epochs:
+                print(
+                    f"[Train] Resume checkpoint already reached epoch {loaded_epoch}, "
+                    f"which is >= requested total epochs {self.epochs}. Nothing to do."
+                )
+                return
 
         best_eval_loss, epochs_without_improvement, best_epoch = self._early_stopping_state_from_history(
-            metrics_history
-        )
+            metrics_history)
         best_checkpoint_saved = best_epoch is not None
+        latest_checkpoint_epoch = None
+        latest_checkpoint_saved = False
         final_epoch = start_epoch - 1
 
-        print("[Metrics] Configuring training metrics...")
-        metrics = nnx.MultiMetric(
-            loss=nnx.metrics.Average("loss"),
-            accuracy=nnx.metrics.Average("accuracy"),
-        )
+        metrics = nnx.MultiMetric(loss=nnx.metrics.Average("loss"), accuracy=nnx.metrics.Average("accuracy"))
 
         test_batch = next(iter(test_ds)) if n_test > 0 else None
         test_realisation_ids = split_indices["test"]
@@ -564,7 +648,6 @@ class Train:
             mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
             print(f"[Mask] Training WITH mask (shape: {mask_mwss.shape}, fsky={fsky}, apodization={apodization})")
 
-        print("[Train] Starting main training loop...")
         print_gpu_usage("Before training loop")
 
         for epoch in range(start_epoch, self.epochs + 1):
@@ -635,7 +718,7 @@ class Train:
 
             # Print progress
             print(
-                f"[Train] Epoch {epoch:03d}/{self.epochs}: "
+                f"[Train] Epoch {epoch:03d}/{self.epochs:03d}: "
                 f"Train Loss = {metrics_history['train_loss'][-1]:.3f} | "
                 f"Val Loss = {eval_loss} | "
                 f"Train Acc = {metrics_history['train_accuracy'][-1]:.3f} | "
@@ -656,9 +739,12 @@ class Train:
                 )
                 break
 
+        latest_checkpoint_saved = self.save_model(model, optimizer, final_epoch)
+        latest_checkpoint_epoch = final_epoch if latest_checkpoint_saved else None
+
         if not best_checkpoint_saved:
             best_epoch = final_epoch
-            best_checkpoint_saved = self.save_model(model, optimizer, final_epoch)
+            best_checkpoint_saved = latest_checkpoint_saved
 
         self._finalize_training_outputs(
             metrics_history=metrics_history,
@@ -667,12 +753,11 @@ class Train:
             test_batch=test_batch,
             test_realisation_ids=test_realisation_ids,
             final_epoch=final_epoch,
-            checkpoint_epoch=best_epoch,
-            checkpoint_saved=best_checkpoint_saved,
+            latest_checkpoint_epoch=latest_checkpoint_epoch,
+            latest_checkpoint_saved=latest_checkpoint_saved,
+            best_epoch=best_epoch,
         )
-
-        print("[Train] Training procedure completed successfully!")
-        print(f"[Train] All results saved to: {self.model_dir}")
+        print(f"[Train] All results saved to: {self.model_dir}") # model_dir = run-id folder
 
 
     def plot_training_metrics(self, metrics_history: dict) -> None:
@@ -726,7 +811,6 @@ class Train:
         plot_path = os.path.join(outdir, "training_metrics.png")
         plt.savefig(plot_path, bbox_inches='tight', dpi=150)
         plt.close()
-        print(f"[Plot] Training metrics saved to {plot_path}")
 
     def plot_examples(self, metrics_history, model, test_batch, realisation_ids, n_examples: int = 1):
         """Plot input/output/prediction examples."""
@@ -792,7 +876,6 @@ class Train:
         plot_path = os.path.join(outdir, "prediction_examples.png")
         plt.savefig(plot_path, bbox_inches='tight', dpi=150)
         plt.close()
-        print(f"[Plot] Prediction examples saved to {plot_path}")
 
 
 # ========== Main Entry Point ==========

@@ -10,9 +10,11 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import nnx, serialization
+from scipy.stats import kurtosis, skew
 
 from .model import S2_UNET
 from .data import CMBFreeILC
+from .train import resolve_checkpoint_target
 from skyclean.silc.file_templates import FileTemplates
 from skyclean.silc import SamplingConverters
 
@@ -51,6 +53,8 @@ class Inference:
         self.file_templates = FileTemplates(directory)
         self.model = None
         self.config = None
+        self.loaded_checkpoint_path = None
+        self.loaded_checkpoint_epoch = None
         self.data_handler = CMBFreeILC(
             extract_comp=self.extract_comp,
             component=self.component,
@@ -65,43 +69,6 @@ class Inference:
             directory=self.directory
         )
 
-    @staticmethod
-    def _is_valid_checkpoint_file(path: str) -> bool:
-        """识别有效的msgpack checkpoint文件"""
-        if not os.path.isfile(path):
-            return False
-        filename = os.path.basename(path)
-        return bool(re.match(r"checkpoint_epoch_\d+\.msgpack$", filename))
-
-    def _find_latest_checkpoint_in_dir(self, dir_path: str) -> str:
-        """递归查找目录下最新的msgpack checkpoint"""
-        if not os.path.isdir(dir_path):
-            raise FileNotFoundError(f"Checkpoint 目录不存在: {dir_path}")
-
-        latest_epoch = -1
-        latest_file = None
-
-        for root, _, files in os.walk(dir_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                if not self._is_valid_checkpoint_file(file_path):
-                    continue
-
-                # 提取epoch
-                m = re.match(r"checkpoint_epoch_(\d+)\.msgpack$", file)
-                if m:
-                    epoch = int(m.group(1))
-                else:
-                    epoch = os.path.getmtime(file_path)
-
-                if epoch > latest_epoch:
-                    latest_epoch = epoch
-                    latest_file = file_path
-
-        if latest_file is None:
-            raise FileNotFoundError(f"在 {dir_path} 及其子目录下未找到任何有效的 msgpack checkpoint")
-        return latest_file
-
     def load_model(self, force_load=False):
         """加载模型，完全兼容flax 0.10.6"""
         if not force_load:
@@ -114,22 +81,20 @@ class Inference:
 
         # 解析checkpoint路径
         if self.model_path is not None:
-            checkpoint_path = os.path.abspath(self.model_path)
-            if not os.path.exists(checkpoint_path):
-                raise FileNotFoundError(f"指定路径不存在: {checkpoint_path}")
-            # 如果是目录，自动找里面的msgpack
-            if os.path.isdir(checkpoint_path):
-                checkpoint_path = self._find_latest_checkpoint_in_dir(checkpoint_path)
-            print(f"[Inference] Loading user-specified model from: {checkpoint_path}")
+            checkpoint_dir, checkpoint_file, checkpoint_epoch = resolve_checkpoint_target(
+                os.path.abspath(self.model_path)
+            )
+            checkpoint_path = str(checkpoint_file)
+            print(f"[Inference] Loading model from: {checkpoint_path}")
         else:
-            # 自动找最新的checkpoint
-            checkpoint_path = self._find_latest_checkpoint_in_dir(self.file_templates.output_directories["ml_models"])
+            run_dir = os.path.join(self.file_templates.output_directories["ml_models"], self.run_id)
+            checkpoint_dir, checkpoint_file, checkpoint_epoch = resolve_checkpoint_target(run_dir)
+            checkpoint_path = str(checkpoint_file)
             print(f"[Inference] Loading latest checkpoint from: {checkpoint_path}")
 
         # 构建和训练时完全一致的模型结构
         L = self.lmax + 1
         ch_in = len(self.frequencies)
-        print(f"[Model] Building model with L={L}, ch_in={ch_in}, chs={self.chs}")
         model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
 
         # 拆分模型，获取空的state模板
@@ -154,7 +119,9 @@ class Inference:
         #model = jax.tree.map(jax.device_put, model)
 
         self.model = model
-        print(f"[Inference] Model loaded successfully from {checkpoint_path} ✅")
+        self.loaded_checkpoint_path = checkpoint_path
+        self.loaded_checkpoint_epoch = checkpoint_epoch
+        print(f"[Inference] Model loaded successfully ✅")
         return model
 
     def check_model_compatibility(self):
@@ -183,7 +150,8 @@ class Inference:
                 return result
         else:
             try:
-                self._find_latest_checkpoint_in_dir(self.file_templates.output_directories["ml_models"])
+                run_dir = os.path.join(self.file_templates.output_directories["ml_models"], self.run_id)
+                resolve_checkpoint_target(run_dir)
             except FileNotFoundError as e:
                 result['compatible'] = False
                 result['message'] = str(e)
@@ -298,21 +266,30 @@ class Inference:
 
     def save_test_metrics_table(self, masked=False, save_predictions=True):
         """Save per-realisation metrics for the held-out test split."""
+        if self.model is None:
+            self.load_model()
         test_ids = self.data_handler.get_split_indices()["test"]
-        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id, "evaluation")
+        checkpoint_tag = (
+            f"checkpoint_{self.loaded_checkpoint_epoch}"
+            if self.loaded_checkpoint_epoch is not None
+            else "checkpoint_unknown"
+        )
+        out_dir = os.path.join(
+            self.file_templates.output_directories["cmb_prediction"],
+            self.run_id,
+            "evaluation",
+            checkpoint_tag,
+        )
         os.makedirs(out_dir, exist_ok=True)
         csv_path = os.path.join(out_dir, "test_metrics.csv")
 
         def _moments(x):
             x = np.asarray(x, dtype=np.float64).ravel()
-            mean = float(np.mean(x))
+            x = x[np.isfinite(x)]
             std = float(np.std(x))
-            if std < 1e-24:
-                return 0.0, 0.0
-            z = (x - mean) / std
-            skew = float(np.mean(z ** 3))
-            kurtosis = float(np.mean(z ** 4) - 3.0)
-            return skew, kurtosis
+            skewness = float(skew(x, bias=False))
+            kurt_excess = float(kurtosis(x, fisher=True, bias=False))
+            return skewness, kurt_excess
 
         rows = []
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -376,7 +353,19 @@ class Inference:
 
     def save_test_scatter_plots(self, rows):
         """Save MSE and skewness scatter plots for the held-out test split."""
-        out_dir = os.path.join(self.file_templates.output_directories["cmb_prediction"], self.run_id, "evaluation")
+        if self.model is None:
+            self.load_model()
+        checkpoint_tag = (
+            f"checkpoint_{self.loaded_checkpoint_epoch}"
+            if self.loaded_checkpoint_epoch is not None
+            else "checkpoint_unknown"
+        )
+        out_dir = os.path.join(
+            self.file_templates.output_directories["cmb_prediction"],
+            self.run_id,
+            "evaluation",
+            checkpoint_tag,
+        )
         os.makedirs(out_dir, exist_ok=True)
 
         def _scatter(
@@ -461,10 +450,16 @@ class Inference:
             else:
                 mode = "uncon"
             frequencies = '_'.join(self.frequencies)
+            checkpoint_tag = (
+                f"checkpoint_{self.loaded_checkpoint_epoch}"
+                if self.loaded_checkpoint_epoch is not None
+                else "checkpoint_unknown"
+            )
             save_dir = os.path.join(
                 self.file_templates.output_directories["cmb_prediction"],
                 self.run_id,
                 "ilc_improved_maps",
+                checkpoint_tag,
             )
             filename = os.path.basename(
                 self.file_templates.file_templates["ilc_improved"].format(
@@ -484,6 +479,9 @@ class Inference:
                     chs=chs,
                 )
             )
+            if self.loaded_checkpoint_epoch is not None:
+                stem, ext = os.path.splitext(filename)
+                filename = f"{stem}_ckpt{self.loaded_checkpoint_epoch}{ext}"
 
             save_path = os.path.join(save_dir, filename)
             os.makedirs(save_dir, exist_ok=True)
@@ -499,11 +497,22 @@ class Inference:
         try:
             chs = "_".join(str(n) for n in self.chs)
             model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}_chs{chs}"
+            checkpoint_tag = (
+                f"checkpoint_{self.loaded_checkpoint_epoch}"
+                if self.loaded_checkpoint_epoch is not None
+                else "checkpoint_unknown"
+            )
+            checkpoint_suffix = (
+                f"_ckpt{self.loaded_checkpoint_epoch}"
+                if self.loaded_checkpoint_epoch is not None
+                else ""
+            )
             save_path = os.path.join(
                 self.file_templates.output_directories["cmb_prediction"],
                 self.run_id,
                 "ilc_improved_maps",
-                f"masked_ilc_improved_r{int(realisation):04d}_{model_config}.npy",
+                checkpoint_tag,
+                f"masked_ilc_improved_r{int(realisation):04d}_{model_config}{checkpoint_suffix}.npy",
             )
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             np.save(save_path, cmb_prediction)
