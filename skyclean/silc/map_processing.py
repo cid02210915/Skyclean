@@ -371,7 +371,12 @@ class ProcessMaps():
                     frequency=frequency, realisation=realisation, lmax=desired_lmax
                 )
             else:
-                output_path = None
+                output_path = self.file_templates["processed_extra_feature"].format(
+                    ps_mode=self.ps_injection_mode,
+                    frequency=frequency,
+                    realisation=realisation,
+                    lmax=desired_lmax,
+                )
     
             reuse_processed = (output_path is not None) and os.path.exists(output_path) and self.overwrite is False
             if reuse_processed:

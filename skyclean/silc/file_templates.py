@@ -109,6 +109,10 @@ class FileTemplates():
         "processed_ksz":   os.path.join(self.output_directories["processed_maps"], "processed_ksz_f{frequency}_lmax{lmax}.npy"),
         "processed_spindust":   os.path.join(self.output_directories["processed_maps"], "processed_spindust_f{frequency}_lmax{lmax}.npy"),
         "processed_stronguchii":   os.path.join(self.output_directories["processed_maps"], "processed_stronguchii_f{frequency}_lmax{lmax}.npy"),
+        "processed_extra_feature": os.path.join(
+            self.output_directories["processed_maps"],
+            "processed_extra_feature_{ps_mode}_f{frequency}_r{realisation:04d}_lmax{lmax}.npy",
+        ),
 
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
         "cfne":            os.path.join(self.output_directories["cfne"],           "cfne_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
