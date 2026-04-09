@@ -479,62 +479,83 @@ class SimpleHarmonicWindows:
         plt.show()
 
     def plot_scaling_and_wavelets(self, truncate=False):
-         """
-         Plot scaling + all wavelet bands on one figure.
-         Legend on the right, larger axis/legend fonts.
-         """
-         plt.figure(figsize=(12, 6))
-     
-         axis_label_size = 18
-         tick_size = 14
-         legend_size = 12  # larger legend / "j" labels
-     
-         # ----- scaling -----
-         phi = self.scaling_band(truncate=truncate)
-         ell_min_s, ell_peak_s, ell_max_s = self.scal_band
-     
-         # print scaling band (keep full info)
-         print(f"scal -> ell_min = {ell_min_s:4d}, ell_peak = {ell_peak_s:4d}, ell_max = {ell_max_s:4d}")
-     
-         plt.plot(self.ells, phi, label="scal", linewidth=2)
-         plt.axvline(ell_min_s,  color='k', linestyle='--', alpha=0.15)
-         plt.axvline(ell_peak_s, color='k', linestyle=':',  alpha=0.3)
-         plt.axvline(ell_max_s,  color='k', linestyle='--', alpha=0.15)
-     
-         # ----- wavelets -----
-         for j in range(self.J):
-             psi_j = self.wavelet_band(j, truncate=truncate)
-             ell_min, ell_peak, ell_max = self.band_edges(j)
-     
-             # no need to print peak value separately any more
-             print(f"j = {j:2d}  ->  ell_min = {ell_min:4d}, ell_max = {ell_max:4d}")
-     
-             # legend label is just j=...
-             plt.plot(self.ells, psi_j, label=f"j={j}")
-             plt.axvline(ell_min,  color='k', linestyle='--', alpha=0.15)
-             plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
-             plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
-     
-         plt.xlim(0, self.L - 1)
-         #plt.ylim(0, 1.1)
+        """
+        Plot the admissibility contributions that enter
+        (4π/(2ℓ+1))|Φ_{ℓ0}|^2 + (8π²/(2ℓ+1)) Σ_j Σ_m |Ψ^j_{ℓm}|^2 = 1.
 
-         plt.xlabel(r"$\ell$", fontsize=axis_label_size)
-         plt.ylabel("window", fontsize=axis_label_size)
-         plt.xticks(fontsize=tick_size)
-         plt.yticks(fontsize=tick_size)
-         plt.grid(True, alpha=0.3)
-         plt.title("Scaling + wavelet harmonic windows", fontsize=axis_label_size)
-     
-         # legend to the right, with larger font
-         plt.legend(
-             loc="center left",
-             bbox_to_anchor=(1.02, 0.5),
-             fontsize=legend_size,
-             frameon=False
-         )
-         plt.tight_layout()
-         plt.show()
-         
+        Assumes:
+          - self.scaling_band(...) returns Φ_{ℓ0} as a 1D array over ℓ
+          - self.wavelet_band(j, ...) returns Ψ^j_{ℓm}
+            either as:
+              * 1D axisymmetric array over ℓ, or
+              * 2D array with shape (n_ell, n_m) or (L, 2L-1)
+        """
+
+        plt.figure(figsize=(12, 6))
+
+        axis_label_size = 18
+        tick_size = 14
+        legend_size = 12
+
+        ell = self.ells
+        twoell1 = 2.0 * ell + 1.0
+
+        # ----- scaling contribution -----
+        phi = self.scaling_band(truncate=truncate)
+        scal_contrib = (4.0 * np.pi / twoell1) * np.abs(phi)**2
+
+        ell_min_s, ell_peak_s, ell_max_s = self.scal_band
+        print(f"scal -> ell_min = {ell_min_s:4d}, ell_peak = {ell_peak_s:4d}, ell_max = {ell_max_s:4d}")
+
+        plt.plot(ell, scal_contrib, label="scal", linewidth=2)
+        plt.axvline(ell_min_s,  color='k', linestyle='--', alpha=0.15)
+        plt.axvline(ell_peak_s, color='k', linestyle=':',  alpha=0.3)
+        plt.axvline(ell_max_s,  color='k', linestyle='--', alpha=0.15)
+
+        total = scal_contrib.copy()
+
+        # ----- wavelet contributions -----
+        for j in range(self.J):
+            psi_j = self.wavelet_band(j, truncate=truncate)
+
+            if psi_j.ndim == 1:
+                # axisymmetric-like case
+                msum = np.abs(psi_j)**2
+            else:
+                # directional case: sum over m
+                msum = np.sum(np.abs(psi_j)**2, axis=1)
+
+            wav_contrib = (8.0 * np.pi**2 / twoell1) * msum
+            total += wav_contrib
+
+            ell_min, ell_peak, ell_max = self.band_edges(j)
+            print(f"j = {j:2d}  ->  ell_min = {ell_min:4d}, ell_max = {ell_max:4d}")
+
+            plt.plot(ell, wav_contrib, label=f"j={j}")
+            plt.axvline(ell_min,  color='k', linestyle='--', alpha=0.15)
+            plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
+            plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
+
+        plt.xlim(2, self.L - 1)
+        #plt.xscale("log")
+
+        plt.xlabel(r"$\ell$", fontsize=axis_label_size)
+        plt.ylabel("Wavelet Hamonic Response", fontsize=axis_label_size)
+        plt.xticks(fontsize=tick_size)
+        plt.yticks(fontsize=tick_size)
+        plt.grid(True, alpha=0.3)
+        plt.title("Scaling + Wavelet harmonic windows", fontsize=axis_label_size)
+    
+        # legend to the right, with larger font
+        plt.legend(
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            fontsize=legend_size,
+            frameon=False
+        )
+        plt.tight_layout()
+        plt.show()
+
     @staticmethod
     def build_s2wav_filters(
         L: int,
@@ -575,7 +596,7 @@ class SimpleHarmonicWindows:
         w_wav  = (8.0 * np.pi**2) / twoell1
     
         denom = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
-        print("min/max over ell (before norm):", np.min(denom), np.max(denom))
+        #print("min/max over ell (before norm):", np.min(denom), np.max(denom))
     
         alpha = np.ones_like(denom)
         mask = denom > 0
@@ -583,19 +604,22 @@ class SimpleHarmonicWindows:
     
         scal_l   = scal_l * alpha
         kappa_jl = kappa_jl * alpha[None, :]
-    
+     
+        
         # ---- optional: print Eq.(30) check ----
         denom_post = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
+        '''
         print("\n=== Eq.(30) check (should be ~1) ===")
         for ell in [0, 1, 2, 5, 10, 20, 32, 64, 128, min(256, L-1), L-1]:
             if ell < L:
                 print(f"ell={ell:4d}  value={denom_post[ell]:.6e}")
         print("min/max over ell with denom>0:", np.nanmin(denom_post[mask]), np.nanmax(denom_post[mask]))
         print("===================================\n")
-
+        '''
         S = denom_post            # this is admissibility curve
         ells = np.arange(L)
 
+        '''
         plt.figure(figsize=(7,4))
         plt.plot(ells, S)
         plt.axhline(1.0, linestyle="--")
@@ -617,7 +641,8 @@ class SimpleHarmonicWindows:
         plt.grid(alpha=0.4)
         plt.tight_layout()
         plt.show()
-
+        '''
+        
         # ---- pack into s2wav expected n-grid: (J, L, 2L-1), n=0 at mid ----
         M = 2 * L - 1
         mid = L - 1
