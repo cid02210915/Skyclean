@@ -5,6 +5,7 @@ import healpy as hp
 import matplotlib.pyplot as plt
 
 from skyclean.silc import utils, HPTools, MWTools, SamplingConverters, FileTemplates
+from skyclean.silc.file_templates import register_pixel_ps_component_template
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
 
 import tensorflow as tf
@@ -59,6 +60,7 @@ class CMBFreeILC():
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
+        register_pixel_ps_component_template(self.file_templates, files.output_directories, self.component,)
         self.download_templates = files.download_templates
         # data shapes
         self.H = lmax + 2

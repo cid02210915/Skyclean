@@ -1,5 +1,55 @@
 import os 
 
+def pixel_ps_foreground_count(components) -> int:
+    """Count foreground components used by pixel_ps, excluding cmb/noise/extra_feature."""
+    excluded = {"cmb", "noise", "extra_feature"}
+    foregrounds = []
+    for comp in components:
+        comp = str(comp).strip().lower()
+        if comp and comp not in excluded and comp not in foregrounds:
+            foregrounds.append(comp)
+    return len(foregrounds)
+
+
+def pixel_ps_component_name(components) -> str:
+    """Component key for pixel_ps CFNE products."""
+    return f"cfne_pix_{pixel_ps_foreground_count(components)}"
+
+
+def pixel_ps_filename_prefix(components) -> str:
+    """Filename prefix for pixel_ps CFNE products."""
+    return f"CFNE_pix_{pixel_ps_foreground_count(components)}"
+
+
+def pixel_ps_filename_prefix_from_component(component: str) -> str | None:
+    """Return CFNE pixel-PS filename prefix for a component key like cfne_pix_3."""
+    text = str(component).strip().lower()
+    prefix = "cfne_pix_"
+    if not text.startswith(prefix):
+        return None
+    count_text = text[len(prefix):]
+    if not count_text.isdigit():
+        return None
+    return f"CFNE_pix_{int(count_text)}"
+
+
+def register_pixel_ps_component_template(file_templates: dict, output_directories: dict, component: str) -> bool:
+    """
+    Register a dynamic template for CFNE pixel-PS component keys.
+
+    This lets later stages use --component cfne_pix_N and read maps saved as
+    CFNE_pix_N_f{frequency}_r{realisation}_lmax{lmax}.npy.
+    """
+    prefix = pixel_ps_filename_prefix_from_component(component)
+    if prefix is None:
+        return False
+    file_templates[str(component)] = os.path.join(
+        output_directories["cfne"],
+        f"{prefix}_f{{frequency}}_r{{realisation:04d}}_lmax{{lmax}}.npy",
+    )
+    return True
+
+
 class FileTemplates():
 
     # --- HFI beam filenames live at the data root, HFI_RIMO_BEAMS_R3.01.TAR.GZ from https://pla.esac.esa.int/#docsw ---

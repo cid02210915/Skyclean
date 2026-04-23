@@ -15,7 +15,7 @@ from scipy.stats import kurtosis, skew
 from .model import S2_UNET
 from .data import CMBFreeILC
 from .train import resolve_checkpoint_target
-from skyclean.silc.file_templates import FileTemplates
+from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
 from skyclean.silc import SamplingConverters
 
 
@@ -51,6 +51,11 @@ class Inference:
             raise ValueError("run_id must be provided for inference outputs.")
 
         self.file_templates = FileTemplates(directory)
+        register_pixel_ps_component_template(
+            self.file_templates.file_templates,
+            self.file_templates.output_directories,
+            self.component,
+        )
         self.model = None
         self.config = None
         self.loaded_checkpoint_path = None

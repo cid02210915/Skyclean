@@ -9,7 +9,7 @@ from typing import Literal
 
 from .download import DownloadData
 from .map_processing import ProcessMaps
-from .file_templates import FileTemplates
+from .file_templates import FileTemplates, pixel_ps_component_name
 from .ilc import ProduceSILC  
 from .power_spec import MapAlmConverter, PowerSpectrumTT, PowerSpectrumCrossTT
 from .mixing_matrix_constraint import SpectralVector
@@ -212,6 +212,12 @@ class Pipeline:
     
         # Input mixture and scales
         comp_in = self.wavelet_components[0]
+        if (
+            comp_in == "cfne"
+            and "extra_feature" in self.components
+            and self.ps_injection_mode == "pixel_ps"
+        ):
+            comp_in = pixel_ps_component_name(self.components)
 
         if getattr(self, "scales", None) is not None:
             scales = list(self.scales)

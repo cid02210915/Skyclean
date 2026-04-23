@@ -889,7 +889,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train CMB-Free ILC S2_UNET model")
 
     parser.add_argument('--extract-comp', type=str, default="cmb", help='Component to extract')
-    parser.add_argument('--component', type=str, default="cfn", help='Components to use (cfn/cfne/cfne_circ)')
+    parser.add_argument('--component', type=str, default="cfn", help='Components to use (cfn/cfne/cfne_circ/cfne_pix_N)')
     parser.add_argument('--frequencies', nargs='+', default=["030", "044", "070"], help='List of frequencies')
     parser.add_argument('--realisations', type=int, default=1000, help='Number of data realisations')
     parser.add_argument('--lmax', type=int, default=1023, help='Maximum multipole')

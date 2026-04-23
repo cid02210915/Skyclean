@@ -2,7 +2,7 @@ import os, glob
 import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
-from .file_templates import FileTemplates
+from .file_templates import FileTemplates, pixel_ps_component_name, register_pixel_ps_component_template
 from .map_tools import *
 from .add_point_source import (CircularPSInjector, PixelPSInjector, PointSource, measure_source_values)
 
@@ -93,6 +93,7 @@ class ProcessMaps():
 
         self.file_templates = files.file_templates
         self.download_templates = files.download_templates
+        self.pixel_ps_output_key = None
 
         if 'extra_feature' in components:
             self.ps_component = ps_component
@@ -105,6 +106,17 @@ class ProcessMaps():
             self.ps_radius_range = tuple(ps_radius_range)
             self.ps_brightness_scale = float(ps_brightness_scale)
             self.ps_injection_mode = str(ps_injection_mode)
+            if self.ps_injection_mode == "pixel_ps":
+                self.pixel_ps_output_key = pixel_ps_component_name(self.components)
+                register_pixel_ps_component_template(
+                    self.file_templates,
+                    files.output_directories,
+                    self.pixel_ps_output_key,
+                )
+                self.wavelet_components = [
+                    self.pixel_ps_output_key if comp == "cfne" else comp
+                    for comp in self.wavelet_components
+                ]
 
 
     def _repair_and_read_map(self, path: str, comp: str, frequency: str, realisation: int):
@@ -611,7 +623,11 @@ class ProcessMaps():
         target_nside = HPTools.get_nside_from_lmax(desired_lmax)
         output_key = "cfne_circ" if (
             'extra_feature' in self.components and self.ps_injection_mode == "circular_ps"
-        ) else ("cfne" if 'extra_feature' in self.components else "cfn")
+        ) else (
+            self.pixel_ps_output_key
+            if 'extra_feature' in self.components and self.ps_injection_mode == "pixel_ps"
+            else ("cfne" if 'extra_feature' in self.components else "cfn")
+        )
         for realisation in range(self.realisations):
             i=0
             realisation += self.start_realisation  # Adjust for starting realisation

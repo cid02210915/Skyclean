@@ -25,7 +25,7 @@ tf.config.set_visible_devices([], "GPU")
 
 from skyclean.ml.train import Train, resolve_checkpoint_target
 from skyclean.ml.inference import Inference
-from skyclean.silc.file_templates import FileTemplates
+from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
 
 
@@ -70,7 +70,7 @@ def parse_args():
     # ----- match Train signature -----
     parser.add_argument("--extract-comp", type=str, default="cmb")
     parser.add_argument("--component", type=str, default="cfn",
-                        help="Input map product key, e.g. cfn, cfne, or cfne_circ.")
+                        help="Input map product key, e.g. cfn, cfne, cfne_circ, or cfne_pix_N.")
 
     parser.add_argument("--frequencies", nargs="+", default=["030", "100", "353"])
     parser.add_argument("--realisations", type=int, default=1000)
@@ -222,6 +222,11 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
     """
 
     files = FileTemplates(args.directory)
+    register_pixel_ps_component_template(
+        files.file_templates,
+        files.output_directories,
+        args.component,
+    )
     ft = files.file_templates
     conv = MapAlmConverter(ft)
 
