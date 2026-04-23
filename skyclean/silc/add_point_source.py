@@ -348,7 +348,7 @@ class PointSource:
             raise ValueError("frequencies is empty")
 
         frequencies = self.frequencies
-        ref_fre = frequencies[2]
+        ref_fre = frequencies[0]
 
         # --- reference map -> catalogue ---
         ref_path = self._path_for_freq(ref_fre)
@@ -512,6 +512,15 @@ class PixelPSInjector:
                 resolved.append(comp)
         return list(dict.fromkeys(resolved))
 
+    @staticmethod
+    def _component_available_at_frequency(comp: str, frequency: str | int) -> bool:
+        freq = str(frequency).zfill(3)
+        if comp == "cib" and freq not in {"353", "545", "857"}:
+            return False
+        if comp == "co" and freq in {"030", "044", "070", "217"}:
+            return False
+        return True
+
     def _compute_inputs_for_frequency(
         self,
         *,
@@ -523,7 +532,12 @@ class PixelPSInjector:
     ) -> dict[str, np.ndarray]:
         print(f"[pixel_ps] using ps_component='{self.ps_component}' at {frequency} GHz")
         ps_map = self.map_loader(self.ps_component, frequency, realisation)
-        foreground_components = self._foreground_components()
+        foreground_components = []
+        for comp in self._foreground_components():
+            if self._component_available_at_frequency(comp, frequency):
+                foreground_components.append(comp)
+            else:
+                print(f"[extra_feature:{frequency}] skipping unavailable foreground component '{comp}'")
         if not foreground_components:
             raise ValueError(
                 "pixel_ps injection requires at least one foreground component in `components` "
