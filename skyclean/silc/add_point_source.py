@@ -299,7 +299,7 @@ class PointSource:
         self,
         ps_component: str,
         frequencies: Sequence[str],
-        n_points: int = 10,
+        n_points: Optional[int] = 10,
         lon_range: Optional[Tuple[float, float]] = None,
         lat_range: Tuple[float, float] = (-90.0, 90.0),
         brightness_percentile: Optional[Tuple[float, float]] = (75.0, 100.0),
@@ -307,6 +307,8 @@ class PointSource:
         random_seed: int = 1,
         ps_radius_range: Tuple[float, float] = (1.0, 1.0),
         ps_brightness_scale: float = 1.0,
+        match_n_points_to_target_density: bool = False,
+        desired_lmax: Optional[int] = None,
         file_templates: FileTemplates | None = None,
         directory: str = "data/",
         nest: bool = False,
@@ -314,7 +316,7 @@ class PointSource:
     ):
         self.ps_component = ps_component
         self.frequencies = list(frequencies)
-        self.n_points = int(n_points)
+        self.n_points = None if n_points is None else int(n_points)
         self.lon_range = lon_range
         self.lat_range = lat_range
         self.brightness_percentile = brightness_percentile
@@ -322,6 +324,8 @@ class PointSource:
         self.random_seed = int(random_seed)
         self.ps_radius_range = tuple(float(x) for x in ps_radius_range)
         self.ps_brightness_scale = float(ps_brightness_scale)
+        self.match_n_points_to_target_density = bool(match_n_points_to_target_density)
+        self.desired_lmax = None if desired_lmax is None else int(desired_lmax)
         self.directory = directory
         self.nest = nest
         self.threshold = float(threshold)
@@ -337,6 +341,33 @@ class PointSource:
     def _load_and_convert_map(self, path: str, fre: str) -> np.ndarray:
         m = hp.read_map(path, field=0, verbose=False)
         return HPTools.unit_convert(m, fre)
+
+    def _resolve_n_points(self, cat: dict[str, np.ndarray], ref_map: np.ndarray) -> int:
+        n_candidates = len(cat["label"])
+        if n_candidates == 0:
+            return 0
+
+        if self.match_n_points_to_target_density:
+            if self.desired_lmax is None:
+                raise ValueError(
+                    "desired_lmax must be provided when match_n_points_to_target_density=True."
+                )
+            npix_ref = ref_map.size
+            nside_out = HPTools.get_nside_from_lmax(self.desired_lmax)
+            npix_out = hp.nside2npix(nside_out)
+            ratio = n_candidates / npix_ref
+            resolved_n = int(npix_out * ratio)
+            resolved_n = max(1, min(n_candidates, resolved_n))
+            print(
+                f"[point_source] density-matched N={resolved_n} "
+                f"(n_candidates={n_candidates}, npix_ref={npix_ref}, npix_out={npix_out}, ratio={ratio:.6e})"
+            )
+            return resolved_n
+
+        if self.n_points is None:
+            return n_candidates
+
+        return max(1, min(n_candidates, self.n_points))
 
     def create_and_output_catalogue(self):
         """
@@ -355,10 +386,11 @@ class PointSource:
         ref_map = self._load_and_convert_map(ref_path, ref_fre)
 
         cat = build_catalog_from_reference_map(ref_map, nest=self.nest, threshold=self.threshold)
+        n_points = self._resolve_n_points(cat, ref_map)
 
         idx_sel = select_sources(
             cat,
-            N=self.n_points,
+            N=n_points,
             lon_range=self.lon_range,
             lat_range=self.lat_range,
             brightness_percentile=self.brightness_percentile,

@@ -43,7 +43,8 @@ class ProcessMaps():
                  method = "jax_cuda", 
                  overwrite: bool = False, 
                  ps_component: str = 'strongirps',
-                 n_points: int = 10,
+                 n_points: int | None = 10,
+                 match_n_points_to_target_density: bool = False,
                  lon_range: tuple = None,
                  lat_range: tuple = (-90.0, 90.0), # fixed for pipeline
                  brightness_percentile: tuple = (75.0, 100.0),
@@ -81,6 +82,8 @@ class ProcessMaps():
                     ps_component=ps_component,
                     frequencies=frequencies,
                     n_points=n_points,
+                    match_n_points_to_target_density=match_n_points_to_target_density,
+                    desired_lmax=desired_lmax,
                     lon_range=lon_range,
                     lat_range=lat_range,
                     brightness_percentile=brightness_percentile,
@@ -98,6 +101,7 @@ class ProcessMaps():
         if 'extra_feature' in components:
             self.ps_component = ps_component
             self.n_points = n_points
+            self.match_n_points_to_target_density = bool(match_n_points_to_target_density)
             self.lon_range = lon_range
             self.lat_range = lat_range
             self.brightness_percentile = brightness_percentile
@@ -334,8 +338,8 @@ class ProcessMaps():
                     
                 if save:
                     save_map(output_path, hp_map_reduced, self.overwrite)
-            print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
-            print(f"Shape of component '{comp}': {hp_map_reduced.shape}")
+            #print(f"Added component '{comp}' to CFN at {frequency} GHz (realisation {realisation}).")
+            #print(f"Shape of component '{comp}': {hp_map_reduced.shape}")
             #hp.mollview(hp_map_reduced,title=f"Component '{comp}' @ {frequency} GHz, r{realisation} (before CFN sum)",)
             #plt.show()
             cfn += hp_map_reduced
@@ -383,8 +387,13 @@ class ProcessMaps():
                     frequency=frequency, realisation=realisation, lmax=desired_lmax
                 )
             else:
+                ps_mode_key = (
+                    self.pixel_ps_output_key
+                    if self.ps_injection_mode == "pixel_ps" and self.pixel_ps_output_key is not None
+                    else self.ps_injection_mode
+                )
                 output_path = self.file_templates["processed_extra_feature"].format(
-                    ps_mode=self.ps_injection_mode,
+                    ps_mode=ps_mode_key,
                     frequency=frequency,
                     realisation=realisation,
                     lmax=desired_lmax,

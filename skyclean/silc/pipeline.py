@@ -41,7 +41,8 @@ class Pipeline:
         ps_injection_mode: Literal["circular_ps", "pixel_ps"] = "pixel_ps",
         ps_component: str = "strongirps",
         # for 'circular_ps' usage: 
-        n_points: int = 10,
+        n_points: int | None = 10,
+        match_n_points_to_target_density: bool = False,
         lon_range: tuple[float, float] | None = None,
         brightness_percentile: tuple[float, float] | None = (75.0, 100.0),
         mode: Literal["random", "brightest"] = "random",
@@ -70,7 +71,8 @@ class Pipeline:
         self.lam_str = f"{lam:.1f}" 
         self.nsamp = nsamp
         self.ps_component = ps_component
-        self.n_points = int(n_points)
+        self.n_points = None if n_points is None else int(n_points)
+        self.match_n_points_to_target_density = bool(match_n_points_to_target_density)
         self.lon_range = lon_range
         self.brightness_percentile = brightness_percentile
         self.mode = mode
@@ -126,6 +128,7 @@ class Pipeline:
             overwrite=self.overwrite,
             ps_component = self.ps_component, 
             n_points = self.n_points,
+            match_n_points_to_target_density = self.match_n_points_to_target_density,
             lon_range = self.lon_range,
             lat_range = (-90.0, 90.0),
             brightness_percentile = self.brightness_percentile,
@@ -160,6 +163,7 @@ class Pipeline:
             overwrite=self.overwrite,
             ps_component = self.ps_component, 
             n_points = self.n_points,
+            match_n_points_to_target_density = self.match_n_points_to_target_density,
             lon_range = self.lon_range,
             lat_range = (-90.0, 90.0),
             brightness_percentile = self.brightness_percentile,
@@ -747,6 +751,8 @@ def main():
                         help="Point-source component template key used for injected extra features.")
     parser.add_argument('--n-points', type=int, default=10,
                         help="Number of point sources to inject.")
+    parser.add_argument('--match-n-points-to-target-density', action='store_true',
+                        help="Set N from the source density of the original-resolution PS map and the target low-resolution pixel count.")
     parser.add_argument('--lon-range', nargs=2, type=float, default=None, metavar=('LON_MIN', 'LON_MAX'),
                         help="Longitude range in degrees for source selection. Omit to use full range.")
     parser.add_argument('--brightness-percentile', nargs=2, type=float, default=(75.0, 100.0), metavar=('PCT_MIN', 'PCT_MAX'),
@@ -815,6 +821,7 @@ def main():
         nsamp=args.nsamp,
         ps_component=args.ps_component,
         n_points=args.n_points,
+        match_n_points_to_target_density=args.match_n_points_to_target_density,
         lon_range=tuple(args.lon_range) if args.lon_range is not None else None,
         brightness_percentile=tuple(args.brightness_percentile),
         mode=args.mode,
