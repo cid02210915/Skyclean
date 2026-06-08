@@ -1026,4 +1026,3 @@ class SamplingConverters():
             """
             mw_alm = s2fft.forward(mwss_map, L=L, sampling = "mwss", reality = True)
             return s2fft.inverse(mw_alm, L=L, sampling = "mw", reality = True)
-    

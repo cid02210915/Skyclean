@@ -1,3 +1,5 @@
+# Contributed by Qixing Deng
+
 # Adapted from: https://github.com/astro-informatics/s2ai
 # Original code by: Matthew A. Price, Kevin Mulder, Jason D. McEwen
 # License: MIT

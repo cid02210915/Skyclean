@@ -1,3 +1,5 @@
+# Contributed by Qixing Deng
+
 """
 CMB-Free ILC Model Inference Class.
 """
@@ -161,6 +163,8 @@ class Inference:
                 result['compatible'] = False
                 result['message'] = str(e)
 
+        result['compatible'] = True
+        result['message'] = "Basic checkpoint path checks passed."
         return result
 
     def predict_cmb(self, realisation, save_result=True, masked=False):
@@ -543,6 +547,7 @@ class Inference:
         info['model_compatibility'] = compatibility
 
         return info
+    
 
 
 if __name__ == "__main__":

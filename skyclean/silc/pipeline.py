@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+from turtle import mode
 import numpy as np
 import jax
 import subprocess, sys
@@ -82,6 +83,11 @@ class Pipeline:
         self.ps_injection_mode = ps_injection_mode
 
         
+
+        self.pcilc = bool(pcilc)
+        self.pcilc_component = str(pcilc_component).lower()
+        self.pcilc_eps = pcilc_eps
+        self.pcilc_pick = str(pcilc_pick)
 
     # -------------------------
     # Steps
@@ -234,9 +240,22 @@ class Pipeline:
     
         # Constraint inputs (build F/ref on demand; default empirical)
         do_constraint = getattr(self, "constraint", False)
+        if getattr(self, "pcilc", False) and do_constraint:
+            raise ValueError(
+            "pcilc=True and constraint=True cannot both be enabled. "
+            "Set constraint=False for pcILC."
+        )
         F = getattr(self, "F", None)
         reference_vectors = getattr(self, "reference_vectors", None)
 
+        if reference_vectors is None:
+            _, _, ref_vecs, _ = SpectralVector.build_F_theory(
+                frequencies=freqs,
+                components_order=["cmb", "tsz"],
+            )
+            self.reference_vectors = ref_vecs
+            reference_vectors = ref_vecs
+            
         if do_constraint and (F is None or reference_vectors is None):
             source = getattr(self, "F_source", "theory")
             kwargs = dict(getattr(self, "F_kwargs", {}))
@@ -250,12 +269,15 @@ class Pipeline:
                 # build_F_empirical(base_dir, file_templates, frequencies, realization, mask_path, components_order)
                 if "realisation" in kwargs and "realization" not in kwargs:
                     kwargs["realization"] = kwargs.pop("realisation")
+                    
                 kwargs = {k: v for k, v in kwargs.items()
-                          if k in ("base_dir", "file_templates", "realization", "mask_path")}
+                          if k in ("base_dir", "file_templates", "realization", "mask_path",
+                                   "components_order", "override_vectors")}
 
-            # desired column order comes from your input component list; ignore extras like 'noise'
-            components_order = [c.lower() for c in self.components if c.lower() in ("cmb", "tsz", "sync", "cib", "dust")]
-
+            components_order = kwargs.pop("components_order", None)
+            if components_order is None:
+                components_order = [c.lower() for c in self.components if c.lower() in ("cmb","tsz")]
+            
             # build F with explicit column order 
             F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(
                 source=source,
@@ -268,6 +290,10 @@ class Pipeline:
             self.reference_vectors = ref_vecs
             F = self.F
             reference_vectors = self.reference_vectors
+        
+        # Realisations, freqs
+        realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
+        freqs = list(self.frequencies)
 
         # Run ILC for requested targets
         for extract_comp in self.ilc_components:
@@ -288,7 +314,12 @@ class Pipeline:
                 reference_vectors=reference_vectors,
                 nsamp=self.nsamp, 
                 overwrite=self.overwrite,
+                pcilc=self.pcilc,
+                pcilc_component=self.pcilc_component,
+                pcilc_eps=self.pcilc_eps,
+                pcilc_pick=self.pcilc_pick,
             )
+
 
     def step_power_spec(
         self,
@@ -306,6 +337,8 @@ class Pipeline:
         field: int = 0,
         nsamp: float | int | None = None,
         overwrite: bool | None = None,
+        constraint: bool | None = None,   
+        mode: str | None = None,    
     ):
         """
         Compute TT C_ell (and plot D_ell). Returns (ell, cl).
@@ -313,6 +346,9 @@ class Pipeline:
         """
         # resolve overwrite
         overwrite = self.overwrite if overwrite is None else overwrite
+
+        # resolve constraint for THIS call (so it reads con_ vs uncon_)
+        constraint_ = getattr(self, "constraint", False) if constraint is None else bool(constraint)
 
         # defaults from pipeline
         r      = self.start_realisation if realisation is None else int(realisation)
@@ -349,10 +385,13 @@ class Pipeline:
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
                 realisation=r, lmax=lmax_, lam=lam_,
-                nsamp=nsamp_, constraint=self.constraint,
+                nsamp=nsamp_, constraint=constraint_, mode=mode,
             )
             src = "ilc_synth"
-            label = f"ILC-synth ({tgt})"
+            if mode is not None:
+                label = f"{mode}-synth ({tgt})"
+            else:
+                label = f"{'cILC' if constraint_ else 'ILC'}-synth ({tgt})"
 
         elif source == "processed":
             if component is not None:
@@ -390,11 +429,15 @@ class Pipeline:
 
         # ---------- save spectrum arrays to .npy for ILC_synth ----------
         if source == "ilc_synth" and "ilc_spectrum" in ft:
-            mode = "con" if getattr(self, "constraint", False) else "uncon"
+            if mode is not None:
+                save_mode = mode
+            else:
+                save_mode = "cilc" if constraint_ else "ilc"
+        
             freq_tag = "_".join(freqs)
-
+        
             spec_path = ft["ilc_spectrum"].format(
-                mode=mode,
+                mode=save_mode,
                 extract_comp=tgt,
                 component=comp_in,
                 frequencies=freq_tag,
@@ -406,7 +449,7 @@ class Pipeline:
             os.makedirs(os.path.dirname(spec_path), exist_ok=True)
             if overwrite or not os.path.exists(spec_path):
                 np.save(spec_path, {"ell": ell, "cl": cl, "Dl": Dl})
-
+        
             if save_path is None:
                 png_path = spec_path.replace(".npy", ".png")
             else:
@@ -415,10 +458,8 @@ class Pipeline:
             png_path = save_path
         # ---------------------------------------------------------------------
 
-        # pick a simple style
         style = {"ilc_synth": "-", "processed": "--", "downloaded": "-."}.get(src, "-")
 
-        # respect overwrite for PNG
         if png_path is not None and (not overwrite) and os.path.exists(png_path):
             plot_save_path = None
         else:
@@ -436,9 +477,8 @@ class Pipeline:
             )
 
         return ell, cl
-   
-        
-
+    
+    
     # --- step_cross_power_spec ---
     def step_cross_power_spec(
         self,
@@ -451,31 +491,41 @@ class Pipeline:
         extract_comp_X: str | None = None,
         frequencies_X: list[str] | None = None,
         frequency_X: str | int | None = None,
+        realisation_X: int | None = None,
+        mode_X: str | None = None,
         # Y side
         source_Y: str = "auto",
         component_Y: str | None = None,
         extract_comp_Y: str | None = None,
         frequencies_Y: list[str] | None = None,
         frequency_Y: str | int | None = None,
+        realisation_Y: int | None = None,
+        mode_Y: str | None = None,
         # shared
         realisation: int | None = None,
         lmax: int | None = None,
         lam: str | float | int | None = None,
+        nsamp: int | float | None = None,
+        constraint: bool | None = None,
         field: int = 0,
-        plot_r: bool = False, 
-        overwrite: bool | None = None,  
+        plot_r: bool = False,
+        overwrite: bool | None = None,
     ):
         """
         Compute TT cross C_ell^{XY} (and plot D_ell^{XY}). Returns (ell, cl_xy).
         """
         # defaults (mirror step_power_spec)
-        r     = self.start_realisation if realisation is None else int(realisation)
+        r_default = self.start_realisation if realisation is None else int(realisation)
+        rX = r_default if realisation_X is None else int(realisation_X)
+        rY = r_default if realisation_Y is None else int(realisation_Y)
         lmax_ = self.lmax if lmax is None else int(lmax)
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
+        nsamp_ = getattr(self, "nsamp", 1200) if nsamp is None else int(nsamp)
+        constraint_ = getattr(self, "constraint", False) if constraint is None else bool(constraint)
         fX    = self.frequencies if frequencies_X is None else list(frequencies_X)
         fY    = self.frequencies if frequencies_Y is None else list(frequencies_Y)
         overwrite = self.overwrite if overwrite is None else overwrite
-
+    
         # templates + processed-CFN detection (mirror)
         ft = FileTemplates(self.directory).file_templates
         has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
@@ -483,7 +533,7 @@ class Pipeline:
         if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
             ft_local["processed_cfn"] = ft_local["cfn"]
         conv = MapAlmConverter(ft_local)
-
+    
         # auto source (mirror)
         def pick_source(s: str) -> str:
             if s != "auto":
@@ -494,42 +544,61 @@ class Pipeline:
                 return "ilc_synth"
             else:
                 return "downloaded"
-
+    
         # loader (single place)
-        def load_one(source, component, extract_comp, frequencies, frequency):
+        def load_one(source, component, extract_comp, frequencies, frequency, r_use, mode_use):
             src = pick_source(source)
             if src == "ilc_synth":
                 comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")
                 tgt     = extract_comp or (self.ilc_components[0] if self.ilc_components else "cmb")
-                out = conv.to_alm(component=comp_in, source="ilc_synth",
-                                   extract_comp=tgt, frequencies=frequencies,
-                                   realisation=r, lmax=lmax_, lam=lam_)
-                label = f"ILC-synth ({tgt})"; fmt = "mw" if out["format"] == "mw" else "hp"
+                out = conv.to_alm(
+                    component=comp_in, source="ilc_synth",
+                    extract_comp=tgt, frequencies=frequencies,
+                    realisation=r_use, lmax=lmax_, lam=lam_,
+                    nsamp=nsamp_, constraint=constraint_,  mode=mode_use
+                )
+                if mode_use is not None:
+                    label = f"{mode_use}-synth ({tgt})"
+                else:
+                    label = f"{'cILC' if constraint_ else 'ILC'}-synth ({tgt})"
+                fmt = "mw" if out["format"] == "mw" else "hp"
+
             elif src == "processed":
                 comp_use = component or ("cfn" if has_processed_cfn else "cmb")
-                out = conv.to_alm(component=comp_use, source="processed",
-                                   frequency=frequency, realisation=r, lmax=lmax_)
+                out = conv.to_alm(
+                    component=comp_use, source="processed",
+                    frequency=frequency, realisation=r_use, lmax=lmax_
+                )
                 label = f"Processed {comp_use}"; fmt = "mw" if out["format"] == "mw" else "hp"
             else:  # downloaded
                 comp_use = component or "cmb"
-                out = conv.to_alm(component=comp_use, source="downloaded",
-                                   frequency=frequency, realisation=r, lmax=lmax_, field=field)
+                out = conv.to_alm(
+                    component=comp_use, source="downloaded",
+                    frequency=frequency, realisation=r_use, lmax=lmax_, field=field
+                )
                 label = f"Downloaded {comp_use}"; fmt = "mw" if out["format"] == "mw" else "hp"
             return out, label, fmt
-
+    
         # load X and Y
-        outX, labelX, fmtX = load_one(source_X, component_X, extract_comp_X, fX, frequency_X)
-        outY, labelY, fmtY = load_one(source_Y, component_Y, extract_comp_Y, fY, frequency_Y)
+        outX, labelX, fmtX = load_one(source_X, component_X, extract_comp_X, fX, frequency_X, rX, mode_X)
+        outY, labelY, fmtY = load_one(source_Y, component_Y, extract_comp_Y, fY, frequency_Y, rY, mode_Y)
 
-        if fmtX != fmtY:
-            raise ValueError("X and Y alm formats must match ('mw' vs 'healpy').")
-
-        # alms -> C_ell^{XY}
-        if outX["format"] == "mw":
-            ell, cl_xy = PowerSpectrumCrossTT.from_mw_alm(np.asarray(outX["alm"]), np.asarray(outY["alm"]))
+        print(f"[DEBUG xspec] X: {labelX} fmt={fmtX} path={outX.get('path')}")
+        print(f"[DEBUG xspec] Y: {labelY} fmt={fmtY} path={outY.get('path')}")
+    
+        # alms -> C_ell^{XY}  (FIX: handle mixed MW/healpy)
+        fx = outX["format"]
+        fy = outY["format"]
+    
+        if (fx == "mw") and (fy == "mw"):
+            ell, cl_xy = PowerSpectrumCrossTT.from_mw_alm(
+                np.asarray(outX["alm"]), np.asarray(outY["alm"])
+            )
         else:
-            ell, cl_xy = PowerSpectrumCrossTT.from_healpy_alm(outX["alm"], outY["alm"], lmax=lmax_)
-
+            ax = PowerSpectrumCrossTT.mw_to_healpy_alm(outX["alm"], lmax=lmax_) if fx == "mw" else outX["alm"]
+            ay = PowerSpectrumCrossTT.mw_to_healpy_alm(outY["alm"], lmax=lmax_) if fy == "mw" else outY["alm"]
+            ell, cl_xy = PowerSpectrumCrossTT.from_healpy_alm(ax, ay, lmax=lmax_)
+    
         # C_ell -> D_ell^{XY} (µK^2) and plot
         Dl_xy = PowerSpectrumTT.cl_to_Dl(ell, cl_xy, input_unit=unit)
         style = "--"
@@ -538,7 +607,7 @@ class Pipeline:
             cross_save_path = None
         else:
             cross_save_path = save_path
-
+    
         try:
             PowerSpectrumTT.plot_Dl_series(
                 {"ell": ell, "Dl": Dl_xy,
@@ -551,19 +620,24 @@ class Pipeline:
                 [(ell, Dl_xy, f"Cross: {labelX} × {labelY}", style)],
                 save_path=cross_save_path, show=True
             )
+    
         if plot_r:
-            if outX["format"] == "mw":
+            if (fx == "mw") and (fy == "mw"):
                 _, cl_xx = PowerSpectrumTT.from_mw_alm(np.asarray(outX["alm"]))
                 _, cl_yy = PowerSpectrumTT.from_mw_alm(np.asarray(outY["alm"]))
             else:
-                _, cl_xx = PowerSpectrumTT.from_healpy_alm(outX["alm"])
-                _, cl_yy = PowerSpectrumTT.from_healpy_alm(outY["alm"])
-
+                ax = PowerSpectrumCrossTT.mw_to_healpy_alm(outX["alm"], lmax=lmax_) if fx == "mw" else outX["alm"]
+                ay = PowerSpectrumCrossTT.mw_to_healpy_alm(outY["alm"], lmax=lmax_) if fy == "mw" else outY["alm"]
+                _, cl_xx = PowerSpectrumTT.from_healpy_alm(ax)
+                _, cl_yy = PowerSpectrumTT.from_healpy_alm(ay)
+                cl_xx = cl_xx[:lmax_+1]
+                cl_yy = cl_yy[:lmax_+1]
+    
             PowerSpectrumCrossTT.plot_r_ell(
                 ell, cl_xy, cl_xx, cl_yy,
                 label=f"{labelX} × {labelY}"
             )
-
+    
         return ell, cl_xy
 
     

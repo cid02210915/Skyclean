@@ -27,6 +27,7 @@ class MapAlmConverter:
         lam: Optional[Union[int, float, str]] = None,
         nsamp: float | None = None, 
         constraint: bool | None = None, 
+        mode: Optional[str] = None,
     ) -> Dict[str, Any]:
 
         if processed is not None:
@@ -36,7 +37,15 @@ class MapAlmConverter:
             component=component, source=source,
             frequency=frequency, realisation=realisation, lmax=lmax,
             extract_comp=extract_comp, frequencies=frequencies, lam=lam, 
-            nsamp=nsamp, constraint=constraint,
+            nsamp=nsamp, constraint=constraint, mode=mode,
+        )
+
+        print(
+        f"[DEBUG to_alm] source={source} component={component} extract_comp={extract_comp} "
+        f"constraint={constraint} lmax={lmax} lam={lam} nsamp={nsamp} "
+        f"freq={frequency} freqs={frequencies}\n"
+        f"              -> path={path}\n"
+        f"              -> exists={os.path.exists(path)}"
         )
 
         # 2) Load the map from disk
@@ -83,6 +92,7 @@ class MapAlmConverter:
         lam: Optional[Union[int, float, str]],
         nsamp: Optional[Union[int, float]],  
         constraint: Optional[bool] = None,
+        mode: Optional[str] = None,
     ) -> str:
         
         if source == "downloaded":
@@ -135,10 +145,36 @@ class MapAlmConverter:
 
             mode = "con" if constraint else "uncon"
 
+            if nsamp is None:
+                nsamp = 1200  
+            nsamp_str = str(int(nsamp))
+
+            # explicit mode takes priority (e.g. "pcilc_eps0.2")
+            if mode is not None:
+                mode_candidates = [str(mode)]
+            else:
+                mode_candidates = ["cilc", "con"] if constraint else ["ilc", "uncon"]
+        
+            for mode_try in mode_candidates:
+                kw = dict(
+                    mode=mode_try,
+                    extract_comp=extract_comp,
+                    component=component,
+                    frequencies=freq_str,
+                    realisation=int(realisation),
+                    lmax=int(lmax),
+                    lam=lam_str,
+                    nsamp=nsamp_str,
+                )
+                candidate = fmt.format(**kw)
+                if os.path.exists(candidate):
+                    return candidate
+        
+            # if nothing exists, return the first candidate for debugging
             kw = dict(
-                mode=mode,
-                extract_comp=extract_comp,   # target, e.g. 'cmb'
-                component=component,         # source mixture, e.g. 'cfn'
+                mode=mode_candidates[0],
+                extract_comp=extract_comp,
+                component=component,
                 frequencies=freq_str,
                 realisation=int(realisation),
                 lmax=int(lmax),
@@ -146,8 +182,6 @@ class MapAlmConverter:
                 nsamp=nsamp_str,
             )
             return fmt.format(**kw)
-
-        raise ValueError("source must be 'downloaded', 'processed', or 'ilc_synth'")
     
     def _load_map(self, path: str, field: int) -> np.ndarray:
         if not os.path.exists(path):

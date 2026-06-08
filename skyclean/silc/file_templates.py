@@ -210,21 +210,21 @@ class FileTemplates():
         # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
         "ilc_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Legacy alias (same path)
         "ilc_doubled_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
         
         # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
         "trimmed_maps": os.path.join(
             self.output_directories["ilc_trimmed_maps"],
-            "ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
-        
+
         # Final synthesized map — records target (extract_comp), source (component), and band-set
         "ilc_synth": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
@@ -241,6 +241,17 @@ class FileTemplates():
         "processed_cmb_spectrum":os.path.join(
             self.output_directories["processed_maps"],
             "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"
+        ),
+            
+        "ilc_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_spec"],
+            "{mode}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+        ),
+
+        # Optional: cross power spectrum (e.g. ILC vs processed)
+        "ilc_cross_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_cross_spec"],
+            "{mode}_{extract_comp}_from-{component}_x-{other}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         "ilc_synth_spectrum": os.path.join(
@@ -315,4 +326,3 @@ class FileTemplates():
                 print(f"{key}: {rel}")
             else:
                 print(f"{key}: (no files)")
-    

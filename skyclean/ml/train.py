@@ -1,3 +1,4 @@
+# Contributor: Qixing Deng.
 # Adapted from: https://github.com/astro-informatics/s2ai
 # Original code by: Matthew A. Price, Kevin Mulder, Jason D. McEwen
 # License: MIT
@@ -11,12 +12,13 @@ import jax.numpy as jnp
 import optax
 from flax import nnx, serialization
 import tensorflow as tf
-
 tf.config.set_visible_devices([], "GPU")
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 import s2fft
 import functools
+import orbax.checkpoint as ocp
+import atexit
 import re
 from pathlib import Path
 from datetime import datetime

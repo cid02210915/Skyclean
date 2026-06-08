@@ -121,318 +121,36 @@ class SILCTools():
 
         return x2 
 
-    @staticmethod
-    @lru_cache(maxsize=64)
-    def _cached_gauss_beam(L: int, fwhm_rad: float) -> np.ndarray:
-        """B_ell for ell=0..L-1, Gaussian beam with FWHM in radians."""
-        return hp.gauss_beam(float(fwhm_rad), lmax=int(L) - 1)  # (L,)
-    
-    # ------------------------------------------------------------
-    # Paper helpers: sigma^2, f_sky, conversions (Eqs 44 + text)
-    # ------------------------------------------------------------
+    # ---- cached Gaussian beam per L ----
+    @lru_cache(maxsize=32)
+    def _cached_beam(L: int, nsamp: float = 1200.0)-> np.ndarray:
+        lmax  = L
 
-    @staticmethod
-    @lru_cache(maxsize=256)
-    def sigma2_from_fwhm(fwhm_rad: float) -> float:
-        """Eq (44) rearranged: sigma^2 = FWHM^2 / (8 ln 2)."""
-        fwhm_rad = float(fwhm_rad)
-        if fwhm_rad <= 0.0:
-            return 0.0
-        return (fwhm_rad * fwhm_rad) / (8.0 * math.log(2.0))
-    
-    @staticmethod
-    @lru_cache(maxsize=256)
-    def f_sky_paper_from_fwhm(fwhm_rad: float) -> float:
-        """Paper approximation: f_sky ≈ sigma^2 / 2."""
-        return 0.5 * SILCTools.sigma2_from_fwhm(float(fwhm_rad))
-    
-    @staticmethod
-    def fwhm_from_sigma2(sigma2: float) -> float:
-        """Eq (44): FWHM = sqrt(8 ln2 * sigma^2)."""
-        sigma2 = float(sigma2)
-        if sigma2 <= 0.0:
-            return 0.0
-        return float(np.sqrt(8.0 * math.log(2.0) * sigma2))
-    
-    # ============================================================
-    # (B) Gaussian real-space window -> effective pixel count
-    #     (DIAGNOSTIC ONLY; NOT USED BY PAPER LOGIC)
-    # ============================================================
+        nside = 1 << (int(0.5 * lmax) - 1).bit_length()
+        npix  = hp.nside2npix(nside)
 
-    @staticmethod
-    @lru_cache(maxsize=64)
-    def n_pix_eff_gaussian_fullsky(fwhm_rad: float, nside: int) -> float:
-        """
-        Diagnostic only:
-            N_pix,eff = (ΣW)^2 / Σ(W^2)
-        """
-        fwhm_rad = float(fwhm_rad)
-        nside = int(nside)
-        if fwhm_rad <= 0.0:
-            return 0.0
-        sigma = fwhm_rad / math.sqrt(8.0 * math.log(2.0))
-        npix = hp.nside2npix(nside)
-        theta, _ = hp.pix2ang(nside, np.arange(npix))  # centered at pole
-        W = np.exp(-0.5 * (theta / sigma) ** 2)
-        s1 = float(np.sum(W))
-        s2 = float(np.sum(W * W))
-        return 0.0 if s2 == 0.0 else (s1 * s1) / s2
-    
-    @staticmethod
-    @lru_cache(maxsize=256)
-    def gaussian_pixel_counts_fullsky(fwhm_rad: float, nside: int, k_sigma: float = 3.0):
-        """
-        Diagnostic helper:
-          N_sphere_hp : total HEALPix pixels on sphere
-          N_in_gauss  : pixels with theta <= k_sigma*sigma (hard cut; not paper)
-          N_pix_eff   : (ΣW)^2/Σ(W^2) (not paper)
-          sigma       : sigma in radians
-          theta_cut   : cutoff radius in radians
-          f_sky_paper : sigma^2/2 from paper
-          f_sky_eff_hp: N_pix_eff / N_pix_fullsky(HP)
-        """
-        fwhm_rad = float(fwhm_rad)
-        nside = int(nside)
-        k_sigma = float(k_sigma)
-        sigma = fwhm_rad / math.sqrt(8.0 * math.log(2.0))
-        theta_cut = min(k_sigma * sigma, math.pi)
-        npix = hp.nside2npix(nside)
-        theta, _ = hp.pix2ang(nside, np.arange(npix))
-        N_in_gauss = int(np.count_nonzero(theta <= theta_cut))
-        W = np.exp(-0.5 * (theta / sigma) ** 2)
-        s1 = float(np.sum(W))
-        s2 = float(np.sum(W * W))
-        N_pix_eff = 0.0 if s2 == 0.0 else (s1 * s1) / s2
-        f_sky_paper = SILCTools.f_sky_paper_from_fwhm(fwhm_rad)
-        f_sky_eff_hp = float(N_pix_eff) / float(npix) if npix > 0 else float("nan")
-        return (
-            int(npix),
-            int(N_in_gauss),
-            float(N_pix_eff),
-            float(sigma),
-            float(theta_cut),
-            float(f_sky_paper),
-            float(f_sky_eff_hp),
-        )
-    
-    # ============================================================
-    # (C) Paper-style per-band FWHM (Eqs 42–44) and N_modes
-    # ============================================================
-    @staticmethod
-    def fwhm_rad_wavelet(
-        L: int,
-        lam_list: list[float],
-        ell_peak: list[float] | np.ndarray,  
-        j: int,
-        Nfreq: int,
-        lmax: int, 
-        Ndeproj: int = 0,
-        b_tol: float = 0.01,
+        frac = nsamp / npix
+        print(f"[SILCTools._cached_beam] nsamp={nsamp}, npix={npix}, nsamp/npix={frac:.3e}")
 
-    ) -> float:
-        """
-        Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for WAVELET band j.
-
-        Fix: use the smooth band window h_l^j = kappa_l^j, with per-band lambda.
-        """
-        L = int(L)
-        j = int(j)
-
-        if j < 0 or j >= len(lam_list):
-            raise ValueError(f"j={j} out of range for lam_list (len={len(lam_list)})")
-
-        ells = np.arange(L, dtype=float)
-
-        ell_min = int(L0_j_silc(j))
-        ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
-
-        lmax = int(lmax)
-        ell_data_max = min(L - 1, lmax)
-
-        ell_min = max(0, min(ell_min, ell_data_max))
-        ell_max = max(0, min(ell_max, ell_data_max))
-        if ell_min > ell_max:
-            return 0.0
-
-        lam_j = float(lam_list[j])
-        gen = AxisymmetricGenerators(lam_j)
-
-        # Evaluate kappa on a dimensionless argument; then hard-mask to the bank support.
-        ell_peak_j = float(ell_peak[j])
-        x = ells / ell_peak_j if ell_peak_j > 0 else ells
-        h = gen.kappa(x)
-
-        mask = (ells >= ell_min) & (ells <= ell_max)
-        # print(f"[fwhm_wavelet] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
-        h = h * mask
-
-        # Eq (42)
-        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-
-        width = ell_max - ell_min + 1
-        if S > 0:
-            A = abs(1 + int(Ndeproj) - int(Nfreq))
-            sigma2_dbg = 2.0 * (A / (float(b_tol) * S))
-            fwhm_arcmin_dbg = SILCTools.fwhm_from_sigma2(sigma2_dbg) * (180.0/np.pi) * 60.0
-        else:
-            fwhm_arcmin_dbg = float("inf")
         '''
-        print(
-            f"[band diag] L={L} j={j} "
-            f"ell_min={ell_min} ell_max={ell_max} width={width} "
-            f"S={S:.3e} fwhm~{fwhm_arcmin_dbg:.2f} arcmin"
-        )
+        if frac > 1.0:
+            raise ValueError(
+                f"nsamp/npix = {frac} > 1. "
+                "The smoothing kernel would be larger than the full sky; "
+                "decrease nsamp or change the resolution."
+            )
         '''
-        # Eq (43)
-        A = abs(1 + int(Ndeproj) - int(Nfreq))
-        sigma2 = 0.0 if S <= 0.0 else 2.0 * (A / (float(b_tol) * S))
+        
+        scale_fwhm = 4.0 * math.sqrt(frac)
+        return hp.gauss_beam(scale_fwhm, lmax=lmax - 1)   # (L,)
 
-        # Eq (44)
-        return SILCTools.fwhm_from_sigma2(sigma2)
-
-    @staticmethod
-    def fwhm_rad_scaling(
-        L: int,
-        lam: float,
-        J: int,
-        Nfreq: int,
-        Ndeproj: int = 0,
-        b_tol: float = 0.01,
-        scal_ell_cut: float = 64.0,
-        scal_ell_max: int = 64,
-    ) -> float:
-        """
-        Paper Eqs (42)-(44) for SCALING band, consistent with Table-1 scal: ell=0..64.
-
-        Uses: h_ell = eta(ell / scal_ell_cut), then truncates to ell<=scal_ell_max.
-        """
-        L = int(L)
-        gen = AxisymmetricGenerators(float(lam))
-        ells = np.arange(L, dtype=float)
-
-        # scaling window shape (consistent with your SimpleHarmonicWindows.scaling_raw)
-        t = ells / float(scal_ell_cut)
-        h = gen.eta(t)
-
-        # Table-1 truncation: ell in [0, 64]
-        ell_max_clip = min(int(scal_ell_max), L - 1)
-        h *= (ells <= float(ell_max_clip))
-
-        # Eq (42)
-        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-
-        # Eq (43)
-        A = abs(1 + int(Ndeproj) - int(Nfreq))
-        sigma2 = 0.0 if S <= 0.0 else 2.0 * (A / (float(b_tol) * S))
-
-        # Eq (44)
-        return SILCTools.fwhm_from_sigma2(sigma2)
-
-
-    @staticmethod
-    def n_modes_scaling_band(
-        L: int,
-        lam: float,
-        J: int,
-        fwhm_rad: float,
-        scal_ell_cut: float = 64.0,
-        scal_ell_max: int = 64,
-    ) -> float:
-        """
-        Paper local modes for scaling band, consistent with Table-1 scal: ell=0..64.
-
-          N_modes(local) = f_sky(paper) * Σ_l (2l+1) h_l^2
-        with h_l = eta(l / scal_ell_cut), truncated to l<=scal_ell_max.
-        """
-        L = int(L)
-        gen = AxisymmetricGenerators(float(lam))
-        ells = np.arange(L, dtype=float)
-
-        t = ells / float(scal_ell_cut)
-        h = gen.eta(t)
-
-        ell_max_clip = min(int(scal_ell_max), L - 1)
-        h *= (ells <= float(ell_max_clip))
-
-        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))  # Eq (42)
-        f_sky = SILCTools.f_sky_paper_from_fwhm(float(fwhm_rad))
-        return f_sky * S
-
-    
-    @staticmethod
-    def n_modes_wavelet_band(
-        L: int,
-        lam_list: list[float],
-        band_j: int,
-        fwhm_rad: float,
-        lmax: int,
-        nside_nmodes: int = 2048
-    ) -> float:
-        """
-        PAPER local modes for wavelet band j:
-            N_modes(local) = f_sky(paper) * Σ_l (2l+1) (h_l^j)^2
-        with h_l^j = kappa_l^j.
-        """
-        L = int(L)
-        j = int(band_j)
-
-        if j < 0 or j >= len(lam_list):
-            raise ValueError(f"band_j={j} out of range for lam_list (len={len(lam_list)})")
-
-        ells = np.arange(L, dtype=float)
-        ell_data_max = min(L - 1, int(lmax))
-
-        ell_min_bank = int(L0_j_silc(j))
-        ell_max_bank = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
-
-        if ell_min_bank > ell_data_max:
-            return 0.0
-
-        ell_min = max(0, ell_min_bank)
-        ell_max = min(ell_max_bank, ell_data_max)
-        if ell_min > ell_max:
-            return 0.0
-
-        lam_j = float(lam_list[j])
-        gen = AxisymmetricGenerators(lam_j)
-
-        # Dimensionless argument places the bump in the band; then we hard-mask to bank support.
-        x = ells / float(ell_peak[j]) if ell_peak[j] > 0 else ells
-        h = gen.kappa(x)
-
-        mask = (ells >= ell_min) & (ells <= ell_max)
-        # print(f"[n_modes_wavelet_band] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
-        h = h * mask
-
-        S = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-        f_sky = SILCTools.f_sky_paper_from_fwhm(float(fwhm_rad))
-        return f_sky * S
-
-    # ============================================================
-    # (D)  smoothed_covariance (pipeline-safe)
-    #     + optional info return (does NOT change default behaviour)
-    # ============================================================
 
     @staticmethod
     def smoothed_covariance(
         MW_Map1: np.ndarray,
         MW_Map2: np.ndarray,
         method: str = "jax_cuda",
-        nsamp: float = 1200,  # kept for API compatibility; ignored in paper-only usage
-        *,
-        return_info: bool = False,
-        use_paper_fwhm: bool = False,  # kept for API compatibility; forced True below
-        lam: float | None = None,
-        lmax: int,
-        band_j: int | None = None,
-        J_scal: int | None = None,   # kept for API compatibility, ignored for SILC
-        scaling: bool = False,
-        Nfreq: int | None = None,
-        Ndeproj: int = 0,
-        b_tol: float = 0.01,
-        # For diagnostics:
-        nside_nmodes: int = 2048,
-        k_sigma: float = 3.0,
+        nsamp: float = 1200.0,
     ):
         """
         PAPER-ONLY behaviour:
@@ -573,103 +291,19 @@ class SILCTools():
         key_fq = (frequencies[fq], scale)
         if key_i not in doubled_MW_wav_c_j or key_fq not in doubled_MW_wav_c_j:
             raise KeyError(f"Missing data for keys {key_i} or {key_fq}.")
-        
-        if (i == 0) and (fq == 0):
-            a = doubled_MW_wav_c_j[key_i]
-            #print(f"[cov input] scale={scale} map shape={a.shape} -> "
-            #      f"L={a.shape[0]} expected nphi={2*a.shape[0]-1} actual nphi={a.shape[1]}")
-
-        L = int(doubled_MW_wav_c_j[key_i].shape[0])
-        
-        smoothed, info = SILCTools.smoothed_covariance(
+        return i, fq, SILCTools.smoothed_covariance(
             doubled_MW_wav_c_j[key_i],
             doubled_MW_wav_c_j[key_fq],
             method=method,
-            # nsamp kept for API compatibility, ignored:
-            nsamp=0.0,
-            return_info=True,
-            use_paper_fwhm=True,
-            lam=float(lam),
-            lmax=int(lmax), 
-            Nfreq=len(frequencies),
-            Ndeproj=int(Ndeproj),
-            b_tol=float(b_tol),
-            scaling=(int(scale) == 0),
-            band_j=(int(scale) - 1) if int(scale) > 0 else None,
+            nsamp=nsamp,
         )
-
-        # ---- print once per scale ----
-        if (i == 0) and (fq == 0) and info.get("beam_source") == "paper":
-            fwhm_rad = float(info["fwhm_rad"])
-            fwhm_arcmin = fwhm_rad * (180.0 / math.pi) * 60.0
-
-            f_sky_paper = float(info.get("f_sky_paper", float("nan")))
-            f_sky_eff_hp = float(info.get("f_sky_eff_hp", float("nan")))
-
-            if int(scale) == 0:
-                Ls = scal_bandlimit_silc(L, multiresolution=True)
-                ell_max_clip = min(int(Ls) - 1, int(L) - 1)
-                tag = f"scal(ell=0..{ell_max_clip})"
-            
-                gen = AxisymmetricGenerators(float(lam))
-                ells = np.arange(int(L), dtype=float)
-                t = ells / 64.0
-                h = gen.eta(t)
-                h *= (ells <= float(min(64, L - 1)))
-            
-                N_modes_full  = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-                N_modes_local = SILCTools.n_modes_scaling_band(L, float(lam), 0, fwhm_rad)
-            
-            else:
-                j = int(scale) - 1
-            
-                # --- theoretical bank limits ---
-                ell_min_theory = int(L0_j_silc(j))
-                ell_max_theory = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
-            
-                # --- CLIP to what exists in this run (0..L-1) ---
-                ell_min_clip = max(0, min(ell_min_theory, L - 1))
-                ell_max_clip = max(0, min(ell_max_theory, L - 1))
-            
-                if ell_min_clip > ell_max_clip:
-                    tag = f"wav(j={j}, EMPTY in this run)"
-                    N_modes_full  = 0.0
-                    N_modes_local = 0.0
-                else:
-                    tag = f"wav(j={j}, ell={ell_min_clip}..{ell_max_clip})"
-            
-                    ells = np.arange(int(L), dtype=float)
-                    lam_j = float(lam_list[j])
-                    gen = AxisymmetricGenerators(lam_j)
-            
-                    ell_peak_j = float(ell_peak[j])
-                    x = ells / ell_peak_j if ell_peak_j > 0 else ells
-                    h = gen.kappa(x)
-            
-                    mask = (ells >= float(ell_min_clip)) & (ells <= float(ell_max_clip))
-                    h *= mask
-            
-                    N_modes_full  = float(np.sum((2.0 * ells + 1.0) * (h * h)))
-                    N_modes_local = SILCTools.n_modes_wavelet_band(L, lam_list, j, fwhm_rad, lmax=int(lmax))
-            
-            #print(
-            #    f"[locality] {tag}  "
-            #    f"FWHM={fwhm_arcmin:.3f} arcmin  "
-            #    f"f_sky(paper)={f_sky_paper:.3e}  "
-            #    f"f_sky(eff_hp,diag)={f_sky_eff_hp:.3e}  "
-            #    f"N_modes(full)={N_modes_full:.3e}  "
-            #    f"N_modes(local,paper)={N_modes_local:.3e}"
-            #)
-
-        return i, fq, smoothed
-
+    
 
     @staticmethod
     def calculate_covariance_matrix(frequencies: list, doubled_MW_wav_c_j: dict, scale: int,
                                     realisation: int, method: str, path_template: str, *,
-                                    component: str = "cfn", lmax: int, lam: float | None = None,
-                                    nsamp: float = 1200, overwrite: bool = False,
-                                    Ndeproj: int = 0, b_tol: float = 0.01,):
+                                    component: str = "cfn", lmax: int = 64, lam: float | None = None,
+                                    nsamp: float = 1200.0, overwrite: bool = False,):
         
         #print("calculate_covariance_matrix", flush = True)
 
@@ -762,18 +396,10 @@ class SILCTools():
                 if (not overwrite) and os.path.exists(out_path):
                     doubled = SILCTools._load_npy_with_retry(out_path)
                 else:
-                    src = original_wavelet_c_j.get((freq_tag, s))
-                    if src is None:
-                        src = original_wavelet_c_j.get((str(f), s))
-                    if src is None:
-                        known = sorted(list(original_wavelet_c_j.keys()))[:8]
-                        raise KeyError(
-                            f"Missing wavelet coeff for key {(freq_tag, s)}. "
-                            f"Sample available keys: {known}"
-                        )
-
-                    doubled = SILCTools.Single_Map_doubleworker(src, method)
-                    SILCTools._atomic_save_npy(out_path, np.asarray(doubled))
+                    doubled = SILCTools.Single_Map_doubleworker(
+                        original_wavelet_c_j[(f, s)], method
+                    )
+                    np.save(out_path, np.asarray(doubled))
 
                 doubled_MW_wav_c_j[(freq_tag, s)] = doubled
 
@@ -833,68 +459,153 @@ class SILCTools():
         return weight_vectors
     
     
-    def compute_weights_generalised(R, scale, realisation, weight_vector_matrix_template, comp, L_max, 
-                                    extract_comp, *, constraint=False, F=None, f=None, 
-                                    reference_vectors=None, lam: float | None = None,
-                                    nsamp: float | None = None, overwrite: bool = False,):
-        #print("compute_weights_generalised", flush=True)
+    def compute_weights_generalised(
+        R,
+        scale,
+        realisation,
+        weight_vector_matrix_template,
+        comp,
+        L_max,
+        extract_comp,
+        *,
+        constraint=False,
+        F=None,
+        f=None,
+        reference_vectors=None,
+        lam: float | None = None,
+        nsamp: float | None = None,
+        overwrite: bool = False,
+        # ---- NEW: pcILC (inequality / boundary) ----
+        pcilc: bool = False,
+        pcilc_component: str | None = None,      # name to auto-lookup in reference_vectors if pcilc_b is None
+        pcilc_b=None,                             # explicit b-vector (Nf,)
+        pcilc_eps: float | None = None,          # epsilon
+        pcilc_pick: str = "minvar",              # "minvar" or "sign"
+    ):
         """
-        Computes weight vectors from a covariance matrix R using either standard or generalized ILC.
+        Computes weight vectors from a covariance matrix R using:
+          - standard ILC (constraint=False),
+          - hard constrained ILC / cILC (constraint=True),
+          - pcILC (pcilc=True): |w^T b| <= eps enforced by boundary solutions.
 
         Args:
-            R (np.ndarray): (Nf,Nf) or (H,W,Nf,Nf)
-            scale (int): Wavelet scale index.
-            realisation (str): realisation id string.
-            weight_vector_matrix_template (str): Save path template.
-            comp (str): Component tag for filenames.
-            extract_comp (str or None): Target component name (for constrained ILC).
-            constraint (bool): Use constrained ILC if True.
-            F (np.ndarray): Spectral response, shape (Nf, Nc) when constraint=True.
-            f (np.ndarray): Constraint vector, shape (Nc,).
-            reference_vectors (dict): Dict of named reference spectra (for auto-f).
+            R: (Nf,Nf) or (H,W,Nf,Nf)
+            scale: wavelet scale index
+            realisation: realisation id (int-like)
+            weight_vector_matrix_template: save path template
+            comp: component tag for filenames (e.g. 'cfn')
+            L_max: L_max = lmax + 1
+            extract_comp: target component name string (e.g. 'cmb' or 'tsz')
+            constraint: if True, use cILC with (F,f)
+            F: (Nf,Nc) spectral response matrix for constraints
+            f: (Nc,) constraint target vector
+            reference_vectors: dict with named SED vectors (e.g. {"tsz": ...})
+            lam, nsamp, overwrite: bookkeeping / naming
 
-        Returns:
-            inverses, weight_vectors, singular_matrices_location, extract_comp
+            pcilc: if True, use pcILC (paper inequality formulation)
+            pcilc_component: name of b-vector to auto lookup in reference_vectors (e.g. "tsz")
+            pcilc_b: explicit b-vector, overrides auto lookup
+            pcilc_eps: epsilon tolerance
+            pcilc_pick: choose boundary solution ("minvar" or "sign")
         """
-        #print('R:', R.shape)
- 
-        # Swap the axes to get R_Pix
-        R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3) #(pix,pix,freq,freq)
-        # Get dimensions for looping and size of sub-matrices
+        import os
+        import numpy as np
+
+        # -----------------------------
+        # Basic checks / shapes
+        # -----------------------------
+        if pcilc and constraint:
+            raise ValueError("Choose either constraint=True (cILC) OR pcilc=True (pcILC), not both.")
+
+        if R.ndim == 2:
+            # Treat as a single 'pixel'
+            R_Pix = R.reshape((1, 1, R.shape[0], R.shape[1]))
+        elif R.ndim == 4:
+            # original layout expects (Nf,Nf,H,W) or (H,W,Nf,Nf)?
+            # do: swapaxes twice to get (H,W,Nf,Nf). Keep that behaviour.
+            R_Pix = np.swapaxes(np.swapaxes(R, 0, 2), 1, 3)
+        else:
+            raise ValueError(f"R must have ndim 2 or 4. Got ndim={R.ndim} with shape {R.shape}")
+
         dim1, dim2, subdim1, subdim2 = R_Pix.shape
-        #print(dim1, dim2, subdim1, subdim2)
-        # Create arrays to store inverses and weight vectors
-        inverses = np.zeros((dim1, dim2, subdim1, subdim2))
-        weight_vectors = np.zeros((dim1, dim2, subdim1)) # weight vector at each pixel (dim1,dim2) and channel
-        # Realiztion 6 has a singular matrix
-        # Adjust identity vector size based on sub-matrix dimensions
-        identity_vector = np.ones(subdim2, dtype=float)
+        if subdim1 != subdim2:
+            raise ValueError(f"Covariance sub-matrix must be square. Got {subdim1}x{subdim2}")
+
+        N_freq = subdim2
+
+        inverses = np.zeros((dim1, dim2, N_freq, N_freq))
+        weight_vectors = np.zeros((dim1, dim2, N_freq), dtype=float)
+
         singular_matrices_location = []
         singular_matrices = []
 
-        N_freq = subdim2 
+        # ---------------------------------------
+        # Standard ILC identity_vector (non-constraint)
+        # ---------------------------------------
+        identity_vector = np.ones(N_freq, dtype=float)
 
-        # --- branch config ---
+        # ---------------------------------------
+        # pcILC configuration (a,b,eps)
+        # Here we implement CMB-preserving pcILC:
+        #   w^T a = 1 with a = ones (K_CMB convention)
+        #   |w^T b| <= eps
+        # ---------------------------------------
+        eps_str = "None"
+        if pcilc:
+            if pcilc_eps is None:
+                raise ValueError("pcilc=True requires pcilc_eps (epsilon).")
+            eps = float(pcilc_eps)
+            if eps < 0.0:
+                raise ValueError("pcilc_eps must be >= 0.")
+            eps_str = f"{eps:.6g}"
+
+            # preserve CMB by default in pcILC
+            a_vec = np.ones(N_freq, dtype=float)
+
+            # b-vector: explicit or auto from reference_vectors by name
+            if pcilc_b is None:
+                if reference_vectors is None:
+                    raise ValueError("pcilc=True needs pcilc_b or reference_vectors for auto lookup.")
+                if pcilc_component is None:
+                    raise ValueError("pcilc=True needs pcilc_component when auto-looking up pcilc_b.")
+                key = str(pcilc_component).lower()
+                if key not in reference_vectors:
+                    raise ValueError(
+                        f"pcilc_component='{key}' not found in reference_vectors. "
+                        f"Available keys: {sorted(list(reference_vectors.keys()))}"
+                    )
+                pcilc_b = reference_vectors[key]
+
+            b_vec = np.asarray(pcilc_b, dtype=float).reshape((-1,))
+            if b_vec.shape != (N_freq,):
+                raise ValueError(f"pcilc_b must have shape ({N_freq},), got {b_vec.shape}")
+
+            if pcilc_pick not in ("minvar", "sign"):
+                raise ValueError("pcilc_pick must be 'minvar' or 'sign'.")
+
+        # ---------------------------------------
+        # cILC configuration (F,f)
+        # ---------------------------------------
         if constraint:
             if F is None:
                 raise ValueError("F must be provided when constraint=True")
-            #print ('F:',F.shape)
+            F = np.asarray(F, dtype=float)
             Nf_F, N_comp = F.shape
             if Nf_F != N_freq:
                 raise ValueError(f"F has {Nf_F} rows but R has {N_freq} channels")
 
-            # Automatically set f from extract_comp if given
             if f is None and extract_comp is not None:
                 f = ILCConstraints.find_f_from_extract_comp(F, extract_comp, reference_vectors)
-            #print ('f:', f.shape)
+
             if f is None:
                 raise ValueError("Constraint vector f must be provided (or inferable) when constraint=True")
+            f = np.asarray(f, dtype=float).reshape((-1,))
             if f.shape != (N_comp,):
                 raise ValueError(f"Constraint vector f must have shape ({N_comp},)")
         else:
             # Unconstrained ILC uses the all-ones vector; no F/extract_comp needed
             identity_vector = np.ones(N_freq, dtype=float)
-            # print (identity_vector)   
+            print (identity_vector)   
 
             # ----------------------------------------------------------
 
@@ -907,20 +618,27 @@ class SILCTools():
             extract_comp=extract_comp,
             scale=int(scale),
             realisation=int(realisation),
-            lmax=int(L_max-1),
+            lmax=int(L_max - 1),
             lam=str(lam),
-            nsamp=nsamp, 
+            nsamp=nsamp,
+            eps=eps_str,
         )
+
         weight_path = weight_vector_matrix_template.format(**fmt)
 
         if (not overwrite) and os.path.exists(weight_path):
-            weight_vectors = SILCTools._load_npy_with_retry(weight_path)
+            weight_vectors = np.load(weight_path)
             # return dummy inverses + existing weights
             return None, weight_vectors, [], extract_comp
 
-        # Track constraint singularities (mirrors R singular tracking)
+        # Track constraint singularities separately
         singular_constraints_location = []
         singular_constraints = []
+
+        # ---------------------------------------
+        # Main loop
+        # ---------------------------------------
+        tol = 1e-12
 
         for i in range(dim1):
             for j in range(dim2):
@@ -945,7 +663,7 @@ class SILCTools():
                         constraint_matrix = np.dot(FT_Rinv, F)       # (Nc, Nc)
                         #print ('constraint_matrix:', constraint_matrix.shape)
 
-                        # singularity check for (Fᵗ R⁻¹ F)
+                        # singularity check for (Fᵗ R⁻¹ F) --- mirrors your R check
                         G_det = np.linalg.det(constraint_matrix)
                         if G_det == 0:
                             zeros = np.zeros((subdim1))
@@ -986,17 +704,17 @@ class SILCTools():
                         weight_vectors[i, j] = numerator / denominator
 
         if len(singular_matrices_location) > 0:
-            print("Discovered ", len(singular_matrices_location), "singular matrices at scale", scale, "realisation", realisation)
+            print("Discovered", len(singular_matrices_location),
+                  "singular covariance matrices at scale", scale, "realisation", realisation)
         if len(singular_constraints_location) > 0:
-            print("Discovered ", len(singular_constraints_location),
-              "constraint singularities (F^T R^{-1} F) at scale", scale, "realisation", realisation)
+            print("Discovered", len(singular_constraints_location),
+                  "constraint singularities at scale", scale, "realisation", realisation)
 
-        # save final weight vector matrix
         if overwrite or not os.path.exists(weight_path):
-            SILCTools._atomic_save_npy(weight_path, weight_vectors)
+            np.save(weight_path, weight_vectors)
 
         return inverses, weight_vectors, singular_matrices_location, extract_comp
-    
+
 
     @staticmethod
     def create_doubled_ILC_map(frequencies, scale, weight_vector_load, doubled_MW_wav_c_j, *_, **__):
@@ -1021,7 +739,8 @@ class SILCTools():
     @staticmethod
     def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str, *, 
                          path_template:str, component: str, extract_comp: str, lmax:int, 
-                         lam: float | None = None, nsamp: float | None = None, overwrite: bool = False,):
+                         lam: float | None = None, nsamp: float | None = None, 
+                         overwrite: bool = False, mode: str,):
 
         #print("trim_to_original", flush=True)
         """
@@ -1080,6 +799,7 @@ class SILCTools():
             lmax = inner_v - 1
             lam_str = str(lam)
             save_path = path_template.format(
+                mode=mode,
                 component=component,
                 extract_comp=extract_comp,
                 scale=scale,
@@ -1212,7 +932,7 @@ class SILCTools():
     def synthesize_ILC_maps_generalised(
         trimmed_maps, realisation, file_templates, lmax, N_directions,lam, component=None, 
         extract_comp=None, visualise=False, constraint=None, frequencies=None, F=None, f=None, 
-        reference_vectors=None, nsamp=None, overwrite: bool = False, 
+        reference_vectors=None, nsamp=None, overwrite: bool = False, mode: str = "ilc",
     ):
         #print("synthesize_ILC_maps_generalised", flush=True)
         """
@@ -1241,7 +961,7 @@ class SILCTools():
         # 3) build filters and synthesise
         L = int(lmax) + 1
         
-        # print('shapes:',[w.shape for w in trimmed_maps])
+        print([w.shape for w in trimmed_maps])
         MW_Pix = MWTools.inverse_wavelet_transform(trimmed_maps, L, N_directions=int(1), lam=float(lam))
 
         # 4) Save
@@ -1264,7 +984,13 @@ class SILCTools():
         # 5) Visualise
         if visualise:
             try:
-                prefix = "cILC" if extract_comp else "ILC"
+                if str(mode).startswith("pcilc"):
+                    prefix = "pcILC"
+                elif str(mode) == "cilc":
+                    prefix = "cILC"
+                else:
+                    prefix = "ILC"
+        
                 name = extract_comp.upper() if extract_comp else ""
                 title = f"{prefix} {name} | r={realisation_str}, lmax={int(lmax)}, N={N_directions}, λ={lam}".strip()
                 SILCTools.visualize_MW_Pix_map(MW_Pix, title)
@@ -1328,24 +1054,34 @@ class ProduceSILC():
         files = FileTemplates(self.directory)
         self.file_templates = files.file_templates
 
-        L = self.lmax + 1  # convert lmax -> bandlimit
-        js = SILCTools.wavelet_js_custom(L)
-        self.scales = range(len(js) + 1)  # +1 scaling
-        self._js = js  # store mapping if you need it
+        # ilc_wavelet_paths, wavelet_map_directories, silc_output_dir, file_templates
+        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam) # use length of filter to obtain n_scales
+        self.scales = range(len(filter_sample[0]) + 1) 
 
 
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, lam,
                               N_directions, comp, constraint=False, F=None, extract_comp=None,
                              reference_vectors=None, nsamp=None, overwrite: bool = False,):
-    
-        L = int(L_max)
-        js = SILCTools.wavelet_js_custom(L)
-        scales = range(len(js) + 1)
-        lmax = L - 1 
 
-        print(f"[DEBUG] passed L_max={L_max} -> L={int(L_max)} lmax={int(L_max)-1}")
-        print(f"[DEBUG] wavelet_js_custom(L)={SILCTools.wavelet_js_custom(int(L_max))}")
- 
+        lmax = L_max - 1  
+        realisations = [int(r) for r in realisations]
+        filter_sample = filters.filters_directional_vectorised(lmax+1, N_directions, lam = float(lam)) # use length of filter to obtain n_scales
+        scales = range(len(filter_sample[0]) + 1) 
+
+        '''
+        def _check_against_F(W, F, f, tol=1e-6, scale=None):
+            W = np.asarray(W)
+            if W.ndim == 2 and 1 in W.shape:
+                W = W.reshape(-1)
+            resp = np.tensordot(W, F, axes=([-1], [0]))
+            ok = np.allclose(resp, f, atol=tol, rtol=0.0)
+            tag = f" [scale={scale}]" if scale is not None else ""
+            print(f"FINAL CHECK F^T w == f{tag} -> {ok}")
+            if not ok:
+                print(f"max |F^T w - f|{tag} = {float(np.max(np.abs(resp - f)))}")
+            return ok
+        '''
+        
         def _check_against_F(W, F, f, tol=1e-6):
             W = np.asarray(W)
             if W.ndim == 2 and 1 in W.shape:   # (1,Nf) or (Nf,1) -> (Nf,)
@@ -1379,14 +1115,6 @@ class ProduceSILC():
                 raise ValueError("For unconstrained ILC, pass a single extract_comp (e.g., 'cmb').")
             _, extract_comp = normalize_targets(extract_comp)
             f = None  # not used in unconstrained mode
-        # ---- derive Ndeproj automatically ----
-        if constraint:
-            N_constraints = int(F.shape[1])      # columns = number of constraint spectra
-            Ndeproj = max(N_constraints - 1, 0)  # deproject all except the preserved one
-        else:
-            Ndeproj = 0
-
-        b_tol = 0.01
             
         synthesized_map = []
         
@@ -1495,7 +1223,11 @@ class ProduceSILC():
                     reference_vectors=reference_vectors,
                     lam=str(lam),
                     nsamp=nsamp,
-                    overwrite=overwrite,  
+                    overwrite=overwrite,
+                    pcilc=pcilc,
+                    pcilc_component=pcilc_component,
+                    pcilc_eps=pcilc_eps,
+                    pcilc_pick=pcilc_pick,
                 )
 
             dt = time.perf_counter() - t0
@@ -1505,7 +1237,14 @@ class ProduceSILC():
             # Load weights (in order)
             weight_vector_load = []
             W_for_final_check = None
-            name = f"cilc_{extract_comp}" if constraint else "weight_vector"
+
+            if pcilc:
+                eps_str = f"{float(pcilc_eps):.6g}"
+                name = f"pcilc_{extract_comp}_eps{eps_str}"
+            elif constraint:
+                name = f"cilc_{extract_comp}"
+            else:
+                name = "weight_vector"
 
             for scale in scales:
                 weight_vector_path = output_templates['weight_vector_matrices'].format(
@@ -1541,6 +1280,7 @@ class ProduceSILC():
                 )
                 doubled_maps.append(map_)
                 ilc_path = output_templates['ilc_maps'].format(
+                    mode=mode,
                     component=comp,
                     extract_comp=extract_comp,
                     scale=scale,
@@ -1562,6 +1302,7 @@ class ProduceSILC():
             trimmed_maps = []
             for i, sc in enumerate(scales):
                 save_path = output_templates['trimmed_maps'].format(
+                    mode=mode,
                     component=comp,
                     extract_comp=extract_comp,
                     scale=int(sc),
@@ -1602,6 +1343,7 @@ class ProduceSILC():
                         lam=str(lam),
                         nsamp=nsamp,
                         overwrite=overwrite, 
+                        mode=mode,
                     )
 
                 # Ensure saved on disk (trim_to_original already saved when path_template provided,
@@ -1634,6 +1376,7 @@ class ProduceSILC():
              reference_vectors=reference_vectors,
              nsamp=nsamp,
              overwrite=overwrite, 
+             mode=mode,
             )         
             synthesized_map.append(np.asarray(synth_map))
 
@@ -1643,4 +1386,4 @@ class ProduceSILC():
                 W_for_final_check = weight_vector_load[mid_idx]
                 _check_against_F(W_for_final_check, F, f)
 
-        return synthesized_map, timings
+            return synthesized_map, timings
