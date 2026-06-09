@@ -25,6 +25,7 @@ class MapAlmConverter:
         extract_comp: Optional[str] = None,
         frequencies: Optional[Union[str, int, Iterable[int]]] = None,
         lam: Optional[Union[int, float, str]] = None,
+        N_directions: Optional[int] = None,
         nsamp: float | None = None, 
         constraint: bool | None = None, 
         mode: Optional[str] = None,
@@ -36,8 +37,8 @@ class MapAlmConverter:
         path = self._format_path(
             component=component, source=source,
             frequency=frequency, realisation=realisation, lmax=lmax,
-            extract_comp=extract_comp, frequencies=frequencies, lam=lam, 
-            nsamp=nsamp, constraint=constraint, mode=mode,
+            extract_comp=extract_comp, frequencies=frequencies, lam=lam,
+            N_directions=N_directions, nsamp=nsamp, constraint=constraint, mode=mode,
         )
 
         print(
@@ -87,6 +88,7 @@ class MapAlmConverter:
         frequency: Optional[Union[int, str]],
         realisation: Optional[int],
         lmax: Optional[int],
+        N_directions: Optional[int],
         extract_comp: Optional[str],
         frequencies: Optional[Union[str, int, Iterable[int]]],
         lam: Optional[Union[int, float, str]],
@@ -143,12 +145,6 @@ class MapAlmConverter:
                 nsamp = 1200  
             nsamp_str = str(int(nsamp))
 
-            mode = "con" if constraint else "uncon"
-
-            if nsamp is None:
-                nsamp = 1200  
-            nsamp_str = str(int(nsamp))
-
             # explicit mode takes priority (e.g. "pcilc_eps0.2")
             if mode is not None:
                 mode_candidates = [str(mode)]
@@ -163,6 +159,7 @@ class MapAlmConverter:
                     frequencies=freq_str,
                     realisation=int(realisation),
                     lmax=int(lmax),
+                    N_directions=int(N_directions),
                     lam=lam_str,
                     nsamp=nsamp_str,
                 )
@@ -176,6 +173,7 @@ class MapAlmConverter:
                 extract_comp=extract_comp,
                 component=component,
                 frequencies=freq_str,
+                N_directions=int(N_directions),
                 realisation=int(realisation),
                 lmax=int(lmax),
                 lam=lam_str,
