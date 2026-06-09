@@ -143,6 +143,12 @@ class MapAlmConverter:
                 nsamp = 1200  
             nsamp_str = str(int(nsamp))
 
+            mode = "con" if constraint else "uncon"
+
+            if nsamp is None:
+                nsamp = 1200  
+            nsamp_str = str(int(nsamp))
+
             # explicit mode takes priority (e.g. "pcilc_eps0.2")
             if mode is not None:
                 mode_candidates = [str(mode)]

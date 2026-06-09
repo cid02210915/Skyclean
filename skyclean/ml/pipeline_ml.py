@@ -1,36 +1,10 @@
-# Contributor: Qixing Deng.
 # skyclean/ml/pipeline_ml.py
 import os
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # helps OOM/fragmentation
-
-
-def _fix_curly_quotes_in_ml_dir():
-    """Replace curly/smart quotes with straight ASCII quotes in all ml .py files.
-
-    Curly quotes (e.g. U+201C/U+201D) can appear in source files when comments
-    are written in editors that auto-convert quotes, causing SyntaxError on import.
-    This runs once at pipeline startup before any ml module is imported.
-    """
-    _CURLY = {'\u201c': '"', '\u201d': '"', '\u2018': "'", '\u2019': "'"}
-    ml_dir = os.path.dirname(os.path.abspath(__file__))
-    for fname in os.listdir(ml_dir):
-        if not fname.endswith('.py'):
-            continue
-        fpath = os.path.join(ml_dir, fname)
-        with open(fpath, 'r', encoding='utf-8') as f:
-            original = f.read()
-        fixed = original
-        for curly, straight in _CURLY.items():
-            fixed = fixed.replace(curly, straight)
-        if fixed != original:
-            with open(fpath, 'w', encoding='utf-8') as f:
-                f.write(fixed)
-            print(f"[fix_quotes] Fixed curly quotes in: {fname}")
-
-_fix_curly_quotes_in_ml_dir()
-
+# use gpi1
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 import jax
 jax.config.update("jax_enable_x64", False)
@@ -49,51 +23,35 @@ import glob
 import tensorflow as tf
 tf.config.set_visible_devices([], "GPU")
 
-from skyclean.ml.train import Train
+from skyclean.ml.train import Train, resolve_checkpoint_target
 from skyclean.ml.inference import Inference
-from skyclean.silc.file_templates import FileTemplates
-from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumTT
+from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
+from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
 
 
-def find_latest_checkpoint_dir(model_dir: str) -> str:
-    model_dir = Path(model_dir)
-    if not model_dir.exists():
-        raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
+def resolve_evaluate_target(args) -> str:
+    """
+    Resolve evaluation target from CLI args.
 
-    pat = re.compile(r"^checkpoint_(\d+)$")
-    candidates = []
-    for p in model_dir.iterdir():
-        if not p.is_dir():
-            continue
-        m = pat.match(p.name)
-        if not m:
-            continue
-        # Accept Orbax or fallback serializer checkpoints, skip plot-only folders.
-        names = {x.name for x in p.iterdir()}
-        valid = (
-            (p / "_METADATA").exists()
-            or (p / "_CHECKPOINT_METADATA").exists()
-            or (p / "state.msgpack").exists()
-            or any(n not in {"prediction.png", "training_metrics.png", "training_log.npy", "spectrum.png"} for n in names)
-        )
-        if valid:
-            candidates.append((int(m.group(1)), p))
+    Accepted inputs:
+    - `--model-dir` pointing to a run directory containing checkpoint_* folders
+    - `--model-dir` pointing directly to a checkpoint_* directory
+    - `--run-id` pointing to ML/models/<run_id>
+    """
+    if args.model_dir.strip():
+        return os.path.abspath(args.model_dir.strip())
 
-    if not candidates:
+    files = FileTemplates(args.directory)
+    run_id = args.run_id.strip()
+    if not run_id:
+        raise ValueError("Evaluation requires either --run-id or --model-dir.")
+    base_model_dir = os.path.abspath(files.output_directories["ml_models"])
+    run_dir = os.path.join(base_model_dir, run_id)
+    if not os.path.isdir(run_dir):
         raise FileNotFoundError(
-            f"No valid checkpoint_<epoch> folders found in {model_dir}. "
-            f"Expected: {model_dir}/checkpoint_<epoch>"
-        )
-
-    candidates.sort(key=lambda t: t[0])
-    epoch, ckpt_path = candidates[-1]
-    print(f"[checkpoint] Latest checkpoint detected: epoch={epoch}, path={ckpt_path}")
-    return str(ckpt_path)
-
-
-def resolve_model_dir_from_directory(directory: str) -> str:
-    files = FileTemplates(directory)
-    return os.path.abspath(files.output_directories["ml_models"])
+            f"Run directory does not exist: {run_dir}. "
+            "With --run-id, checkpoints are expected under ML/models/<run_id>/checkpoint_<epoch>.")
+    return run_dir
 
 
 def parse_args():
@@ -111,7 +69,8 @@ def parse_args():
 
     # ----- match Train signature -----
     parser.add_argument("--extract-comp", type=str, default="cmb")
-    parser.add_argument("--component", type=str, default="cfn")
+    parser.add_argument("--component", type=str, default="cfn",
+                        help="Input map product key, e.g. cfn, cfne, cfne_circ, or cfne_pix_N.")
 
     parser.add_argument("--frequencies", nargs="+", default=["030", "100", "353"])
     parser.add_argument("--realisations", type=int, default=1000)
@@ -125,8 +84,13 @@ def parse_args():
 
 
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--no-shuffle", action="store_true")
-    parser.add_argument("--split", nargs=2, type=float, default=[0.8, 0.2])
+    parser.add_argument(
+        "--split",
+        nargs="+",
+        type=float,
+        default=[0.8, 0.1, 0.1],
+        help="Train/validation/test split ratios. Recommended: 0.8 0.1 0.1",
+    )
 
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -134,7 +98,6 @@ def parse_args():
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64])
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
-    # ziming: `--random` 是纯 flag（store_true），调用方应仅传 `--random`，不要传 `--random True`。
     parser.add_argument("--random", dest="random", action="store_true",
                         help="Enable random map generation for tests.")
     parser.add_argument("--no-random", dest="random", action="store_false",
@@ -151,9 +114,6 @@ def parse_args():
     parser.add_argument("--loss-tag", type=str, default=None)
 
     # ----- inference controls -----
-    parser.add_argument("--realisation-infer", type=int, default=0)
-    parser.add_argument("--plot", action="store_true", default=False)
-
     parser.add_argument("--model-dir", type=str, default="",
             help="Override model directory containing checkpoint_<epoch> folders. "
              "If empty, derived from FileTemplates(directory) like Train.")
@@ -167,19 +127,31 @@ def parse_args():
     # ----- evaluation controls -----
     parser.add_argument("--eval-every", type=int, default=1, 
             help="Run evaluation every N epochs (default: 1 = every epoch).")
-    parser.add_argument("--eval-steps", type=int, default=-1, 
-            help="Number of eval batches per evaluation. -1 means full test set.")
+    
     parser.add_argument(
-        "--prefetch",
-        dest="prefetch",
-        action="store_true",
-        help="Enable tf.data prefetching in training.",
+        "--early-stopping-patience",
+        type=int,
+        default=2,
+        help="Number of non-improving validation checks allowed before stopping.",
     )
     parser.add_argument(
-        "--no-prefetch",
-        dest="prefetch",
-        action="store_false",
-        help="Disable tf.data prefetching in training.",
+        "--early-stopping-min-delta",
+        type=float,
+        default=1e-3,
+        help="Minimum validation-loss improvement required to reset early stopping.",
+    )
+    parser.add_argument(
+        "--eval-batches",
+        "--eval-steps",
+        dest="eval_batches",
+        type=int,
+        default=-1,
+        help="Number of validation batches per evaluation run. -1 means full test set.",
+    )
+    parser.add_argument(
+        "--prefetch",
+        action="store_true",
+        help="Enable tf.data prefetching in training. Default is disabled unless this flag is passed.",
     )
     parser.set_defaults(prefetch=False)
     parser.set_defaults(random=False)
@@ -191,8 +163,6 @@ def step_train(args) -> str:
     """
     Train model and return the resolved model_dir where checkpoints were saved.
     """
-    shuffle = not args.no_shuffle
-
     trainer = Train(
         extract_comp=args.extract_comp,
         component=args.component,
@@ -204,7 +174,6 @@ def step_train(args) -> str:
         nsamp=args.nsamp,
         constraint=args.constraint,
         batch_size=args.batch_size,
-        shuffle=shuffle,
         split=args.split,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -216,9 +185,11 @@ def step_train(args) -> str:
         loss_tag=args.loss_tag,
         random_generator=args.random,
         eval_every=args.eval_every,
-        eval_steps=args.eval_steps,
+        eval_steps=args.eval_batches,
         prefetch=args.prefetch,
         run_id=(args.run_id.strip() or None),
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
     )
     cfg_path = trainer.save_run_config(vars(args))
     print(f"[train] run_id={trainer.run_id}")
@@ -227,130 +198,35 @@ def step_train(args) -> str:
     return trainer.model_dir
 
 
-def infer_args_from_checkpoint(
-    ckpt_dir: str,
-    *,
-    realisation_infer: int | None = None,
-    directory: str | None = None,
-):
-    """
-    Infer pipeline args from checkpoint path by parsing ilc_improved map filenames.
-    """
-    ckpt_path = Path(ckpt_dir).resolve()
-    ckpt_name = ckpt_path.name
 
-    m_ckpt = re.search(r"checkpoint_(\d+)", ckpt_name)
-    ckpt_epoch = int(m_ckpt.group(1)) if m_ckpt else None
-
-    if directory is None:
-        s = str(ckpt_path)
-        if "/ML/models/" in s:
-            directory = s.split("/ML/models/")[0]
-        elif "/ML/model/" in s:
-            directory = s.split("/ML/model/")[0]
-        else:
-            directory = str(ckpt_path.parent.parent.parent)
-
-    files = FileTemplates(directory)
-    improved_dir = files.output_directories["ilc_improved_maps"]
-    candidates = sorted(glob.glob(os.path.join(improved_dir, "*.npy")))
-    if not candidates:
-        raise FileNotFoundError(f"No ilc_improved maps found in: {improved_dir}")
-
-    pat = re.compile(
-        r"^(?P<mode>con|uncon)_(?P<extract>[^_]+)_from-(?P<component>[^_]+)_improved_"
-        r"f(?P<freqs>\d+(?:_\d+)*)_r(?P<real>\d+)_lmax(?P<lmax>\d+)_lam(?P<lam>[0-9.]+)_"
-        r"nsamp(?P<nsamp>\d+)_rn(?P<rn>\d+)_batch(?P<batch>\d+)_epo(?P<epo>\d+)_"
-        r"lr(?P<lr>[-+0-9.eE]+)_mom(?P<mom>[-+0-9.eE]+)_chs(?P<chs>\d+(?:_\d+)*)\.npy$"
-    )
-
-    parsed = []
-    for fp in candidates:
-        m = pat.match(os.path.basename(fp))
-        if not m:
-            continue
-        d = m.groupdict()
-        d["path"] = fp
-        d["epo"] = int(d["epo"])
-        parsed.append(d)
-
-    if not parsed:
-        raise RuntimeError(
-            f"Found files in {improved_dir}, but none matched expected improved-map filename pattern."
-        )
-
-    if ckpt_epoch is not None:
-        epoch_matches = [p for p in parsed if p["epo"] == ckpt_epoch]
-    else:
-        epoch_matches = parsed
-
-    if not epoch_matches:
-        raise RuntimeError(
-            f"No improved-map filename matched checkpoint epoch={ckpt_epoch} in {improved_dir}."
-        )
-
-    chosen = max(epoch_matches, key=lambda p: os.path.getmtime(p["path"]))
-
-    inferred_realisation = int(chosen["real"])
-    args = argparse.Namespace(
-        extract_comp=chosen["extract"],
-        component=chosen["component"],
-        frequencies=chosen["freqs"].split("_"),
-        realisations=int(chosen["rn"]),
-        realisation_infer=inferred_realisation if realisation_infer is None else int(realisation_infer),
-        lmax=int(chosen["lmax"]),
-        N_directions=1,
-        lam=float(chosen["lam"]),
-        nsamp=int(chosen["nsamp"]),
-        constraint=(chosen["mode"] == "con"),
-        batch_size=int(chosen["batch"]),
-        epochs=int(chosen["epo"]),
-        learning_rate=float(chosen["lr"]),
-        momentum=float(chosen["mom"]),
-        chs=[int(x) for x in chosen["chs"].split("_")],
-        directory=directory,
-        mode="evaluate",
-        no_shuffle=False,
-        split=[0.8, 0.2],
-        seed=42,
-        random=False,
-        resume_training=False,
-        loss_tag=None,
-        model_dir="",
-        eval_every=1,
-        eval_steps=-1,
-        prefetch=False,
-        plot=False,
-    )
-
-    print(f"[infer_args_from_checkpoint] checkpoint: {ckpt_dir}")
-    print(f"[infer_args_from_checkpoint] matched improved map: {chosen['path']}")
-    return args
-
-
-def step_spec(args=None, ckpt_dir: str | None = None):
+def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
     """
     Compute TT power spectra for:
       - processed_cmb (HEALPix)
       - ilc_synth (MW)
       - ilc_improved (MW)
-    using the same core flow as SILC step_power_spec: map -> alm -> C_ell -> D_ell.
+    Also compute cross power spectra for:
+      - ilc vs processed_cmb (MW x HEALPix)
+      - ml vs processed_cmb (MW x HEALPix)
 
     Returns
     -------
     dict:
         {
-          "processed_cmb": {"ell", "cl", "Dl", "path"},
-          "ilc_synth":     {"ell", "cl", "Dl", "path"},
-          "ilc_improved":  {"ell", "cl", "Dl", "path"},
+          "processed_cmb": {"ell", "cl", "path"},
+          "ilc_synth":     {"ell", "cl", "path"},
+          "ilc_improved":  {"ell", "cl", "path"},
+          "ilc-cmb":       {"ell", "cl", "path"},
+          "ml-cmb":        {"ell", "cl", "path"},
         }
     """
-    if args is None:
-        if ckpt_dir is None:
-            raise ValueError("step_spec requires either args or ckpt_dir.")
-        args = infer_args_from_checkpoint(ckpt_dir)
 
     files = FileTemplates(args.directory)
+    register_pixel_ps_component_template(
+        files.file_templates,
+        files.output_directories,
+        args.component,
+    )
     ft = files.file_templates
     conv = MapAlmConverter(ft)
 
@@ -358,30 +234,39 @@ def step_spec(args=None, ckpt_dir: str | None = None):
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
-    realisation = int(args.realisation_infer)
+    if hasattr(args, "realisation") and args.realisation is not None:
+        realisation = int(args.realisation)
+    else:
+        split = np.asarray(args.split, dtype=float)
+        if len(split) == 2:
+            split = np.asarray([split[0], split[1] / 2.0, split[1] / 2.0], dtype=float)
+        n_train = int(split[0] * args.realisations)
+        n_val = int(split[1] * args.realisations)
+        test_ids = np.arange(args.realisations)[n_train + n_val:]
+        if len(test_ids) == 0:
+            raise ValueError("step_spec could not determine a test realisation because the test split is empty.")
+        realisation = int(test_ids[0])
     lmax = int(args.lmax)
     nsamp = int(args.nsamp)
 
     results = {}
 
-    # 1) processed_cmb (HEALPix) -> alm -> C_ell
+    # 1) auto-spectra: processed_cmb (HEALPix) -> alm -> C_ell
     out_proc = conv.to_alm(
         component="cmb",
         source="processed",
         realisation=realisation,
         lmax=lmax,
     )
-    print(f"[step_spec] loading processed_cmb map from: {out_proc['path']}")
+    print(f"[Spectrum] loading processed_cmb map from: {out_proc['path']}")
     ell_proc, cl_proc = PowerSpectrumTT.from_healpy_alm(out_proc["alm"])
-    Dl_proc = PowerSpectrumTT.cl_to_Dl(ell_proc, cl_proc, input_unit="K")
     results["processed_cmb"] = {
         "ell": ell_proc,
         "cl": cl_proc,
-        "Dl": Dl_proc,
         "path": out_proc["path"],
     }
 
-    # 2) ilc_synth (MW) -> alm -> C_ell
+    # 2) auto-spectra: ilc_synth (MW) -> alm -> C_ell
     out_synth = conv.to_alm(
         component=args.component,
         source="ilc_synth",
@@ -393,18 +278,17 @@ def step_spec(args=None, ckpt_dir: str | None = None):
         nsamp=nsamp,
         constraint=args.constraint,
     )
-    print(f"[step_spec] loading ilc_synth map from: {out_synth['path']}")
+    print(f"[Spectrum] loading ilc_synth map from: {out_synth['path']}")
     ell_synth, cl_synth = PowerSpectrumTT.from_mw_alm(np.asarray(out_synth["alm"]))
-    Dl_synth = PowerSpectrumTT.cl_to_Dl(ell_synth, cl_synth, input_unit="K")
     results["ilc_synth"] = {
         "ell": ell_synth,
         "cl": cl_synth,
-        "Dl": Dl_synth,
         "path": out_synth["path"],
     }
 
-    # 3) ilc_improved (MW) -> alm -> C_ell
-    improved_map_path = ft["ilc_improved"].format(
+
+    # 3) auto-spectra: ilc_improved (MW) -> alm -> C_ell
+    improved_filename = os.path.basename(ft["ilc_improved"].format(
         mode=mode,
         extract_comp=args.extract_comp,
         component=args.component,
@@ -419,16 +303,22 @@ def step_spec(args=None, ckpt_dir: str | None = None):
         lr=args.learning_rate,
         momentum=args.momentum,
         chs=chs,
+    ))
+    if args.checkpoint_epoch is None:
+        raise ValueError("[spectrum] checkpoint_epoch is required for checkpoint-layered ML prediction paths.")
+    improved_map_path = os.path.join(
+        files.output_directories["cmb_prediction"],
+        args.run_id,
+        "ilc_improved_maps",
+        f"checkpoint_{int(args.checkpoint_epoch)}",
+        improved_filename.replace(".npy", f"_ckpt{int(args.checkpoint_epoch)}.npy"),
     )
-    print(f"[step_spec] loading ilc_improved map from: {improved_map_path}")
+    print(f"[Spectrum] loading ilc_improved map from: {improved_map_path}")
     if not os.path.exists(improved_map_path):
         if ckpt_dir is None:
-            raise FileNotFoundError(
-                f"[step_spec] improved map not found: {improved_map_path}. "
-                "Provide ckpt_dir so step_spec can generate it via inference."
-            )
+            raise FileNotFoundError(f"[Spectrum] improved map not found: {improved_map_path}. ")
 
-        print("[step_spec] improved map missing. Generating it via existing inference pipeline...")
+        print("[Spectrum] ML map missing. Generating it via existing inference pipeline...")
         inference = Inference(
             extract_comp=args.extract_comp,
             component=args.component,
@@ -447,17 +337,16 @@ def step_spec(args=None, ckpt_dir: str | None = None):
             epochs=args.epochs,
             learning_rate=args.learning_rate,
             momentum=args.momentum,
+            run_id=args.run_id,
         )
         model = inference.load_model(force_load=True)
         if model is None:
-            raise RuntimeError(
-                f"[step_spec] failed to load model from checkpoint: {ckpt_dir}"
-            )
+            raise RuntimeError(f"[spectrum] failed to load model from checkpoint: {ckpt_dir}")
         inference.predict_cmb(realisation=realisation)
 
         if not os.path.exists(improved_map_path):
             raise FileNotFoundError(
-                "[step_spec] improved map still missing after inference generation: "
+                "[spectrum] improved map still missing after inference generation: "
                 f"{improved_map_path}"
             )
 
@@ -466,91 +355,55 @@ def step_spec(args=None, ckpt_dir: str | None = None):
     arr = np.asarray(np.real(np.squeeze(improved_map)), dtype=np.float64, order="C")
     alm_mw = s2fft.forward(arr, L=L)
     ell_improved, cl_improved = PowerSpectrumTT.from_mw_alm(np.asarray(alm_mw))
-    Dl_improved = PowerSpectrumTT.cl_to_Dl(ell_improved, cl_improved, input_unit="K")
     results["ilc_improved"] = {
         "ell": ell_improved,
         "cl": cl_improved,
-        "Dl": Dl_improved,
         "path": improved_map_path,
     }
 
-    # Save improved spectrum in canonical SILC location (kept for compatibility).
-    improved_spec_path = ft["ilc_improved_spectrum"].format(
-        mode=mode,
-        extract_comp=args.extract_comp,
-        component=args.component,
-        frequencies=freq_tag,
-        realisation=realisation,
-        lmax=lmax,
-        lam=lam_str,
-        nsamp=nsamp,
-        rn=int(args.realisations),
-        batch=int(args.batch_size),
-        epochs=int(args.epochs),
-        lr=args.learning_rate,
-        momentum=args.momentum,
-        chs=chs,
+    # 4) cross-spectra: ilc vs processed_cmb (MW x HEALPix) -> C_ell
+    ell_cross_ilc, cl_cross_ilc = PowerSpectrumCrossTT.from_any_alms(
+        alm_X = out_synth["alm"],
+        fmt_X = "mw",
+        alm_Y = out_proc["alm"],
+        fmt_Y = "healpy",
     )
-    os.makedirs(os.path.dirname(improved_spec_path), exist_ok=True)
-    np.save(
-        improved_spec_path,
-        {"ell": ell_improved, "cl": cl_improved, "Dl": Dl_improved},
+    results["ilc-cmb"] = {
+        "ell": ell_cross_ilc,
+        "cl": cl_cross_ilc,
+        "path": out_synth["path"],
+    }
+
+    # 5) cross-spectra: ml vs processed_cmb (MW x HEALPix) -> C_ell
+    ell_cross_ml, cl_cross_ml = PowerSpectrumCrossTT.from_any_alms(
+        alm_X = alm_mw,
+        fmt_X = "mw",
+        alm_Y = out_proc["alm"],
+        fmt_Y = "healpy",
     )
-    print(f"[step_spec] saved improved spectrum to: {improved_spec_path}")
-
-    if ckpt_dir:
-        ckpt_npz = os.path.join(ckpt_dir, "all_component_spectra.npz")
-        np.savez(
-            ckpt_npz,
-            ell_processed=results["processed_cmb"]["ell"],
-            cl_processed=results["processed_cmb"]["cl"],
-            Dl_processed=results["processed_cmb"]["Dl"],
-            ell_ilc_synth=results["ilc_synth"]["ell"],
-            cl_ilc_synth=results["ilc_synth"]["cl"],
-            Dl_ilc_synth=results["ilc_synth"]["Dl"],
-            ell_ilc_improved=results["ilc_improved"]["ell"],
-            cl_ilc_improved=results["ilc_improved"]["cl"],
-            Dl_ilc_improved=results["ilc_improved"]["Dl"],
-        )
-        print(f"[step_spec] wrote checkpoint copy: {ckpt_npz}")
-
-        plot_path = os.path.join(ckpt_dir, "all_component_spectra.png")
-        PowerSpectrumTT.plot_Dl_series(
-            [
-                {
-                    "ell": results["processed_cmb"]["ell"],
-                    "Dl": results["processed_cmb"]["Dl"],
-                    "label": "Processed CMB",
-                    "source": "processed",
-                },
-                {
-                    "ell": results["ilc_synth"]["ell"],
-                    "Dl": results["ilc_synth"]["Dl"],
-                    "label": "ILC-synth",
-                    "source": "ilc_synth",
-                },
-                {
-                    "ell": results["ilc_improved"]["ell"],
-                    "Dl": results["ilc_improved"]["Dl"],
-                    "label": "ILC-improved",
-                    "source": "ilc_improved",
-                },
-            ],
-            save_path=plot_path,
-            show=False,
-        )
+    results["ml-cmb"] = {
+        "ell": ell_cross_ml,
+        "cl": cl_cross_ml,
+        "path": improved_map_path,
+    }
 
     return results
 
-
 def step_evaluate(args, ckpt_dir: str | None = None):
     """
-    Load latest checkpoint and run evaluation.
+    Load latest checkpoint and save predictions for the held-out test split.
     """
-    #if model_dir is None:
-    #    model_dir = args.model_dir.strip() or resolve_model_dir_from_directory(args.directory)
+    checkpoint_epoch = args.checkpoint_epoch
+    if checkpoint_epoch is None and ckpt_dir is not None:
+        ckpt_name = os.path.basename(os.path.normpath(ckpt_dir))
+        ckpt_match = re.match(r"checkpoint_(\d+)$", ckpt_name)
+        if ckpt_match is not None:
+            checkpoint_epoch = int(ckpt_match.group(1))
+        else:
+            file_match = re.match(r"checkpoint_epoch_(\d+)\.msgpack$", ckpt_name)
+            if file_match is not None:
+                checkpoint_epoch = int(file_match.group(1))
 
-    #latest_ckpt = find_latest_checkpoint_dir(model_dir)
     inference = Inference(
         extract_comp=args.extract_comp,
         component=args.component,
@@ -569,60 +422,153 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         momentum=args.momentum,
+        run_id=args.run_id,
     )
-
-    print("[evaluate] Loading model from latest checkpoint...")
     model = inference.load_model(force_load=True)
     if not model:
-        raise RuntimeError("[infer] Model failed to load (load_model returned falsy).")
+        raise RuntimeError("[Evaluate] Model failed to load (load_model returned falsy).")
 
-    print(f"[evaluate] Predicting CMB for realisation={args.realisation_infer} ...")
-    cmb_improved = inference.predict_cmb(realisation=args.realisation_infer)
-    spec = step_spec(args, ckpt_dir=ckpt_dir)
+    test_ids = inference.data_handler.get_split_indices()["test"]
+    print(f"[Evaluate] Predicting CMB for {len(test_ids)} test realisations...")
+    mode = "con" if args.constraint else "uncon"
+    freq_tag = "_".join(str(x) for x in args.frequencies)
+    chs = "_".join(str(n) for n in args.chs)
+    lam_str = f"{float(args.lam):.1f}"
+    if checkpoint_epoch is None:
+        raise ValueError("[Evaluate] checkpoint_epoch is required for checkpoint-layered prediction outputs.")
+    save_dir = os.path.join(
+        inference.file_templates.output_directories["cmb_prediction"],
+        args.run_id,
+        "ilc_improved_maps",
+        f"checkpoint_{checkpoint_epoch}",
+    )
+    missing_prediction = False
+    for realisation in test_ids:
+        filename = os.path.basename(inference.file_templates.file_templates["ilc_improved"].format(
+            mode=mode,
+            extract_comp=args.extract_comp,
+            component=args.component,
+            frequencies=freq_tag,
+            realisation=int(realisation),
+            lmax=int(args.lmax),
+            lam=lam_str,
+            nsamp=int(args.nsamp),
+            rn=int(args.realisations),
+            batch=int(args.batch_size),
+            epochs=int(args.epochs),
+            lr=args.learning_rate,
+            momentum=args.momentum,
+            chs=chs,
+        ))
+        stem, ext = os.path.splitext(filename)
+        filename = f"{stem}_ckpt{checkpoint_epoch}{ext}"
+        if not os.path.exists(os.path.join(save_dir, filename)):
+            missing_prediction = True
+            break
 
-    if ckpt_dir:
-        ell = spec["processed_cmb"]["ell"]
-        cl_processed = spec["processed_cmb"]["cl"]
-        cl_ilc_synth = spec["ilc_synth"]["cl"]
-        cl_ilc_improved = spec["ilc_improved"]["cl"]
-        ratio_synth = cl_ilc_synth / cl_processed
-        ratio_improved = cl_ilc_improved / cl_processed
+    if missing_prediction:
+        metrics_rows = inference.save_test_metrics_table(save_predictions=True)
+        inference.save_test_scatter_plots(metrics_rows)
+    else:
+        print("[evaluate] Existing CMB prediction files found for all test realisations; skipping prediction generation.")
 
+    ratio_ilc_all = []
+    ratio_ml_all = []
+    out_dir = os.path.join(
+        inference.file_templates.output_directories["cmb_prediction"],
+        args.run_id,
+        "evaluation",
+        f"checkpoint_{checkpoint_epoch}",
+    )
+    os.makedirs(out_dir, exist_ok=True)
+
+    for realisation in test_ids:
+        spec_args = argparse.Namespace(**vars(args))
+        spec_args.realisation = int(realisation)
+        spec_args.checkpoint_epoch = checkpoint_epoch
+        spec = generate_spectrum_for_one(spec_args, ckpt_dir=ckpt_dir)
+        bundle_path = os.path.join(out_dir, f"component_spectra_r{int(realisation):04d}.npz")
         np.savez(
-            os.path.join(ckpt_dir, "component_ratio_spectra.npz"),
-            ell=ell,
-            ilc_synth_over_processed_cmb=ratio_synth,
-            ilc_improved_over_processed_cmb=ratio_improved,
+            bundle_path,
+            ell=np.asarray(spec["processed_cmb"]["ell"], dtype=float),
+            processed_cmb_cl=np.asarray(spec["processed_cmb"]["cl"], dtype=float),
+            ilc_synth_cl=np.asarray(spec["ilc_synth"]["cl"], dtype=float),
+            ilc_improved_cl=np.asarray(spec["ilc_improved"]["cl"], dtype=float),
+            ilc_cmb_cl=np.asarray(spec["ilc-cmb"]["cl"], dtype=float),
+            ml_cmb_cl=np.asarray(spec["ml-cmb"]["cl"], dtype=float),
         )
-        print(f"[evaluate] wrote ratio spectra: {os.path.join(ckpt_dir, 'component_ratio_spectra.npz')}")
+        print(f"[Evaluate] wrote component spectra: {bundle_path}")
+
+        ell = np.asarray(spec["processed_cmb"]["ell"], dtype=float)
+        cl_processed = np.asarray(spec["processed_cmb"]["cl"], dtype=float)
+        cl_ilc_synth = np.asarray(spec["ilc_synth"]["cl"], dtype=float)
+        cl_ilc_improved = np.asarray(spec["ilc_improved"]["cl"], dtype=float)
+
+        ratio_ilc = cl_ilc_synth / cl_processed
+        ratio_ml = cl_ilc_improved / cl_processed
+        ratio_ilc_all.append(ratio_ilc)
+        ratio_ml_all.append(ratio_ml)
+
+    ratio_ilc_all = np.asarray(ratio_ilc_all, dtype=float)
+    ratio_ml_all = np.asarray(ratio_ml_all, dtype=float)
+    ratio_ilc_mean = np.mean(ratio_ilc_all, axis=0)
+    ratio_ilc_std = np.std(ratio_ilc_all, axis=0)
+    ratio_ml_mean = np.mean(ratio_ml_all, axis=0)
+    ratio_ml_std = np.std(ratio_ml_all, axis=0)
+
+    ratio_npz = os.path.join(out_dir, "mean_ratio_spectra.npz")
+    np.savez(
+        ratio_npz,
+        test_ids=np.asarray(test_ids, dtype=int),
+        ell=ell,
+        ratio_ilc_all=ratio_ilc_all,
+        ratio_ml_all=ratio_ml_all,
+        ratio_ilc_mean=ratio_ilc_mean,
+        ratio_ilc_std=ratio_ilc_std,
+        ratio_ml_mean=ratio_ml_mean,
+        ratio_ml_std=ratio_ml_std,
+    )
+    print(f"[Evaluate] wrote ratio spectra over {len(test_ids)} test realisations: {ratio_npz}")
 
     import matplotlib.pyplot as plt
-    from skyclean.silc.map_tools import SamplingConverters
-    if args.plot:
-        import healpy as hp
-        from skyclean.silc.map_tools import SamplingConverters
 
-        hp_map = SamplingConverters.mw_map_2_hp_map(cmb_improved, lmax=args.lmax)
-        hp.mollview(hp_map, unit="K", cbar=True)
-        if args.constraint == True:
-            mode="cILC"
-        else:
-            mode="ILC"
-        plt.title(f"Improved {mode} map\nlmax{args.lmax}, {args.extract_comp}, {args.frequencies}, r{args.realisation_infer}, lam{args.lam}, nsamp{args.nsamp})")
-        plt.tight_layout()
-        plt.savefig(f'{ckpt_dir}/ILC_improved.png', dpi=300)
-        plt.show()
+    plot_path = os.path.join(out_dir, "mean_ratio_spectra.png")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(ell, ratio_ilc_mean, label="ILC Synth / Observed", color="blue")
+    ax.fill_between(
+        ell,
+        ratio_ilc_mean - ratio_ilc_std,
+        ratio_ilc_mean + ratio_ilc_std,
+        color="blue",
+        alpha=0.1,
+    )
+    ax.plot(ell, ratio_ml_mean, label="ML Improved / Observed", color="red")
+    ax.fill_between(
+        ell,
+        ratio_ml_mean - ratio_ml_std,
+        ratio_ml_mean + ratio_ml_std,
+        color="red",
+        alpha=0.1,
+    )
+    ax.axhline(1.0, color="grey", linestyle=":", linewidth=1)
+    ax.set_ylim(0.95, 1.05)
+    ax.set_xlim(2, ell.max())
+    ax.set_xlabel(r"$\ell$", fontsize=14)
+    ax.set_ylabel(r"$C_\ell^{\mathrm{ratio}}$", fontsize=14)
+    ax.set_title(f"Power Spectrum Ratio with Uncertainty ({args.run_id})", fontsize=15)
+    ax.grid(True, which="both", linestyle=":", linewidth=0.5)
+    ax.legend(fontsize=14)
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[Evaluate] wrote ratio plot for {len(test_ids)} test realisations: {plot_path}")
     
-    return cmb_improved
+    return test_ids
 
 
 def resolve_checkpoint_dir(args, model_dir: str) -> str:
-    if args.checkpoint_epoch is not None:
-        ckpt_dir = os.path.join(model_dir, f"checkpoint_{args.checkpoint_epoch}")
-        if not os.path.isdir(ckpt_dir):
-            raise FileNotFoundError(f"Requested checkpoint does not exist: {ckpt_dir}")
-        return ckpt_dir
-    return find_latest_checkpoint_dir(model_dir)
+    ckpt_dir, _, _ = resolve_checkpoint_target(model_dir, epoch=args.checkpoint_epoch)
+    return str(ckpt_dir)
 
 
 def main():
@@ -631,41 +577,43 @@ def main():
     print(f"JAX 64-bit mode: {jax.config.jax_enable_x64}")
 
     args = parse_args()
+    if args.resume_training and args.mode not in {"train", "train+evaluate"}:
+        raise ValueError(
+            "--resume-training is only valid when --mode is 'train' or 'train+evaluate'."
+        )
+    if args.mode == "evaluate" and not args.run_id.strip() and not args.model_dir.strip():
+        raise ValueError(
+            "Evaluate mode requires either --run-id or --model-dir."
+        )
 
     model_dir_from_train = None
 
     if args.mode == "train":
-        print("[train] Starting training...")
+        print("[Train] Starting training...")
         model_dir_from_train = step_train(args)
-        print(f"[train] Done.")
+        print(f"[Train] Done.")
 
     if args.mode == "train+evaluate":
-        print("[train] Starting training...")
+        print("[Train] Starting training...")
         model_dir_from_train = step_train(args)
-        print(f"[train] Done.")
-        print("[evaluate] Starting evaluation...")
+        print(f"[Train] Done.")
+        print("[Evaluate] Starting evaluation...")
         ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
         step_evaluate(args, ckpt_dir=ckpt_dir)
-        print("[evaluate] Done.")
+        print("[Evaluate] Done.")
 
     if args.mode == "evaluate":
-        print("[evaluate] Starting evaluation...")
-        model_dir_from_train = resolve_model_dir_from_directory(args.directory)
-        if args.run_id.strip():
-            model_dir_from_train = os.path.join(model_dir_from_train, args.run_id.strip())
+        print("[Evaluate] Starting evaluation...")
+        model_dir_from_train = resolve_evaluate_target(args)
         print(f"Model directory: {model_dir_from_train}")
-        if args.model_dir.strip():
-            model_dir_from_train = os.path.abspath(args.model_dir.strip())
-            print(f"Using overridden model_dir: {model_dir_from_train}")
         ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
-        print(f'loaded model from: {ckpt_dir}')
+        print(f'Loaded model from: {ckpt_dir}')
         step_evaluate(args, ckpt_dir=ckpt_dir)
-        print("[evaluate] Done.")
+        print("[Evaluate] Done.")
 
-    print("[done] Pipeline complete.")
     elapsed_seconds = time.perf_counter() - start_time
     elapsed_minutes = elapsed_seconds / 60.0
-    print(f"[time] Total pipeline time: {elapsed_minutes:.2f} minutes")
+    print(f"[Time] Total pipeline time: {elapsed_minutes:.2f} minutes")
 
 
 if __name__ == "__main__":
@@ -674,27 +622,5 @@ if __name__ == "__main__":
 
 # Example usage:
 # 030 044 070 100 143 217 353 545 857
-# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 300 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 5 --nsamp 1200 --epochs 200 --eval-every 5 --eval-steps 10 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --plot --prefetch --run-id 20260226_173000 
-
-
-''' Example usage:
-python3 -m skyclean.ml.pipeline_ml \
-  --mode train+evaluate \
-  --extract-comp cmb \
-  --component cfn \
-  --frequencies 030 044 070 100 143 217 353 545 857 \
-  --realisations 100 \
-  --lmax 511 \
-  --N-directions 1 \
-  --lam 2.0 \
-  --nsamp 1200 \
-  --batch-size 5 \
-  --epochs 200 \
-  --learning-rate 1e-3 \
-  --momentum 0.90 \
-  --eval-every 5 \
-  --eval-steps 10 \
-  --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \
-  --prefetch \
-  --run-id 20260226_1
-'''
+# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 7 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --split 0.3 0.3 0.4 --nsamp 1200 --epochs 2 --eval-every 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id test
+# --resume-training

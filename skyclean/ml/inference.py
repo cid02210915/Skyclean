@@ -2,44 +2,34 @@
 
 """
 CMB-Free ILC Model Inference Class.
-
-This module provides a class-based interface for loading trained models and applying them for inference,
-with integrated FileTemplates support for organized data management.
 """
 
+import csv
 import os
 import re
+import matplotlib.pyplot as plt
 import numpy as np
+import jax
 import jax.numpy as jnp
-from flax import nnx
-import orbax.checkpoint as ocp
 from flax import nnx, serialization
+from scipy.stats import kurtosis, skew
+
 from .model import S2_UNET
 from .data import CMBFreeILC
-from skyclean.silc.file_templates import FileTemplates
+from .train import resolve_checkpoint_target
+from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
 from skyclean.silc import SamplingConverters
 
 
 class Inference:
     """Class for CMB prediction inference using trained models."""
-    
-    def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None, directory="data/", seed=0, model_path=None,
-                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3, momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False):
-        """Initialize the CMB inference system.
-        
-        Parameters:
-            frequencies (list): List of frequency strings.
-            realisations (int): Number of realisations.
-            lmax (int): Maximum multipole.
-            N_directions (int): Number of directions for wavelet transform.
-            lam (float): Lambda parameter.
-            chs (list): List of channel dimensions for each layer. Default: [1, 16, 32, 32, 64]
-            directory (str): Base data directory.
-            seed (int): Random seed for model initialization.
-            model_path (str, optional): Specific path to model checkpoint. If None, loads the latest model.
-            nsamp (int)
-            constraint (bool): Mode for the constrainted ILC method. 
-        """
+
+    def __init__(self, extract_comp, component, frequencies, realisations, lmax, N_directions=1, lam=2.0, chs=None,
+                 directory="data/", seed=0, model_path=None,
+                 rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3,
+                 momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False,
+                 run_id: str | None = None):
+
         self.extract_comp = extract_comp
         self.component = component
         self.frequencies = frequencies
@@ -47,193 +37,108 @@ class Inference:
         self.lmax = lmax
         self.N_directions = N_directions
         self.lam = lam
-        self.chs = chs if chs is not None else [1, 16, 32, 32, 64]
+        self.chs = chs if chs is not None else [512, 256, 128, 64]
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
         self.rn = rn
         self.batch = batch_size
         self.epochs = epochs
-        self.lr = learning_rate 
-        self.momentum = momentum 
+        self.lr = learning_rate
+        self.momentum = momentum
         self.nsamp = nsamp
         self.constraint = constraint
-        
-        # Initialize file templates
+        self.run_id = (run_id or "").strip()
+        if not self.run_id:
+            raise ValueError("run_id must be provided for inference outputs.")
+
         self.file_templates = FileTemplates(directory)
-        
-        # Model and config will be loaded when needed
+        register_pixel_ps_component_template(
+            self.file_templates.file_templates,
+            self.file_templates.output_directories,
+            self.component,
+        )
         self.model = None
         self.config = None
+        self.loaded_checkpoint_path = None
+        self.loaded_checkpoint_epoch = None
         self.data_handler = CMBFreeILC(
-                extract_comp=self.extract_comp,
-                component=self.component,
-                frequencies=self.frequencies,
-                realisations=self.realisations,
-                lmax=self.lmax,
-                N_directions=self.N_directions,
-                nsamp=self.nsamp,
-                constraint=self.constraint,
-                lam=self.lam,
-                batch_size=1,  # Not used for inference
-                directory=self.directory
-            )
+            extract_comp=self.extract_comp,
+            component=self.component,
+            frequencies=self.frequencies,
+            realisations=self.realisations,
+            lmax=self.lmax,
+            N_directions=self.N_directions,
+            nsamp=self.nsamp,
+            constraint=self.constraint,
+            lam=self.lam,
+            batch_size=1,
+            directory=self.directory
+        )
 
-    @staticmethod
-    def _is_valid_checkpoint_dir(path: str) -> bool:
-        """Return True only for fully materialized Orbax checkpoints."""
-        if not os.path.isdir(path):
-            return False
-        if (
-            os.path.exists(os.path.join(path, "_METADATA"))
-            or os.path.exists(os.path.join(path, "_CHECKPOINT_METADATA"))
-        ):
-            return True
-        ignore = {"prediction.png", "training_metrics.png", "training_log.npy", "spectrum.png"}
-        names = set(os.listdir(path))
-        return any(name not in ignore for name in names)
-
-    
-    '''
     def load_model(self, force_load=False):
-        """Load model weights for inference using fresh start approach.
-        
-        Uses the class variable model_path if set, otherwise loads the latest model.
-        Includes compatibility checking unless force_load is True.
-        
-        Parameters:
-            force_load (bool): If True, skip compatibility check and force load.
-            
-        Returns:
-            nnx.Module: The loaded model.
-        """
-        # Check compatibility first unless force_load is True
+        """加载模型，完全兼容flax 0.10.6"""
         if not force_load:
             compatibility = self.check_model_compatibility()
-            if not compatibility['compatible']:
-                print(f"Model compatibility check failed: {compatibility['message']}")
-                print("Use force_load=True to bypass this check if you're sure the model is correct.")
-                return False
-            else:
-                print(f"Model compatibility check passed: {compatibility['message']}")
-        
-        checkpointer = ocp.StandardCheckpointer()
-        
-        if self.model_path is not None:
-            # Use user-specified model path from class variable
-            checkpoint_path = os.path.abspath(self.model_path)
-            print(f"Loading user-specified model from: {checkpoint_path}")
-            if not os.path.exists(checkpoint_path):
-                print(f"Error: Specified model path does not exist: {checkpoint_path}")
-                return False
-        else:
-            # Find the latest checkpoint automatically
-            model_dir = self.file_templates.output_directories["ml_models"]
-            checkpoint_files = [f for f in os.listdir(model_dir) if f.startswith('checkpoint_')]
-            print(f"Found checkpoint files: {checkpoint_files}")
-            if not checkpoint_files:
-                print("No checkpoints found.")
-                return False
-            
-            # Get the latest checkpoint by epoch number
-            latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.split('_')[1]))
-            checkpoint_path = os.path.abspath(os.path.join(model_dir, latest_checkpoint))
-        
-        print(f"Loading checkpoint from: {checkpoint_path}")
-
-        L = self.lmax + 1
-        ch_in = len(self.frequencies)
-        
-        # Create a concrete model instance to get the state structure
-        temp_model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
-        # Restore the checkpoint back to its `nnx.State` structure - need an abstract reference.
-        abstract_model = nnx.eval_shape(lambda: temp_model)
-        graphdef, abstract_state = nnx.split(abstract_model)
-        nnx.display(abstract_state)
-
-        state_restored = checkpointer.restore(checkpoint_path, abstract_state)
-        nnx.display(state_restored)
-
-        model = nnx.merge(graphdef, state_restored)
-        return model
-    '''
-
-    def load_model(self, force_load: bool = False):
-        if not force_load:
-            compatibility = self.check_model_compatibility()
-            if not compatibility.get("compatible", False):
+            if not compatibility.get('compatible', False):
                 raise RuntimeError(
-                    f"Model compatibility check failed: {compatibility.get('message', '')}. "
-                    f"Pass force_load=True to bypass."
+                    f"模型兼容性检查失败: {compatibility.get('message', '')}。"
+                    f"传入 force_load=True 跳过检查。"
                 )
 
-        if getattr(self, "model_path", None):
-            checkpoint_path = os.path.abspath(self.model_path)
-            if not os.path.exists(checkpoint_path):
-                raise FileNotFoundError(f"Specified model path does not exist: {checkpoint_path}")
-            print(f"Loading user-specified model from: {checkpoint_path}")
+        # 解析checkpoint路径
+        if self.model_path is not None:
+            checkpoint_dir, checkpoint_file, checkpoint_epoch = resolve_checkpoint_target(
+                os.path.abspath(self.model_path)
+            )
+            checkpoint_path = str(checkpoint_file)
+            print(f"[Inference] Loading model from: {checkpoint_path}")
         else:
-            model_dir = self.file_templates.output_directories["ml_models"]
-            if not os.path.isdir(model_dir):
-                raise FileNotFoundError(f"Model directory not found: {model_dir}")
-            pat = re.compile(r"checkpoint_(\d+)$")
-            ckpts = []
-            for f in os.listdir(model_dir):
-                p = os.path.join(model_dir, f)
-                if pat.fullmatch(f) and self._is_valid_checkpoint_dir(p):
-                    ckpts.append(f)
-            if not ckpts:
-                raise FileNotFoundError(f"No checkpoints found in {model_dir}")
-            latest = max(ckpts, key=lambda x: int(pat.fullmatch(x).group(1)))
-            checkpoint_path = os.path.abspath(os.path.join(model_dir, latest))
-            print(f"Loading checkpoint from: {checkpoint_path}")
+            run_dir = os.path.join(self.file_templates.output_directories["ml_models"], self.run_id)
+            checkpoint_dir, checkpoint_file, checkpoint_epoch = resolve_checkpoint_target(run_dir)
+            checkpoint_path = str(checkpoint_file)
+            print(f"[Inference] Loading latest checkpoint from: {checkpoint_path}")
 
+        # 构建和训练时完全一致的模型结构
         L = self.lmax + 1
         ch_in = len(self.frequencies)
         model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
-        graphdef, target_state = nnx.split(model)
 
-        fallback_msgpack = os.path.join(checkpoint_path, "state.msgpack")
-        if os.path.exists(fallback_msgpack):
-            with open(fallback_msgpack, "rb") as f:
-                restored_pure = serialization.msgpack_restore(f.read())
-            restored_pure = nnx.restore_int_paths(restored_pure)
-            nnx.replace_by_pure_dict(target_state, restored_pure)
-            restored_state = target_state
-        else:
-            ckptr = ocp.Checkpointer(ocp.StandardCheckpointHandler())
-            try:
-                restored_state = ckptr.restore(
-                    checkpoint_path,
-                    args=ocp.args.StandardRestore(item=target_state),
-                )
-            finally:
-                if hasattr(ckptr, "close"):
-                    ckptr.close()
+        # 拆分模型，获取空的state模板
+        graphdef, empty_state = nnx.split(model)
 
-        model = nnx.merge(graphdef, restored_state)
+        # 加载msgpack文件
+        with open(checkpoint_path, "rb") as f:
+            bytes_data = f.read()
+
+        # 反序列化，兼容训练时的字典格式
+        template = {
+            "model": nnx.to_pure_dict(empty_state),
+            "opt": {},
+            "epoch": 0
+        }
+        restored_dict = serialization.from_bytes(template, bytes_data)
+        #restored_state = restored_dict["model"]
+        nnx.replace_by_pure_dict(empty_state, restored_dict["model"])
+
+        # 合并state到模型
+        model = nnx.merge(graphdef, empty_state)
+        #model = jax.tree.map(jax.device_put, model)
+
         self.model = model
+        self.loaded_checkpoint_path = checkpoint_path
+        self.loaded_checkpoint_epoch = checkpoint_epoch
+        print(f"[Inference] Model loaded successfully ✅")
         return model
 
     def check_model_compatibility(self):
-        """Check if the model path is compatible with initialized variables.
-        
-        This method attempts to load the model and verify that its architecture
-        matches the current instance parameters (frequencies, lmax, etc.).
-        
-        Returns:
-            dict: Dictionary containing compatibility information with keys:
-                - 'compatible': bool indicating if model is compatible
-                - 'message': str describing the compatibility status
-                - 'model_info': dict with model architecture details (if loadable)
-                - 'expected_info': dict with expected architecture details
-        """
+        """检查模型兼容性"""
         expected_L = self.lmax + 1
         expected_ch_in = len(self.frequencies)
-        
+
         result = {
-            'compatible': False,
-            'message': '',
+            'compatible': True,
+            'message': "Compatibility check passed (Orbax-free mode)",
             'model_info': {},
             'expected_info': {
                 'L': expected_L,
@@ -244,130 +149,106 @@ class Inference:
                 'lam': self.lam
             }
         }
-        
-        # Check if model path exists
+
         if self.model_path is not None:
             if not os.path.exists(self.model_path):
+                result['compatible'] = False
                 result['message'] = f"Model path does not exist: {self.model_path}"
                 return result
         else:
-            # Check if default model directory has checkpoints
-            model_dir = self.file_templates.output_directories["ml_models"]
-            if not os.path.exists(model_dir):
-                result['message'] = f"Default model directory does not exist: {model_dir}"
-                return result
-            
-            pat = re.compile(r"checkpoint_(\d+)$")
-            checkpoint_files = []
-            for f in os.listdir(model_dir):
-                if not pat.fullmatch(f):
-                    continue
-                p = os.path.join(model_dir, f)
-                if not self._is_valid_checkpoint_dir(p):
-                    continue
-                checkpoint_files.append(f)
-            if not checkpoint_files:
-                result['message'] = f"No checkpoint files found in: {model_dir}"
-                return result
-        
+            try:
+                run_dir = os.path.join(self.file_templates.output_directories["ml_models"], self.run_id)
+                resolve_checkpoint_target(run_dir)
+            except FileNotFoundError as e:
+                result['compatible'] = False
+                result['message'] = str(e)
 
         result['compatible'] = True
         result['message'] = "Basic checkpoint path checks passed."
         return result
-    
-    
+
     def predict_cmb(self, realisation, save_result=True, masked=False):
-        """Predict CMB for a specific realisation.
-        
-        Parameters:
-            realisation (int): The realisation number to process.
-            save_result (bool): Whether to save the result using FileTemplates.
-            
-        Returns:
-            np.ndarray: CMB prediction in MW sampling format.
-        """
-        # Ensure model is loaded
+        """Predict CMB for a specific realisation."""
         if self.model is None:
             print("Loading model...")
-            self.model = self.load_model()  
+            self.model = self.load_model()
             print("Loaded model.")
-        
-        
-        print(f"Predicting CMB for realisation {realisation}...")
-        
-        # Get the data for this realisation
-        F, _, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
-        
-        # Transform and prepare for model input
-        F = self.data_handler.transform(F).astype(np.float32)
-        F = jnp.expand_dims(F, axis=0)  # Add batch dimension
-        
-        # Apply model
-        R_pred_norm = self.model(F)
-        
-        # Inverse transform to get residual prediction
-        R_pred = self.data_handler.inverse_transform(R_pred_norm)
-        R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
-        
-        # Compute CMB prediction
-        cmb_pred = ilc_mwss - R_pred
-        
-        # Convert to MW sampling
-        #print("Converting prediction to MW sampling...")
-        cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred, L=self.lmax + 1)
 
-        
-        # Save result if requested
+        print(f"Predicting CMB for realisation {realisation}...")
+        outputs = self._predict_realisation_outputs(realisation)
+        cmb_mw = outputs["cmb_mw"]
+
         if save_result:
             if masked:
                 mask_mw = self.data_handler.mask_mw_beamed()
                 cmb_mw *= mask_mw
-                self._save_masked_cmb_prediction(cmb_mw, realisation, masked)
+                self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw)
             else:
                 self._save_cmb_prediction(cmb_mw, realisation)
-        
-        print(f"CMB prediction completed for realisation {realisation}")
-        print(f"Prediction shape: {cmb_mw.shape}")
-        print(f"Value range: [{cmb_mw.min():.3e}, {cmb_mw.max():.3e}]")
+
+        #print(f"CMB prediction completed for realisation {realisation}.")
+        #print(f"Prediction shape: {cmb_mw.shape}")
+        #print(f"Value range: [{cmb_mw.min():.3e}, {cmb_mw.max():.3e}]")
 
         return cmb_mw
-        
+
+    def _predict_realisation_outputs(self, realisation):
+        """Run a single forward pass and return prediction artefacts."""
+        if self.model is None:
+            print("Loading model...")
+            self.model = self.load_model()
+            print("Loaded model.")
+
+        F, R, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
+        F_norm = self.data_handler.transform(F).astype(np.float32)
+        F_norm = jnp.expand_dims(F_norm, axis=0)
+
+        R_pred_norm = self.model(F_norm)
+        R_pred = self.data_handler.inverse_transform(R_pred_norm)
+        R_pred = jnp.squeeze(R_pred, axis=(0, 3))
+
+        residual = np.asarray(R)
+        ilc_mwss = np.asarray(ilc_mwss)
+        if residual.ndim == 3 and residual.shape[-1] == 1:
+            residual = residual[..., 0]
+        if ilc_mwss.ndim == 3 and ilc_mwss.shape[-1] == 1:
+            ilc_mwss = ilc_mwss[..., 0]
+
+        pred_mwss = np.asarray(R_pred)
+        cmb_pred_mwss = ilc_mwss - pred_mwss
+        cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred_mwss, L=self.lmax + 1)
+        return {
+            "residual": residual,
+            "ilc_mwss": ilc_mwss,
+            "pred_mwss": pred_mwss,
+            "cmb_mw": cmb_mw,
+        }
+
+    def predict_test_set(self, save_result=True, masked=False):
+        """Predict CMB for every held-out test realisation."""
+        test_ids = self.data_handler.get_split_indices()["test"]
+        outputs = {}
+        for realisation in test_ids:
+            outputs[int(realisation)] = self.predict_cmb(realisation=int(realisation), save_result=save_result, masked=masked)
+        print(f"[Inference] Saved test-set predictions to: "
+              f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id, 'ilc_improved_maps')}")
+        return outputs
 
     def compute_mse(self, comp, realisation, save_result=True, masked=False):
-        """
-        Compute pixel-space MSE for a single realisation.
-
-        Parameters
-        ----------
-        comp : str e.g. {"ilc", "nn"}
-            - "ilc": MSE of the raw ILC map vs true CMB.
-            - "nn" : MSE of the NN-predicted CMB map vs true CMB
-                     (using the trained network).
-        realisation : int
-            Realisation index.
-
-        Returns
-        -------
-        float
-            Mean squared error for this realisation.
-        """
+        """Compute pixel-space MSE for a single realisation."""
         comp = comp.lower()
         if comp not in ("ilc", "nn"):
             raise ValueError("comp must be 'ilc' or 'nn'")
-        
-        # Get the data for this realisation
+
         F, R, _ = self.data_handler.create_residual_mwss_maps(realisation)
-        # R has shape (H, W, 1); squeeze to (H, W)
         R = np.asarray(R)
         if R.ndim == 3 and R.shape[-1] == 1:
-            R = R[..., 0]          # shape (H, W)
-        elif R.ndim == 2:
-            R = R                  # already (H, W)
-        else:
+            R = R[..., 0]
+        elif R.ndim != 2:
             raise ValueError(f"Unexpected shape for R: {R.shape}")
-        
+
         if masked:
-            mask = self.data_handler.mask_mwss_beamed()  # (T, P) or (T, P, 1)
+            mask = self.data_handler.mask_mwss_beamed()
             mask = np.asarray(mask)
             if mask.ndim == 3 and mask.shape[-1] == 1:
                 mask = mask[..., 0]
@@ -377,105 +258,279 @@ class Inference:
             mask = None
 
         if comp == "ilc":
-            print(f"Calculating MSE(ILC) for realisation {realisation}...")
             diff = R
-            
-        else: # comp == "nn":
-            print(f"Calculating MSE(NN) for realisation {realisation}...")
-            
-            if self.model is None: # Ensure model is loaded
-                print("Loading model...")
-                self.model = self.load_model()  
-                print("Loaded model.")
+        else:
+            pred_outputs = self._predict_realisation_outputs(realisation)
+            diff = R - np.asarray(pred_outputs["pred_mwss"])
 
-            # Prepare network input (same pipeline as in predict_cmb)
-            F = self.data_handler.transform(F).astype(np.float32)
-            F = jnp.expand_dims(F, axis=0)  # Add batch dimension
-            
-            # Predict normalised residual and inverse-transform
-            R_pred_norm = self.model(F)
-            R_pred = self.data_handler.inverse_transform(R_pred_norm) # shape: ()
-            R_pred = jnp.squeeze(R_pred, axis=(0, 3))  # Remove batch and channel dims
-        
-            # MSE(NN) = <(R_pred - R_true)^2>
-            diff = R - np.asarray(R_pred)
-        
         if mask is None:
-            mse = float(np.mean(diff ** 2)) # in K
+            mse = float(np.mean(diff ** 2))
         else:
             w = mask
-            num = np.sum(w * diff**2)
+            num = np.sum(w * diff ** 2)
             denom = np.sum(w) + 1e-12
             mse = float(num / denom)
-
-        print(mse)
+            
         return mse
 
-    
-    def _save_cmb_prediction(self, cmb_prediction, realisation):
-        """Save CMB prediction using FileTemplates.
-        
-        Parameters:
-            cmb_prediction (np.ndarray): CMB prediction to save.
-            realisation (int): Realisation number.
-        """
-        try:
-            # Create a model configuration string for the filename
-            chs = "_".join(str(n) for n in self.chs)
-            #model_config = f"r{realisation}_lmax{self.lmax}_lam{self.lam}_nsamp{self.nsamp}_rn{self.rn}_batch{self.batch}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
+    def save_test_metrics_table(self, masked=False, save_predictions=True):
+        """Save per-realisation metrics for the held-out test split."""
+        if self.model is None:
+            self.load_model()
+        test_ids = self.data_handler.get_split_indices()["test"]
+        checkpoint_tag = (
+            f"checkpoint_{self.loaded_checkpoint_epoch}"
+            if self.loaded_checkpoint_epoch is not None
+            else "checkpoint_unknown"
+        )
+        out_dir = os.path.join(
+            self.file_templates.output_directories["cmb_prediction"],
+            self.run_id,
+            "evaluation",
+            checkpoint_tag,
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        csv_path = os.path.join(out_dir, "test_metrics.csv")
 
-            if self.constraint == True:
+        def _moments(x):
+            x = np.asarray(x, dtype=np.float64).ravel()
+            x = x[np.isfinite(x)]
+            std = float(np.std(x))
+            skewness = float(skew(x, bias=False))
+            kurt_excess = float(kurtosis(x, fisher=True, bias=False))
+            return skewness, kurt_excess
+
+        rows = []
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "realisation",
+                "mse_ilc",
+                "mse_ml",
+                "skew_ilc",
+                "skew_ml",
+                "kurtosis_ilc",
+                "kurtosis_ml",
+            ])
+
+            for realisation in test_ids:
+                realisation = int(realisation)
+                outputs = self._predict_realisation_outputs(realisation)
+                ilc_mwss = outputs["ilc_mwss"]
+                residual = outputs["residual"]
+                pred_mwss = outputs["pred_mwss"]
+                if masked:
+                    mask = np.asarray(self.data_handler.mask_mwss_beamed())
+                    if mask.ndim == 3 and mask.shape[-1] == 1:
+                        mask = mask[..., 0]
+                    mse_ilc = float(np.sum(mask * (residual ** 2)) / (np.sum(mask) + 1e-12))
+                    mse_ml = float(np.sum(mask * ((residual - pred_mwss) ** 2)) / (np.sum(mask) + 1e-12))
+                else:
+                    mse_ilc = float(np.mean(residual ** 2))
+                    mse_ml = float(np.mean((residual - pred_mwss) ** 2))
+                skew_ilc, kurtosis_ilc = _moments(ilc_mwss)
+                skew_ml, kurtosis_ml = _moments(pred_mwss)
+                if save_predictions:
+                    cmb_mw = outputs["cmb_mw"]
+                    if masked:
+                        mask_mw = self.data_handler.mask_mw_beamed()
+                        cmb_mw = cmb_mw * mask_mw
+                        self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw)
+                    else:
+                        self._save_cmb_prediction(cmb_mw, realisation)
+                writer.writerow([
+                    realisation,
+                    mse_ilc,
+                    mse_ml,
+                    skew_ilc,
+                    skew_ml,
+                    kurtosis_ilc,
+                    kurtosis_ml,
+                ])
+                rows.append({
+                    "realisation": realisation,
+                    "mse_ilc": mse_ilc,
+                    "mse_ml": mse_ml,
+                    "skew_ilc": skew_ilc,
+                    "skew_ml": skew_ml,
+                    "kurtosis_ilc": kurtosis_ilc,
+                    "kurtosis_ml": kurtosis_ml,
+                })
+
+        print(f"[Inference] Saved test metrics table to: {csv_path}")
+        return rows
+
+    def save_test_scatter_plots(self, rows):
+        """Save MSE and skewness scatter plots for the held-out test split."""
+        if self.model is None:
+            self.load_model()
+        checkpoint_tag = (
+            f"checkpoint_{self.loaded_checkpoint_epoch}"
+            if self.loaded_checkpoint_epoch is not None
+            else "checkpoint_unknown"
+        )
+        out_dir = os.path.join(
+            self.file_templates.output_directories["cmb_prediction"],
+            self.run_id,
+            "evaluation",
+            checkpoint_tag,
+        )
+        os.makedirs(out_dir, exist_ok=True)
+
+        def _scatter(
+            x_key,
+            y_key,
+            title,
+            xlabel,
+            ylabel,
+            filename,
+            origin_zero=False,
+            double_max=False,
+            figsize=(6, 6),
+            diag_label=None,
+        ):
+            x = np.asarray([row[x_key] for row in rows], dtype=float)
+            y = np.asarray([row[y_key] for row in rows], dtype=float)
+            if x.size == 0:
+                print(f"[Inference] No rows available for {filename}; skipping plot.")
+                return
+            x *= 1e12
+            y *= 1e12
+
+            lo = float(min(np.min(x), np.min(y)))
+            hi = float(max(np.max(x), np.max(y)))
+            if origin_zero:
+                lo = 0.0
+            if double_max:
+                hi = max(0.0, hi) * 2.0
+            if np.isclose(lo, hi):
+                pad = 1e-12 if hi == 0.0 else abs(hi) * 0.05
+                lo -= pad
+                hi += pad
+
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.scatter(x, y, s=36, alpha=0.5)
+            hi_plot = hi * 1.1 if origin_zero else hi
+            ax.plot([lo, hi_plot], [lo, hi_plot], "k--", linewidth=1, label=diag_label)
+            ax.set_xlim(lo, hi_plot)
+            ax.set_ylim(lo, hi_plot)
+            ax.set_title(title)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.3)
+            if diag_label is not None:
+                ax.legend()
+            fig.tight_layout()
+
+            plot_path = os.path.join(out_dir, filename)
+            fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"[Inference] Saved plot to: {plot_path}")
+
+        _scatter(
+            "mse_ilc",
+            "mse_ml",
+            "MSE comparison",
+            "ILC MSE [μK^2]",
+            "ML MSE [μK^2]",
+            "mse_scatter.png",
+            origin_zero=True,
+            figsize=(7, 4),
+            diag_label="y=x",
+        )
+        _scatter(
+            "skew_ilc",
+            "skew_ml",
+            "Test Skewness Scatter",
+            "Skewness before ML (ILC)",
+            "Skewness after ML",
+            "skewness_scatter.png",
+            origin_zero=True,
+            double_max=True,
+        )
+
+    def _save_cmb_prediction(self, cmb_prediction, realisation):
+        """Save CMB prediction using FileTemplates."""
+        try:
+            chs = "_".join(str(n) for n in self.chs)
+
+            if self.constraint:
                 mode = "con"
             else:
                 mode = "uncon"
             frequencies = '_'.join(self.frequencies)
-            # Use FileTemplates to get the save path
-            save_path = self.file_templates.file_templates["ilc_improved"].format(
-                mode=mode,
-                extract_comp=self.extract_comp,
-                frequencies=frequencies,
-                component=self.component,
-                realisation=realisation,
-                lmax=self.lmax,
-                lam=self.lam,
-                nsamp=self.nsamp,
-                rn=self.rn,
-                batch=self.batch,
-                epochs=self.epochs,
-                lr=self.lr,
-                momentum=self.momentum,
-                chs=chs,
+            checkpoint_tag = (
+                f"checkpoint_{self.loaded_checkpoint_epoch}"
+                if self.loaded_checkpoint_epoch is not None
+                else "checkpoint_unknown"
             )
-            
-            # Save the prediction
+            save_dir = os.path.join(
+                self.file_templates.output_directories["cmb_prediction"],
+                self.run_id,
+                "ilc_improved_maps",
+                checkpoint_tag,
+            )
+            filename = os.path.basename(
+                self.file_templates.file_templates["ilc_improved"].format(
+                    mode=mode,
+                    extract_comp=self.extract_comp,
+                    frequencies=frequencies,
+                    component=self.component,
+                    realisation=realisation,
+                    lmax=self.lmax,
+                    lam=self.lam,
+                    nsamp=self.nsamp,
+                    rn=self.rn,
+                    batch=self.batch,
+                    epochs=self.epochs,
+                    lr=self.lr,
+                    momentum=self.momentum,
+                    chs=chs,
+                )
+            )
+            if self.loaded_checkpoint_epoch is not None:
+                stem, ext = os.path.splitext(filename)
+                filename = f"{stem}_ckpt{self.loaded_checkpoint_epoch}{ext}"
+
+            save_path = os.path.join(save_dir, filename)
+            os.makedirs(save_dir, exist_ok=True)
             np.save(save_path, cmb_prediction)
 
             print(f"Saved CMB prediction to: {save_path}")
-            
+
         except Exception as e:
             print(f"Warning: Failed to save CMB prediction: {str(e)}")
-    
+
     def _save_masked_cmb_prediction(self, cmb_prediction, realisation, mask):
+        """Save masked CMB prediction"""
         try:
-            model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}"
-            save_path = self.file_templates.file_templates["ilc_improved_masked_map"].format(
-                realisation=realisation,
-                lmax=self.lmax,
-                lam=self.lam,
-                model_config=model_config
+            chs = "_".join(str(n) for n in self.chs)
+            model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}_chs{chs}"
+            checkpoint_tag = (
+                f"checkpoint_{self.loaded_checkpoint_epoch}"
+                if self.loaded_checkpoint_epoch is not None
+                else "checkpoint_unknown"
             )
-            masked_cmb_prediction = cmb_prediction * mask
-            np.save(save_path, masked_cmb_prediction)
+            checkpoint_suffix = (
+                f"_ckpt{self.loaded_checkpoint_epoch}"
+                if self.loaded_checkpoint_epoch is not None
+                else ""
+            )
+            save_path = os.path.join(
+                self.file_templates.output_directories["cmb_prediction"],
+                self.run_id,
+                "ilc_improved_maps",
+                checkpoint_tag,
+                f"masked_ilc_improved_r{int(realisation):04d}_{model_config}{checkpoint_suffix}.npy",
+            )
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            np.save(save_path, cmb_prediction)
             print(f"Saved masked CMB prediction to: {save_path}")
         except Exception as e:
-            print(f"Warning: Failed to save maked CMB prediction: {str(e)}")
-    
+            print(f"Warning: Failed to save masked CMB prediction: {str(e)}")
+
     def get_model_info(self):
-        """Get information about the loaded model.
-        
-        Returns:
-            dict: Model information including configuration and status.
-        """
+        """Get information about the loaded model."""
         info = {
             'model_loaded': self.model is not None,
             'model_path': self.model_path,
@@ -484,30 +539,17 @@ class Inference:
             'N_directions': self.N_directions,
             'lam': self.lam,
             'directory': self.directory,
-            'model_dir': self.file_templates.output_directories["ml_models"]
+            'model_dir': self.file_templates.output_directories["ml_models"],
+            'checkpoint_format': "flax serialization (msgpack, no Orbax)"
         }
-        
-        # Add compatibility check information
+
         compatibility = self.check_model_compatibility()
         info['model_compatibility'] = compatibility
-        
-        if self.config is not None:
-            info.update({
-                'trained_frequencies': self.config.get('frequencies'),
-                'trained_lmax': self.config.get('lmax'),
-                'trained_L': self.config.get('L'),
-                'trained_channels': self.config.get('ch_in'),
-                'training_params': {
-                    'batch_size': self.config.get('batch_size'),
-                    'learning_rate': self.config.get('learning_rate'),
-                    'momentum': self.config.get('momentum')
-                }
-            })
-        
+
         return info
     
 
-# Example inference.
+
 if __name__ == "__main__":
     frequencies = ["030", "100", "353"]
     realisations = 1000
@@ -517,19 +559,29 @@ if __name__ == "__main__":
     directory = "/Scratch/matthew/data/"
 
     inference = Inference(
+        extract_comp="cmb",
+        component="cfn",
         frequencies=frequencies,
-        realisations=1000,
+        realisations=realisations,
         lmax=lmax,
         N_directions=N_directions,
         lam=lam,
-        directory=directory
+        directory=directory,
+        run_id="example_run",
     )
-    
+
     print("\n1. Model Information:")
     info = inference.get_model_info()
     for key, value in info.items():
         print(f"   {key}: {value}")
 
-    print("Realisation Prediction:")
+    print("\n2. Running Prediction for Realisation 0:")
     cmb_pred = inference.predict_cmb(realisation=0)
-    print("successful.")
+    print("Prediction successful.")
+
+    print("\n3. Calculating MSE for Realisation 0:")
+    mse_ilc = inference.compute_mse(comp="ilc", realisation=0)
+    mse_nn = inference.compute_mse(comp="nn", realisation=0)
+    print(f"MSE (ILC): {mse_ilc:.6e}")
+    print(f"MSE (NN): {mse_nn:.6e}")
+    print(f"Improvement: {(mse_ilc - mse_nn) / mse_ilc * 100:.2f}%")

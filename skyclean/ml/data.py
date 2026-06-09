@@ -7,6 +7,7 @@ import healpy as hp
 import matplotlib.pyplot as plt
 
 from skyclean.silc import utils, HPTools, MWTools, SamplingConverters, FileTemplates
+from skyclean.silc.file_templates import register_pixel_ps_component_template
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
 
 import tensorflow as tf
@@ -19,11 +20,12 @@ jax.config.update("jax_enable_x64", False)
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
                  nsamp: int = 1200, constraint: bool = False, 
-                 batch_size: int = 32, shuffle: bool = True,  split: list = [0.8, 0.2], directory: str = "data/", random: bool = False):
+                 batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False,
+                 prefetch: bool = False):
         """
         Parameters:
             extract_comp (str): Component to be extracted. e.g. "cmb"
-            component (str): Maps with components before going to silc. e.g. "cfn", "cfne".
+            component (str): Maps with components before going to silc. e.g. "cfn", "cfne", "cfne_circ".
             frequencies (list): List of frequency channels for the maps.
             realisations (int): Number of realisations to process.
             lmax (int): The maximum multipole for the wavelet transform.    
@@ -33,9 +35,9 @@ class CMBFreeILC():
             constraint (bool): Mode for the constrainted ILC method. 
             batch_size (int): Size of the batches for training.
             split (list): List of train/validation/test split ratios.
-            shuffle (bool): Whether to shuffle the dataset.
             directory (str): Directory where data is stored / saved to.
             random (bool): Whether to create random maps for testing purposes. True/False.
+            prefetch (bool): Whether to enable tf.data prefetch on the batched datasets.
         """ 
         self.frequencies = frequencies
         self.n_channels_in = len(frequencies)
@@ -44,13 +46,13 @@ class CMBFreeILC():
         self.N_directions = N_directions
         self.lam = lam
         self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.split = split
+        self.split = self._normalize_split(split)
         self.directory = directory
         self.component = component
         self.extract_comp = extract_comp
         self.nsamp = nsamp
         self.random = random
+        self.prefetch = prefetch
         if constraint == True:
             self.mode = "con"
         else: 
@@ -60,12 +62,32 @@ class CMBFreeILC():
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
+        register_pixel_ps_component_template(self.file_templates, files.output_directories, self.component,)
         self.download_templates = files.download_templates
         # data shapes
         self.H = lmax + 2
         self.W = 2 * (lmax + 1) # for MWSS sampling
         self.produce_residuals()  # Create residual maps for all realisations
         #self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
+
+    def _split_indices(self):
+        """Return deterministic train/validation/test indices for the configured split."""
+        idx = np.arange(self.realisations)
+        n_train = int(self.split[0] * self.realisations)
+        n_val = int(self.split[1] * self.realisations)
+        train_idx = idx[:n_train]
+        val_idx = idx[n_train:n_train + n_val]
+        test_idx = idx[n_train + n_val:]
+        return train_idx, val_idx, test_idx
+
+    def get_split_indices(self):
+        """Expose the configured train/validation/test realisation IDs."""
+        train_idx, val_idx, test_idx = self._split_indices()
+        return {
+            "train": train_idx.copy(),
+            "val": val_idx.copy(),
+            "test": test_idx.copy(),
+        }
 
     def create_random_mwss_maps(self, realisation: int):
         """Generate and save random foreground and residual maps in MWSS sampling format for testing purposes.
@@ -151,7 +173,8 @@ class CMBFreeILC():
             tf.Tensor: Transformed and normalized tensor.
         """
         if not hasattr(self, "_cached_stats"):
-            self._cached_stats = self.find_dataset_mean_std()
+            train_idx, _, _ = self._split_indices()
+            self._cached_stats = self.find_dataset_mean_std(indices=train_idx)
         (self.signed_log_F_mean,
          self.signed_log_R_mean,
          self.signed_log_F_std,
@@ -236,8 +259,6 @@ class CMBFreeILC():
             lambda: self._data_generator(indices, random=random),
             output_signature=signature
         )
-        if self.shuffle:
-            ds = ds.shuffle(buffer_size=len(indices))
         ds = ds.batch(self.batch_size, drop_remainder=drop_remainder)
         if getattr(self, "prefetch", False):
             ds = ds.prefetch(tf.data.AUTOTUNE)
@@ -251,42 +272,79 @@ class CMBFreeILC():
             else:
                 self.create_random_mwss_maps(realisation)
 
+    @staticmethod
+    def _normalize_split(split):
+        """Normalize split ratios to (train, validation, test)."""
+        if len(split) == 2:
+            train_ratio, remaining_ratio = split
+            validation_ratio = remaining_ratio / 2.0
+            test_ratio = remaining_ratio / 2.0
+            split = [train_ratio, validation_ratio, test_ratio]
+        elif len(split) != 3:
+            raise ValueError(f"split must have 2 or 3 values, got {split}.")
+
+        split = np.asarray(split, dtype=float)
+        if np.any(split < 0):
+            raise ValueError(f"split values must be non-negative, got {split.tolist()}.")
+        total = float(np.sum(split))
+        if not np.isclose(total, 1.0):
+            raise ValueError(f"split must sum to 1.0, got {split.tolist()} (sum={total}).")
+        return split.tolist()
+
     def prepare_data(self):
-        """Split indices and return (train_ds, test_ds) generators.
+        """Split indices and return train/validation/test generators.
         
         Returns:
-            tuple: A tuple containing the training and testing datasets.
+            tuple: Training, validation, and test datasets plus their sizes.
         NOTE: It is recommended to run produce_residuals before running this in the training code.
         """
         random = self.random
-        idx = np.arange(self.realisations)
-        cut = int(self.split[0] * self.realisations)
-        train_idx, test_idx = idx[:cut], idx[cut:]
+        train_idx, val_idx, test_idx = self._split_indices()
+
+        # Freeze normalization on the training split only, then reuse it for all splits.
+        if not random:
+            self._cached_stats = self.find_dataset_mean_std(indices=train_idx)
+
+        # TODO: k-fold cross-validation is better.
         train_ds = self._make_dataset(train_idx, random, drop_remainder=True)
+        drop_remainder_val = len(val_idx) >= self.batch_size
+        if not drop_remainder_val:
+            print(f"[WARN] Validation set size ({len(val_idx)}) < batch_size ({self.batch_size}); "
+                  "using drop_remainder=False for validation dataset.")
+        val_ds = self._make_dataset(val_idx, random, drop_remainder=drop_remainder_val)
+
         drop_remainder_test = len(test_idx) >= self.batch_size
         if not drop_remainder_test:
             print(f"[WARN] Test set size ({len(test_idx)}) < batch_size ({self.batch_size}); "
                   "using drop_remainder=False for test dataset.")
         test_ds = self._make_dataset(test_idx, random, drop_remainder=drop_remainder_test)
-        print("Data generators prepared. Train size:", len(train_idx), "Test size:", len(test_idx))
-        return train_ds, test_ds, len(train_idx), len(test_idx), drop_remainder_test
+        print("Data generators prepared. Train size:", len(train_idx), "Validation size:", len(val_idx), "Test size:", len(test_idx))
+        return train_ds, val_ds, test_ds, len(train_idx), len(val_idx), len(test_idx), drop_remainder_val, drop_remainder_test
 
-    def find_dataset_mean_std(self): 
-        """Compute the mean and standard deviation of the inputs (channel-wise) and outputs (single channel). 
+    def find_dataset_mean_std(self, indices=None): 
+        """Compute normalization statistics for a chosen subset of realizations.
         
         Returns:
             tuple: A tuple containing 4 numpy arrays: (F_mean, R_mean, F_std, R_std).
             F_mean, F_std (np.ndarray) have shape (num_channels,).
             R_mean, R_std (np.ndarray) have shape (1,).
         """
-        if hasattr(self, "_cached_stats"):
-            return self._cached_stats
+        if indices is None:
+            if hasattr(self, "_cached_stats"):
+                return self._cached_stats
+            indices, _, _ = self._split_indices()
+
+        indices = np.asarray(indices, dtype=int)
+        if indices.size == 0:
+            raise ValueError("Cannot compute normalization statistics from an empty split.")
+
         F_mean_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel mean
         R_mean_sum = 0 # only one output channel
         F_std_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel std
         R_std_sum = 0 # only one output channel
 
-        for realisation in range(self.realisations):
+        # fit normalization on the training set only, then reuse for val and test.
+        for realisation in indices:
             F, R, _ = self.create_residual_mwss_maps(realisation) # load maps
             signed_log_F = self.signed_log_transform(F)
             signed_log_R = self.signed_log_transform(R)
@@ -295,13 +353,16 @@ class CMBFreeILC():
             F_std_sum += np.std(signed_log_F, axis=(0, 1))  # Sum over H and W
             R_std_sum += np.std(signed_log_R, axis = (0, 1))
 
-        signed_log_F_mean = F_mean_sum / self.realisations
-        signed_log_R_mean = R_mean_sum / self.realisations
-        signed_log_F_std = F_std_sum / self.realisations
-        signed_log_R_std = R_std_sum / self.realisations
+        n_stats = float(indices.size)
+        signed_log_F_mean = F_mean_sum / n_stats
+        signed_log_R_mean = R_mean_sum / n_stats
+        signed_log_F_std = F_std_sum / n_stats
+        signed_log_R_std = R_std_sum / n_stats
 
-        self._cached_stats = (signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std)
-        return self._cached_stats
+        stats = (signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std)
+        if np.array_equal(indices, self._split_indices()[0]):
+            self._cached_stats = stats
+        return stats
     
 
     def load_mask_hp(self,fsky=0.7, apodization=2) -> np.ndarray:

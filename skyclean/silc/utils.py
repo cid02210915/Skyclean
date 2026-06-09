@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 import os
+import time
 import numpy as np
 import healpy as hp
 
@@ -39,7 +40,17 @@ def save_map(filepath, hp_map, overwrite = False):
     if os.path.exists(filepath) and overwrite == False:
         print(f"File {filepath} already exists. Skipping saving.")
     else:
-        hp.write_map(filepath, hp_map, overwrite = True)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        tmp_path = f"{filepath}.tmp.{os.getpid()}.{time.time_ns()}"
+        try:
+            hp.write_map(tmp_path, hp_map, overwrite=True)
+            os.replace(tmp_path, filepath)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 def normalize_targets(extra_comp):
     """Return (list_of_names, tag_string) for filenames."""

@@ -1,5 +1,55 @@
 import os 
 
+def pixel_ps_foreground_count(components) -> int:
+    """Count foreground components used by pixel_ps, excluding cmb/noise/extra_feature."""
+    excluded = {"cmb", "noise", "extra_feature"}
+    foregrounds = []
+    for comp in components:
+        comp = str(comp).strip().lower()
+        if comp and comp not in excluded and comp not in foregrounds:
+            foregrounds.append(comp)
+    return len(foregrounds)
+
+
+def pixel_ps_component_name(components) -> str:
+    """Component key for pixel_ps CFNE products."""
+    return f"cfne_pix_{pixel_ps_foreground_count(components)}"
+
+
+def pixel_ps_filename_prefix(components) -> str:
+    """Filename prefix for pixel_ps CFNE products."""
+    return f"CFNE_pix_{pixel_ps_foreground_count(components)}"
+
+
+def pixel_ps_filename_prefix_from_component(component: str) -> str | None:
+    """Return CFNE pixel-PS filename prefix for a component key like cfne_pix_3."""
+    text = str(component).strip().lower()
+    prefix = "cfne_pix_"
+    if not text.startswith(prefix):
+        return None
+    count_text = text[len(prefix):]
+    if not count_text.isdigit():
+        return None
+    return f"CFNE_pix_{int(count_text)}"
+
+
+def register_pixel_ps_component_template(file_templates: dict, output_directories: dict, component: str) -> bool:
+    """
+    Register a dynamic template for CFNE pixel-PS component keys.
+
+    This lets later stages use --component cfne_pix_N and read maps saved as
+    CFNE_pix_N_f{frequency}_r{realisation}_lmax{lmax}.npy.
+    """
+    prefix = pixel_ps_filename_prefix_from_component(component)
+    if prefix is None:
+        return False
+    file_templates[str(component)] = os.path.join(
+        output_directories["cfne"],
+        f"{prefix}_f{{frequency}}_r{{realisation:04d}}_lmax{{lmax}}.npy",
+    )
+    return True
+
+
 class FileTemplates():
 
     # --- HFI beam filenames live at the data root, HFI_RIMO_BEAMS_R3.01.TAR.GZ from https://pla.esac.esa.int/#docsw ---
@@ -19,6 +69,8 @@ class FileTemplates():
             "cmb_realisations": os.path.join(directory, "CMB_realisations/"),
             # processed maps
             "cfn": os.path.join(directory, "CFN_realisations"),
+            "cfne": os.path.join(directory, "CFN_realisations"),
+            "cfne_circ": os.path.join(directory, "CFN_realisations"),
             "processed_maps": os.path.join(directory, "processed_maps"),
             # wavelet transforms
             "wavelet_coeffs": os.path.join(directory, "wavelet_transforms/wavelet_coeffs"),
@@ -37,13 +89,18 @@ class FileTemplates():
             # ML 
             "ml_maps": os.path.join(directory, "ML/maps"),
             "ml_models": os.path.join(directory, "ML/models"),
-            "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps")
+            "cmb_prediction": os.path.join(directory, "ML/cmb_prediction"),
+            "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps"),
+            "ilc_improved_spec": os.path.join(directory, "SILC/ilc_improved_spec"),
+            # ML maps (randomly generated) for monitoring the pipeline memory usage
+            "ml_test_maps": os.path.join(directory, "ML/test_maps"),
         }
 
         for key, value in self.output_directories.items():
             if not os.path.exists(value):
                 print(f"Creating directory: {value}")
                 os.makedirs(value)
+
         
         self.download_templates = {
             "sync": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
@@ -51,13 +108,18 @@ class FileTemplates():
             "noise":"http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_noise_{frequency}_full_map_mc_{realisation:05d}.fits",
             'tsz':  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_thermalsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "cib":  "http://pla.esac.esa.int/pla/aio/product-action?MAP.MAP_ID=COM_CompMap_CIB-GNILC-F{frequency}_2048_R2.00.fits",
-            # point sources 
-            "strong_irps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_strongirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
-            "faint_radiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
-            # diffuse
+            "mask": "https://irsa.ipac.caltech.edu/data/Planck/release_2/ancillary-data/masks/HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits",
+            "strongirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_strongirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "strongradiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_strongradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "faintirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "faintradiops": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintradiops-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "clusterirps": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_clusterirps-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "co": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_co-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "freefree": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_freefree-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
-            "faint_irps":    "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
-            "strong_uchii":  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_stronguchii-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+            "ksz": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_kineticsz-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "spindust": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_spindust-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
+            "stronguchii": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_stronguchii-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+
         }
 
         self.file_templates = {
@@ -68,11 +130,16 @@ class FileTemplates():
         "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
         "tsz":   os.path.join(self.output_directories["cmb_realisations"], "tsz_f{frequency}.fits"),
         "cib":   os.path.join(self.output_directories["cmb_realisations"], "cib_f{frequency}.fits"),
-        "strong_irps":  os.path.join(self.output_directories["cmb_realisations"], "strong_irps_f{frequency}.fits"),
-        "freefree":      os.path.join(self.output_directories["cmb_realisations"], "freefree_f{frequency}.fits"),
-        "faint_irps":    os.path.join(self.output_directories["cmb_realisations"], "faint_irps_f{frequency}.fits"),
-        "faint_radiops":  os.path.join(self.output_directories["cmb_realisations"], "faint_radiops_f{frequency}.fits"),
-        "strong_uchii":   os.path.join(self.output_directories["cmb_realisations"], "strong_uchii_f{frequency}.fits"),
+        "strongirps": os.path.join(self.output_directories["cmb_realisations"], "strongirps_f{frequency}.fits"),
+        "strongradiops": os.path.join(self.output_directories["cmb_realisations"], "strongradiops_f{frequency}.fits"),
+        "faintirps": os.path.join(self.output_directories["cmb_realisations"], "faintirps_f{frequency}.fits"),
+        "faintradiops": os.path.join(self.output_directories["cmb_realisations"], "faintradiops_f{frequency}.fits"),
+        "clusterirps": os.path.join(self.output_directories["cmb_realisations"], "clusterirps_f{frequency}.fits"),
+        "co": os.path.join(self.output_directories["cmb_realisations"], "co_f{frequency}.fits"),
+        "freefree": os.path.join(self.output_directories["cmb_realisations"], "freefree_f{frequency}.fits"),
+        "ksz": os.path.join(self.output_directories["cmb_realisations"], "ksz_f{frequency}.fits"),
+        "spindust": os.path.join(self.output_directories["cmb_realisations"], "spindust_f{frequency}.fits"),
+        "stronguchii": os.path.join(self.output_directories["cmb_realisations"], "stronguchii_f{frequency}.fits"),
 
         # ---------------- processed maps ----------------
         "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
@@ -81,12 +148,25 @@ class FileTemplates():
         "processed_noise": os.path.join(self.output_directories["processed_maps"], "processed_noise_f{frequency}_r{realisation:05d}_lmax{lmax}.npy"),
         "processed_tsz":   os.path.join(self.output_directories["processed_maps"], "processed_tsz_f{frequency}_lmax{lmax}.npy"),
         "processed_cib":   os.path.join(self.output_directories["processed_maps"], "processed_cib_f{frequency}_lmax{lmax}.npy"),
-        "processed_strong_irps":  os.path.join(self.output_directories["processed_maps"], "processed_strong_irps_f{frequency}_lmax{lmax}.npy"),
-        "processed_freefree":      os.path.join(self.output_directories["processed_maps"], "processed_freefree_f{frequency}_lmax{lmax}.npy"),
-        "processed_faint_irps":    os.path.join(self.output_directories["processed_maps"], "processed_faint_irps_f{frequency}_lmax{lmax}.npy"),
-        "processed_faint_radiops": os.path.join(self.output_directories["processed_maps"], "processed_faint_radiops_f{frequency}_lmax{lmax}.npy"),
-        "processed_strong_uchii":  os.path.join(self.output_directories["processed_maps"], "processed_strong_uchii_f{frequency}_lmax{lmax}.npy"),
+        "processed_strongirps":   os.path.join(self.output_directories["processed_maps"], "processed_strongirps_f{frequency}_lmax{lmax}.npy"),
+        "processed_strongradiops":   os.path.join(self.output_directories["processed_maps"], "processed_strongradiops_f{frequency}_lmax{lmax}.npy"),
+        "processed_faintirps":   os.path.join(self.output_directories["processed_maps"], "processed_faintirps_f{frequency}_lmax{lmax}.npy"),
+        "processed_faintradiops":   os.path.join(self.output_directories["processed_maps"], "processed_faintradiops_f{frequency}_lmax{lmax}.npy"),
+        "processed_clusterirps":   os.path.join(self.output_directories["processed_maps"], "processed_clusterirps_f{frequency}_lmax{lmax}.npy"),
+        "processed_strongradiops":   os.path.join(self.output_directories["processed_maps"], "processed_strongradiops_f{frequency}_lmax{lmax}.npy"),
+        "processed_co":   os.path.join(self.output_directories["processed_maps"], "processed_co_f{frequency}_lmax{lmax}.npy"),
+        "processed_freefree":   os.path.join(self.output_directories["processed_maps"], "processed_freefree_f{frequency}_lmax{lmax}.npy"),
+        "processed_ksz":   os.path.join(self.output_directories["processed_maps"], "processed_ksz_f{frequency}_lmax{lmax}.npy"),
+        "processed_spindust":   os.path.join(self.output_directories["processed_maps"], "processed_spindust_f{frequency}_lmax{lmax}.npy"),
+        "processed_stronguchii":   os.path.join(self.output_directories["processed_maps"], "processed_stronguchii_f{frequency}_lmax{lmax}.npy"),
+        "processed_extra_feature": os.path.join(
+            self.output_directories["processed_maps"],
+            "processed_extra_feature_{ps_mode}_f{frequency}_r{realisation:04d}_lmax{lmax}.npy",
+        ),
+
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
+        "cfne":            os.path.join(self.output_directories["cfne"],           "cfne_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
+        "cfne_circ":       os.path.join(self.output_directories["cfne_circ"],      "cfne_circ_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
 
         # ---------------- wavelet transforms ----------------
         "wavelet_coeffs": os.path.join(
@@ -151,7 +231,18 @@ class FileTemplates():
             "{mode}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
+        'ilc_improved': os.path.join(
+            self.output_directories["ilc_improved_maps"], 
+            "{mode}_{extract_comp}_from-{component}_improved_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+        ),
+
+
         # Optional: power spectrum
+        "processed_cmb_spectrum":os.path.join(
+            self.output_directories["processed_maps"],
+            "processed_cmb_spectrum_r{realisation:04d}_lmax{lmax}.npy"
+        ),
+            
         "ilc_spectrum": os.path.join(
             self.output_directories["ilc_synthesised_spec"],
             "{mode}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
@@ -163,20 +254,43 @@ class FileTemplates():
             "{mode}_{extract_comp}_from-{component}_x-{other}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
+        "ilc_synth_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_spec"],
+            "{mode}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+        ),
+
+        # Optional: cross power spectrum (e.g. ILC vs processed)
+        "ilc_cross_spectrum": os.path.join(
+            self.output_directories["ilc_synthesised_cross_spec"],
+            "{mode}_{extract_comp}_from-{component}_x-{other}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"
+        ),
+
+        # Improved ILC power spectrum after ML
+        'ilc_improved_spectrum': os.path.join(
+            self.output_directories["ilc_improved_spec"], 
+            "{mode}_{extract_comp}_from-{component}_improved_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+        ),
+
+
         # ---------------- ML ----------------
-        "foreground_estimate": os.path.join(
-            self.output_directories["ml_maps"],
-            "foreground_estimate_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"),
-        "ilc_residual": os.path.join(
-            self.output_directories["ml_maps"],
-            "ilc_residual_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"),
-        "ilc_mwss": os.path.join(
-            self.output_directories["ml_maps"],
-            "ilc_mwss_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}.npy"),
+        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        # ML test maps (randomly generated) for memory check
+        "test_foreground_estimate": os.path.join(self.output_directories["ml_test_maps"], "test_foreground_estimate_r{realisation:04d}_lmax{lmax}.npy"),
+        "test_ilc_residual":       os.path.join(self.output_directories["ml_test_maps"], "test_ilc_residual_r{realisation:04d}_lmax{lmax}.npy"),
+        "test_ilc_improved_map": os.path.join(self.output_directories["ml_test_maps"], "test_ilc_improved_map_r{realisation:04d}_lmax{lmax}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
+
+        # ---------------- mask for ML ----------------
+        "mask": os.path.join(directory, "HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits"),
+
         }
 
+    # put beams fit files inside 'HFI_beams' folder inside data directory
     def hfi_beam_path(self, frequency: str) -> str:
-        return os.path.join(self.directory, self.HFI_BEAM_FILE[str(frequency)])
+        """Return full path to the HFI beam file for a given frequency."""
+        fname = self.HFI_BEAM_FILE[str(frequency)]
+        return os.path.join(self.directory, "HFI_beams", fname)
      
     @staticmethod
     def create_dir(directory: str):
@@ -212,5 +326,3 @@ class FileTemplates():
                 print(f"{key}: {rel}")
             else:
                 print(f"{key}: (no files)")
-    
-    

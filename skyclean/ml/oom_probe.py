@@ -1,4 +1,3 @@
-# Contributor: Qixing Deng.
 """
 Probe the maximum number of realisations that the ML pipeline can handle
 without an OOM by running the pipeline in a subprocess and doing a
