@@ -78,24 +78,9 @@ Patch workflow (terminal)
 # j = 11  ->  ell_min = 3046, ell_max =  4253
 #
 # ----------------------------------------------------------------------
-
-ELL_MIN = np.array(
-    [32,  64, 128, 256, 542, 705,
-     916, 1192, 1550, 2115, 2539, 3046],
-    dtype=int,
-)
-
-ELL_MAX = np.array(
-    [128, 256, 512, 705, 916, 1192,
-     1549, 2015, 2539, 3047, 3656, 4253],
-    dtype=int,
-)
-
-ELL_PEAK = np.array(
-            [64, 128, 256, 512, 705, 917,
-             1192, 1550, 2015, 2539, 3047, 3600],
-             dtype=int,
-)
+ELL_MIN = np.array([1, 2, 5, 9, 19, 38, 76, 153, 307, 613, 1227, 1800], dtype=int)
+ELL_PEAK = np.array([2, 5, 10, 19, 38, 77, 153, 307, 614, 1227, 2454, 3600], dtype=int)
+ELL_MAX = np.array([4, 10, 20, 38, 76, 154, 306, 614, 1228, 2454, 4908, 7200], dtype=int)
 
 
 # ----------------------------------------------------------------------
@@ -134,7 +119,7 @@ def scal_bandlimit_silc(
     original behaviour (full band-limit L).
     """
     if multiresolution:
-        return int(min(65, L))
+        return int(min(3, L)) # (64, L) for Keir's wavelet bank'
     else:
         return int(L)
 
