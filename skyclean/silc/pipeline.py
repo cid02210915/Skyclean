@@ -6,11 +6,10 @@ import numpy as np
 import jax
 import subprocess, sys
 import s2wav.filters as filters
-from typing import Literal
 
 from .download import DownloadData
 from .map_processing import ProcessMaps
-from .file_templates import FileTemplates, pixel_ps_component_name
+from .file_templates import FileTemplates
 from .ilc import ProduceSILC  
 from .power_spec import MapAlmConverter, PowerSpectrumTT, PowerSpectrumCrossTT
 from .mixing_matrix_constraint import SpectralVector
@@ -38,18 +37,6 @@ class Pipeline:
         F = None,
         reference_vectors = None,
         nsamp: float = 1200, 
-        # for adding extra point-source-like features:
-        ps_injection_mode: Literal["circular_ps", "pixel_ps"] = "pixel_ps",
-        ps_component: str = "strongirps",
-        # for 'circular_ps' usage: 
-        n_points: int | None = 10,
-        match_n_points_to_target_density: bool = False,
-        lon_range: tuple[float, float] | None = None,
-        brightness_percentile: tuple[float, float] | None = (75.0, 100.0),
-        mode: Literal["random", "brightest"] = "random",
-        random_seed: int = 1,
-        ps_radius_range: tuple[float, float] = (1.0, 1.0),
-        ps_brightness_scale: float = 1.0,
         pcilc: bool = False,
         pcilc_component: str = "tsz",
         pcilc_eps: float | None = None,
@@ -76,19 +63,6 @@ class Pipeline:
         #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
         self.nsamp = nsamp
-        self.ps_component = ps_component
-        self.n_points = None if n_points is None else int(n_points)
-        self.match_n_points_to_target_density = bool(match_n_points_to_target_density)
-        self.lon_range = lon_range
-        self.brightness_percentile = brightness_percentile
-        self.mode = mode
-        self.random_seed = int(random_seed)
-        self.ps_radius_range = tuple(ps_radius_range)
-        self.ps_brightness_scale = float(ps_brightness_scale)
-        self.ps_injection_mode = ps_injection_mode
-        
-
-        
 
         self.pcilc = bool(pcilc)
         self.pcilc_component = str(pcilc_component).lower()
@@ -138,18 +112,6 @@ class Pipeline:
             directory=self.directory,
             method=self.method,
             overwrite=self.overwrite,
-            ps_component = self.ps_component, 
-            n_points = self.n_points,
-            match_n_points_to_target_density = self.match_n_points_to_target_density,
-            lon_range = self.lon_range,
-            lat_range = (-90.0, 90.0),
-            brightness_percentile = self.brightness_percentile,
-            mode = self.mode,
-            random_seed = self.random_seed,
-            ps_radius_range = self.ps_radius_range,
-            ps_brightness_scale = self.ps_brightness_scale,
-            ps_injection_mode = self.ps_injection_mode,
-
         )
         processor.produce_and_save_maps()
 
@@ -173,17 +135,6 @@ class Pipeline:
             directory=self.directory,
             method=self.method,
             overwrite=self.overwrite,
-            ps_component = self.ps_component, 
-            n_points = self.n_points,
-            match_n_points_to_target_density = self.match_n_points_to_target_density,
-            lon_range = self.lon_range,
-            lat_range = (-90.0, 90.0),
-            brightness_percentile = self.brightness_percentile,
-            mode = self.mode,
-            random_seed = self.random_seed,
-            ps_radius_range = self.ps_radius_range,
-            ps_brightness_scale = self.ps_brightness_scale,
-            ps_injection_mode = self.ps_injection_mode,
         )
         processor.produce_and_save_wavelet_transforms(
             self.N_directions,
@@ -228,12 +179,6 @@ class Pipeline:
     
         # Input mixture and scales
         comp_in = self.wavelet_components[0]
-        if (
-            comp_in == "cfne"
-            and "extra_feature" in self.components
-            and self.ps_injection_mode == "pixel_ps"
-        ):
-            comp_in = pixel_ps_component_name(self.components)
 
         if getattr(self, "scales", None) is not None:
             scales = list(self.scales)
@@ -340,6 +285,7 @@ class Pipeline:
         realisation: int | None = None,        # defaults to self.start_realisation
         lmax: int | None = None,               # defaults to self.lmax
         lam: str | float | int | None = None,  # defaults to self.lam_str
+        N_directions: int | None = None,
         field: int = 0,
         nsamp: float | int | None = None,
         overwrite: bool | None = None,
@@ -362,6 +308,7 @@ class Pipeline:
         lam_   = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         freqs  = self.frequencies if frequencies is None else list(frequencies)
         nsamp_ = getattr(self, "nsamp", None) if nsamp is None else nsamp
+        N_directions_ = self.N_directions if N_directions is None else int(N_directions)
 
         # --- templates + processed-CFN detection ---
         ft = FileTemplates(self.directory).file_templates
@@ -390,7 +337,7 @@ class Pipeline:
             out = conv.to_alm(
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
-                realisation=r, lmax=lmax_, lam=lam_,
+                realisation=r, lmax=lmax_, lam=lam_, N_directions=N_directions_,
                 nsamp=nsamp_, constraint=constraint_, mode=mode,
             )
             src = "ilc_synth"
@@ -451,6 +398,7 @@ class Pipeline:
                 lmax=lmax_,
                 lam=lam_,
                 nsamp=nsamp_,
+                N_directions=N_directions_
             )
             os.makedirs(os.path.dirname(spec_path), exist_ok=True)
             if overwrite or not os.path.exists(spec_path):
@@ -511,6 +459,7 @@ class Pipeline:
         realisation: int | None = None,
         lmax: int | None = None,
         lam: str | float | int | None = None,
+        N_directions: int | None = None,
         nsamp: int | float | None = None,
         constraint: bool | None = None,
         field: int = 0,
@@ -526,6 +475,7 @@ class Pipeline:
         rY = r_default if realisation_Y is None else int(realisation_Y)
         lmax_ = self.lmax if lmax is None else int(lmax)
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
+        N_directions_ = self.N_directions if N_directions is None else int(N_directions)
         nsamp_ = getattr(self, "nsamp", 1200) if nsamp is None else int(nsamp)
         constraint_ = getattr(self, "constraint", False) if constraint is None else bool(constraint)
         fX    = self.frequencies if frequencies_X is None else list(frequencies_X)
@@ -560,7 +510,7 @@ class Pipeline:
                 out = conv.to_alm(
                     component=comp_in, source="ilc_synth",
                     extract_comp=tgt, frequencies=frequencies,
-                    realisation=r_use, lmax=lmax_, lam=lam_,
+                    realisation=r_use, lmax=lmax_, lam=lam_, N_directions=N_directions_,
                     nsamp=nsamp_, constraint=constraint_,  mode=mode_use
                 )
                 if mode_use is not None:
@@ -646,87 +596,6 @@ class Pipeline:
     
         return ell, cl_xy
 
-    
-    def step_power_spec_both(
-        self,
-        unit: str = "K",
-        realisation: int | None = None,
-        lmax: int | None = None,
-        lam: str | float | int | None = None,
-        field: int = 0,
-        nsamp: float | int | None = None,
-        overwrite: bool | None = None,
-    ):
-        """
-        Convenience wrapper: compute power spectra for both the processed map
-        and the ILC-synth map. Saves them to a single .npy file and returns
-        (ell, cl_processed, cl_ilc).
-        """
-
-        # defaults from pipeline
-        r       = self.start_realisation if realisation is None else int(realisation)
-        lmax_   = self.lmax if lmax is None else int(lmax)
-        overwrite_ = self.overwrite if overwrite is None else overwrite
-        nsamp_  = getattr(self, "nsamp", None) if nsamp is None else nsamp
-        lam_tag = self.lam_str if lam is None else (
-            lam if isinstance(lam, str) else f"{float(lam):.1f}"
-        )
-
-        # 1) processed map spectrum
-        ell_proc, cl_proc = self.step_power_spec(
-            unit=unit,
-            source="processed",
-            component="cfn",     # or "cmb" depending on what you processed
-            realisation=r,
-            lmax=lmax_,
-            lam=lam,
-            field=field,
-            nsamp=nsamp_,
-            overwrite=overwrite_,
-            save_path=None,      # avoid extra PNG here if you don't want plots
-        )
-
-        # 2) ILC map spectrum
-        ell_ilc, cl_ilc = self.step_power_spec(
-            unit=unit,
-            source="ilc_synth",
-            component="cfn",     # input comp to ILC
-            extract_comp="cmb",  # extracted comp; adjust if needed
-            realisation=r,
-            lmax=lmax_,
-            lam=lam,
-            field=field,
-            nsamp=nsamp_,
-            overwrite=overwrite_,
-            save_path=None,
-        )
-
-        # sanity check: same ell grid
-        if not np.array_equal(ell_proc, ell_ilc):
-            raise ValueError("ell grids for processed and ILC spectra do not match")
-
-        ell = ell_proc
-
-        # 3) save combined spectra
-        mode = "con" if getattr(self, "constraint", False) else "uncon"
-
-        out_dir = os.path.join(self.directory, "power_spectra")
-        os.makedirs(out_dir, exist_ok=True)
-
-        fname = f"Cl_both_{mode}_r{r}_lmax{lmax_}_lam{lam_tag}.npy"
-        out_path = os.path.join(out_dir, fname)
-
-        data = {
-            "ell": ell,
-            "cl_processed": cl_proc,
-            "cl_ilc": cl_ilc,
-        }
-
-        if overwrite_ or (not os.path.exists(out_path)):
-            np.save(out_path, data)
-            print(f"[power_spec] Saved combined spectra to {out_path}")
-        else:
-            print(f"[power_spec] Skipped saving (exists and overwrite=False): {out_path}")
 
         
     def run(self, steps=None):
@@ -742,7 +611,7 @@ class Pipeline:
             steps = ["download", "process", "wavelets", "ilc"]
 
         start_time = time.perf_counter()
-        print(f"==== RUN for lam={self.lam}, realisation {self.start_realisation} to {self.start_realisation + self.realisations} ====")
+        print(f"=== RUN for lam={self.lam} ===")
 
         if "download" in steps:
             self.step_download()
@@ -757,8 +626,7 @@ class Pipeline:
             self.step_ilc()
 
         if "power_spec" in steps:
-            #self.step_power_spec()
-            self.step_power_spec_both()
+            self.step_power_spec()
 
         if "cross_power_spec" in steps:
             self.step_cross_power_spec()
@@ -770,117 +638,31 @@ class Pipeline:
 # when not using multi-processing 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the SILC pipeline with configurable parameters.",
-        formatter_class=argparse.RawTextHelpFormatter,
-        epilog=(
-            "Example usage:\n"
-            "  python -m skyclean.silc.pipeline \\\n"
-            "    --components cmb tsz extra_feature \\\n"
-            "    --wavelet-components cfne \\\n"
-            "    --ilc-components cmb \\\n"
-            "    --frequencies 030 044 \\\n"
-            "    --realisations 1 \\\n"
-            "    --start-realisation 1 \\\n"
-            "    --lmax 511 \\\n"
-            "    --method jax_cuda \\\n"
-            "    --ps-component faintradiops \\\n"
-            "    --n-points 10 \\\n"
-            "    --lat-range 20 90 \\\n"
-            "    --brightness-percentile 75 100 \\\n"
-            "    --mode random \\\n"
-            "    --random-seed 1 \\\n"
-            "    --factor 60 \\\n"
-            "    --ps-injection-mode pixel_ps \\\n"
-            "    --overwrite \\\n"
-            "    --steps process"
-        ),
+        description="Run the SILC pipeline with configurable parameters and GPU selection."
     )
-    parser.add_argument('--components', nargs='+',
-                        default=["cmb", "sync", "dust", "noise", "tsz"],
-                        help="Components to include in the pipeline.")
-    parser.add_argument('--wavelet-components', nargs='+',
-                        default=["cfn"],
-                        help="Components to use as input for the wavelet transform.")
-    parser.add_argument('--ilc-components', nargs='+',
-                        default=["cmb"],
-                        help="Components to extract with the ILC.")
+    parser.add_argument('--components', nargs='+', default=["cmb", 'tsz', "sync", "dust", "noise"])
+    parser.add_argument('--wavelet-components', nargs='+', default=["cfn"])
+    parser.add_argument('--ilc-components', nargs='+', default=["cmb"])
     parser.add_argument('--frequencies', nargs='+',
-                        default=["030", "044", "070", "100", "143", "217", "353", "545", "857"],
-                        help="Frequency channels to use.")
-    parser.add_argument('--realisations', type=int, default=1,
-                        help="Number of realisations to process.")
-    parser.add_argument('--start-realisation', type=int, default=0,
-                        help="Index of the first realisation.")
-    parser.add_argument('--lmax', type=int, default=512,
-                        help="Maximum multipole L used in the analysis.")
-    parser.add_argument('--N-directions', type=int, default=1,
-                        help="Number of wavelet directions.")
-    parser.add_argument('--lam', type=float, default=2.0,
-                        help="Wavelet dilation parameter λ.")
-    parser.add_argument('--method', type=str, default='jax_cuda',
-                        help="Backend / method (e.g. 'jax_cuda', 'jax_cpu').")
-    parser.add_argument('--visualise', action='store_true',
-                        help="If set, produce diagnostic plots during wavelet steps.")
-    parser.add_argument('--save-ilc-intermediates', action='store_true',
-                        help="If set, save intermediate ILC products (covariances, weights, etc.).")
-    parser.add_argument('--overwrite', action='store_true',
-                        help="If set, overwrite existing files.")
-    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data',
-                        help="Base directory for input/output data.")
-    parser.add_argument('--ps-component', type=str, default='strongirps',
-                        help="Point-source component template key used for injected extra features.")
-    parser.add_argument('--n-points', type=int, default=10,
-                        help="Number of point sources to inject.")
-    parser.add_argument('--match-n-points-to-target-density', action='store_true',
-                        help="Set N from the source density of the original-resolution PS map and the target low-resolution pixel count.")
-    parser.add_argument('--lon-range', nargs=2, type=float, default=None, metavar=('LON_MIN', 'LON_MAX'),
-                        help="Longitude range in degrees for source selection. Omit to use full range.")
-    parser.add_argument('--brightness-percentile', nargs=2, type=float, default=(75.0, 100.0), metavar=('PCT_MIN', 'PCT_MAX'),
-                        help="Brightness percentile range used to preselect candidate sources.")
-    parser.add_argument('--mode', type=str, choices=['random', 'brightest'], default='random',
-                        help="Source selection mode.")
-    parser.add_argument('--random-seed', type=int, default=1,
-                        help="Random seed used when mode='random'.")
-    parser.add_argument('--ps-radius-range', nargs=2, type=float, default=(1.0, 1.0), metavar=('RMIN', 'RMAX'),
-                        help="Uniform sampling range for per-source point-source radius scale factors.")
-    parser.add_argument('--ps-brightness-scale', type=float, default=1.0,
-                        help="Global multiplicative brightness scale for injected point sources.")
-    parser.add_argument('--ps-injection-mode', type=str,
-                        choices=['circular_ps', 'pixel_ps'],
-                        default='pixel_ps',
-                        help="How to build injected extra features.")
-    
-
-
-    # Constrained ILC options (pipeline already supports these)
-    parser.add_argument(
-        '--constraint',
-        action='store_true',
-        help="Enable constrained ILC using a spectral mixing matrix F."
-    )
-    parser.add_argument(
-        '--nsamp',
-        type=int,
-        default=1200,
-        help="Number of Monte Carlo samples (nsamp) for constrained ILC."
-    )
-
-    # Which steps to run (now including power spectra)
-    parser.add_argument(
-        '--steps',
-        nargs='+',
-        choices=['download', 'process', 'wavelets', 'ilc',
-                 'power_spec', 'cross_power_spec', 'all'],
-        help=(
-            "Which steps to run (one or more). Examples:\n"
-            "  --steps download\n"
-            "  --steps process wavelets\n"
-            "  --steps ilc power_spec\n"
-            "  --steps all"
-        )
-    )
+                        default=["030", "044", "070", "100", "143", "217", "353", "545", "857"])
+    parser.add_argument('--realisations', type=int, default=1)
+    parser.add_argument('--start-realisation', type=int, default=0)
+    parser.add_argument('--lmax', type=int, default=512)
+    parser.add_argument('--N-directions', type=int, default=1)
+    parser.add_argument('--lam', type=float, default=2.0)
+    parser.add_argument('--method', type=str, default='jax_cuda')
+    parser.add_argument('--visualise', action='store_true')
+    parser.add_argument('--save-ilc-intermediates', action='store_true')
+    parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data')
+    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--steps', nargs='+',
+                        choices=['download', 'process', 'wavelets', 'ilc', 'all'],
+                        help="Which steps to run (one or more). Examples: --steps download  or  --steps process wavelets  or  --steps all")
 
     args = parser.parse_args()
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    print(f"Using GPU {args.gpu} for computation.")
 
     pipeline = Pipeline(
         components=args.components,
@@ -897,30 +679,5 @@ def main():
         save_ilc_intermediates=args.save_ilc_intermediates,
         overwrite=args.overwrite,
         directory=args.directory,
-        constraint=args.constraint,
-        nsamp=args.nsamp,
-        ps_component=args.ps_component,
-        n_points=args.n_points,
-        match_n_points_to_target_density=args.match_n_points_to_target_density,
-        lon_range=tuple(args.lon_range) if args.lon_range is not None else None,
-        brightness_percentile=tuple(args.brightness_percentile),
-        mode=args.mode,
-        random_seed=args.random_seed,
-        ps_radius_range=tuple(args.ps_radius_range),
-        ps_brightness_scale=args.ps_brightness_scale,
-        ps_injection_mode=args.ps_injection_mode,
     )
     pipeline.run(steps=args.steps)
-
-if __name__ == "__main__": # Run main() only when the file is executed as a script, e.g. python3 -m skyclean.silc.pipeline
-    main()    
-
-# example usage:
-# 1. CFN with multiple components (no extra feature injection)
-# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --overwrite --steps process wavelets ilc
-#
-# 2. CFNE using pixel point-source injection
-# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 1.0 --ps-brightness-scale 1.0 --ps-injection-mode pixel_ps --overwrite --steps process wavelets ilc
-#
-# 3. CFNE_CIRC using circular point-source injection
-# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne_circ --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 3.0 --ps-brightness-scale 5.0 --ps-injection-mode circular_ps --overwrite --steps process wavelets ilc
