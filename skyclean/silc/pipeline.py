@@ -50,6 +50,11 @@ class Pipeline:
         random_seed: int = 1,
         ps_radius_range: tuple[float, float] = (1.0, 1.0),
         ps_brightness_scale: float = 1.0,
+        pcilc: bool = False,
+        pcilc_component: str = "tsz",
+        pcilc_eps: float | None = None,
+        pcilc_pick: str = "minvar",
+        #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
         self.wavelet_components = wavelet_components
@@ -81,6 +86,7 @@ class Pipeline:
         self.ps_radius_range = tuple(ps_radius_range)
         self.ps_brightness_scale = float(ps_brightness_scale)
         self.ps_injection_mode = ps_injection_mode
+        
 
         
 

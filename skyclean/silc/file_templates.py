@@ -240,7 +240,7 @@ class FileTemplates():
         # Optional: power spectrum
         "processed_cmb_spectrum":os.path.join(
             self.output_directories["processed_maps"],
-            "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"
+            "processed_cmb_spectrum_r{realisation:04d}_lmax{lmax}.npy"
         ),
             
         "ilc_spectrum": os.path.join(
