@@ -1,3 +1,4 @@
+
 from jax import config as jax_config
 jax_config.update("jax_enable_x64", True)
 
@@ -146,134 +147,126 @@ class SILCTools():
         return 0.0 if s2 == 0.0 else (s1 * s1) / s2
     
     @staticmethod
-    @lru_cache(maxsize=256)
-    def gaussian_pixel_counts_fullsky(fwhm_rad: float, nside: int, k_sigma: float = 3.0):
-        """
-        Diagnostic helper:
-          N_sphere_hp : total HEALPix pixels on sphere
-          N_in_gauss  : pixels with theta <= k_sigma*sigma (hard cut; not paper)
-          N_pix_eff   : (ΣW)^2/Σ(W^2) (not paper)
-          sigma       : sigma in radians
-          theta_cut   : cutoff radius in radians
-          f_sky_paper : sigma^2/2 from paper
-          f_sky_eff_hp: N_pix_eff / N_pix_fullsky(HP)
-        """
-        fwhm_rad = float(fwhm_rad)
-        nside = int(nside)
-        k_sigma = float(k_sigma)
-        sigma = fwhm_rad / math.sqrt(8.0 * math.log(2.0))
-        theta_cut = min(k_sigma * sigma, math.pi)
-        npix = hp.nside2npix(nside)
-        theta, _ = hp.pix2ang(nside, np.arange(npix))
-        N_in_gauss = int(np.count_nonzero(theta <= theta_cut))
-        W = np.exp(-0.5 * (theta / sigma) ** 2)
-        s1 = float(np.sum(W))
-        s2 = float(np.sum(W * W))
-        N_pix_eff = 0.0 if s2 == 0.0 else (s1 * s1) / s2
-        f_sky_paper = SILCTools.f_sky_paper_from_fwhm(fwhm_rad)
-        f_sky_eff_hp = float(N_pix_eff) / float(npix) if npix > 0 else float("nan")
-        return (
-            int(npix),
-            int(N_in_gauss),
-            float(N_pix_eff),
-            float(sigma),
-            float(theta_cut),
-            float(f_sky_paper),
-            float(f_sky_eff_hp),
-        )
-    
-    # ============================================================
-    # (C) Paper-style per-band FWHM (Eqs 42–44) and N_modes
-    # ============================================================
-    @staticmethod
     def fwhm_rad_wavelet(
         L: int,
         lam_list: list[float],
-        ell_peak: list[float] | np.ndarray,  
+        ell_peak: list[float] | np.ndarray,
         j: int,
         Nfreq: int,
-        lmax: int, 
+        lmax: int,
         Ndeproj: int = 0,
         N_directions: int = 1,
         direction_index: int | None = None,
         b_tol: float = 0.02,
-
     ) -> float:
         """
-        Paper Eqs (42)-(44): per-band real-space Gaussian FWHM (radians) for WAVELET band j.
-
-        Fix: use the smooth band window h_l^j = kappa_l^j, with per-band lambda.
+        Paper Eqs (42)-(44): per-band real-space Gaussian FWHM
+        (radians) for wavelet band j.
+    
+        Uses the non-directional band window h_l^j = kappa_l^j.
         """
+    
         L = int(L)
         j = int(j)
-
+    
         if j < 0 or j >= len(lam_list):
-            raise ValueError(f"j={j} out of range for lam_list (len={len(lam_list)})")
-
+            raise ValueError(
+                f"j={j} out of range for lam_list "
+                f"(len={len(lam_list)})"
+            )
+    
         ells = np.arange(L, dtype=float)
-
-        ell_min = int(L0_j_silc(j))
-        ell_max = int(wav_j_bandlimit_silc(L, j, multiresolution=True))
-
+    
+        ell_min = int(
+            L0_j_silc(j)
+        )
+    
+        ell_max = int(
+            wav_j_bandlimit_silc(
+                L,
+                j,
+                multiresolution=True,
+            )
+        )
+    
         lmax = int(lmax)
-        ell_data_max = min(L - 1, lmax)
-
-        ell_min = max(0, min(ell_min, ell_data_max))
-        ell_max = max(0, min(ell_max, ell_data_max))
+        ell_data_max = min(
+            L - 1,
+            lmax,
+        )
+    
+        ell_min = max(
+            0,
+            min(ell_min, ell_data_max),
+        )
+    
+        ell_max = max(
+            0,
+            min(ell_max, ell_data_max),
+        )
+    
         if ell_min > ell_max:
             return 0.0
-
-        lam_j = float(lam_list[j])
-        gen = AxisymmetricGenerators(lam_j)
-
-        # Evaluate kappa on a dimensionless argument; then hard-mask to the bank support.
-        ell_peak_j = float(ell_peak[j])
-        x = ells / ell_peak_j if ell_peak_j > 0 else ells
+    
+        lam_j = float(
+            lam_list[j]
+        )
+    
+        gen = AxisymmetricGenerators(
+            lam_j
+        )
+    
+        ell_peak_j = float(
+            ell_peak[j]
+        )
+    
+        x = (
+            ells / ell_peak_j
+            if ell_peak_j > 0
+            else ells
+        )
+    
         h = gen.kappa(x)
-
-        mask = (ells >= ell_min) & (ells <= ell_max)
-        #print(f"[fwhm_wavelet] L={L} j={j} ell_min={ell_min} ell_max={ell_max} ")
+    
+        mask = (
+            (ells >= ell_min)
+            & (ells <= ell_max)
+        )
+    
         h = h * mask
-
-        # Eq (42)
-        weights = (2.0 * ells + 1.0) * (h * h)
-        '''
-        if int(N_directions) > 1 and direction_index is not None:
-            s_elm = np.asarray(filters.tiling_direction(L, int(N_directions)))
-            S = float(np.sum(weights * np.abs(s_elm[:, int(direction_index)])**2))
-        else:
-            S = float(np.sum(weights))
-        
-        print(
-        f"[DBG] j={j} d={direction_index} "
-        f"ell=[{ell_min},{ell_max}] "
-        f"hmax={np.max(np.abs(h)):.3e} "
-        f"S={S:.3e}"
+    
+        # Eq. (42): non-directional number of modes
+        S = float(
+            np.sum(
+                (2.0 * ells + 1.0)
+                * (h * h)
+            )
         )
-        '''
-        
-        S = float(np.sum(weights))
-
-        width = ell_max - ell_min + 1
-        if S > 0:
-            A = abs(1 + int(Ndeproj) - int(Nfreq))
-            sigma2_dbg = 2.0 * (A / (float(b_tol) * S))
-            fwhm_arcmin_dbg = SILCTools.fwhm_from_sigma2(sigma2_dbg) * (180.0/np.pi) * 60.0
-        else:
-            fwhm_arcmin_dbg = float("inf")
-        '''
-        print(
-            f"[band diag] L={L} j={j} "
-            f"ell_min={ell_min} ell_max={ell_max} width={width} "
-            f"S={S:.3e} fwhm~{fwhm_arcmin_dbg:.2f} arcmin"
+    
+        # Eq. (43)
+        A = abs(
+            1
+            + int(Ndeproj)
+            - int(Nfreq)
         )
-        '''
-        # Eq (43)
-        A = abs(1 + int(Ndeproj) - int(Nfreq))
-        sigma2 = 0.0 if S <= 0.0 else 2.0 * (A / (float(b_tol) * S))
-
-        # Eq (44)
-        return SILCTools.fwhm_from_sigma2(sigma2)
+    
+        sigma2 = (
+            0.0
+            if S <= 0.0
+            else 2.0
+            * (
+                A
+                / (
+                    float(b_tol)
+                    * S
+                )
+            )
+        )
+    
+        # Eq. (44)
+        return SILCTools.fwhm_from_sigma2(
+            sigma2
+        )
 
     @staticmethod
     def fwhm_rad_scaling(
@@ -450,16 +443,25 @@ class SILCTools():
             reps = (exp + nphi - 1) // nphi
             return np.tile(a, reps)[:, :exp]
 
-        map1 = _ensure_mw(np.real(MW_Map1))
-        map2 = _ensure_mw(np.real(MW_Map2))
+        map1 = _ensure_mw(np.asarray(MW_Map1))
+        map2 = _ensure_mw(np.asarray(MW_Map2))
 
         if L < 2 or map1.shape[1] != exp:
-            out0 = np.real(map1 * map2)
+            out0 = np.real(map1 * np.conj(map2))
             return (out0, {}) if return_info else out0
 
-        # ----- forward product -----
-        Rpix = map1 * map2
-        Ralm = s2fft.forward(Rpix, L=L, method=method, spmd=False, reality=True)
+        # Real covariance of the complex directional-n maps
+        Rpix = np.real(
+            map1 * np.conj(map2)
+        )
+
+        Ralm = s2fft.forward(
+            Rpix,
+            L=L,
+            method=method,
+            spmd=False,
+            reality=True,
+        )
 
         # ----- paper FWHM -----
         info: dict = {}
@@ -568,6 +570,17 @@ class SILCTools():
         map_i = doubled_MW_wav_c_j[key_i]
         map_fq = doubled_MW_wav_c_j[key_fq]
 
+        if int(scale) > 0:
+            N = int(N_directions)
+            D = 2 * N - 1
+
+            if map_i.shape[0] != D or map_fq.shape[0] != D:
+                raise ValueError(
+                    f"Wavelet scale {scale} must have {D}=2*N-1 "
+                    f"orientation samples, but received "
+                    f"{map_i.shape[0]} and {map_fq.shape[0]}."
+                )
+
         L = int(map_i.shape[-2])
 
         smoothed_list = []
@@ -611,7 +624,7 @@ class SILCTools():
         
                 f_sky_paper = float(info_d.get("f_sky_paper", float("nan")))
                 f_sky_eff_hp = float(info_d.get("f_sky_eff_hp", float("nan")))
-        
+                '''
                 print(
                     f"[locality] "
                     f"scale={scale} "
@@ -620,6 +633,7 @@ class SILCTools():
                     f"f_sky(paper)={f_sky_paper:.3e} "
                     f"f_sky(eff_hp,diag)={f_sky_eff_hp:.3e}"
                 )
+                '''
         return i, fq, smoothed
 
 
