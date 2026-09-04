@@ -41,6 +41,7 @@ class Pipeline:
         pcilc_component: str = "tsz",
         pcilc_eps: float | None = None,
         pcilc_pick: str = "minvar",
+        topology: str | None = None,
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -68,6 +69,8 @@ class Pipeline:
         self.pcilc_component = str(pcilc_component).lower()
         self.pcilc_eps = pcilc_eps
         self.pcilc_pick = str(pcilc_pick)
+
+        self.topology = topology
 
     # -------------------------
     # Steps
@@ -112,6 +115,7 @@ class Pipeline:
             directory=self.directory,
             method=self.method,
             overwrite=self.overwrite,
+            topology=self.topology,
         )
         processor.produce_and_save_maps()
 
@@ -135,6 +139,7 @@ class Pipeline:
             directory=self.directory,
             method=self.method,
             overwrite=self.overwrite,
+            topology=self.topology,
         )
         processor.produce_and_save_wavelet_transforms(
             self.N_directions,
