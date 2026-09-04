@@ -12,14 +12,16 @@ class FileTemplates():
         "857": "Bl_T_R3.01_fullsky_857x857.fits",
     }
 
-    def __init__(self, directory = "data/", start_realisation: int = 0):
+    def __init__(self, directory = "data/", start_realisation: int = 0, topology: str | None = None,):
         self.directory = directory
+        self.topology = topology
         self.output_directories = {
             # downloaded maps
             "cmb_realisations": os.path.join(directory, "CMB_realisations/"),
             # processed maps
             "cfn": os.path.join(directory, "CFN_realisations"),
             "fn": os.path.join(directory, "FN_realisations"),
+            
             "processed_maps": os.path.join(directory, "processed_maps"),
             # wavelet transforms
             "wavelet_coeffs": os.path.join(directory, "wavelet_transforms/wavelet_coeffs"),
@@ -45,6 +47,7 @@ class FileTemplates():
             if not os.path.exists(value):
                 print(f"Creating directory: {value}")
                 os.makedirs(value)
+
         
         self.download_templates = {
             "sync": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_synchrotron-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
@@ -59,11 +62,50 @@ class FileTemplates():
             "freefree": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_freefree-ffp10-skyinbands-{frequency}_2048_R3.00_full.fits",
             "faint_irps":    "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_faintirps-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
             "strong_uchii":  "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=COM_SimMap_stronguchii-ffp10-skyinbands-{frequency}_4096_R3.00_full.fits",
+
+            # total FFP10 simulated frequency maps: CMB + foregrounds + noise/instrument simulation
+            "total": "http://pla.esac.esa.int/pla/aio/product-action?SIMULATED_MAP.FILE_ID=ffp10_newdust_total_{frequency}_full_map.fits",
+            "real": {
+                "030": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/LFI_SkyMap_030_1024_R3.00_full.fits",
+                "044": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/LFI_SkyMap_044_1024_R3.00_full.fits",
+                "070": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/LFI_SkyMap_070_1024_R3.00_full.fits",
+                "100": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/HFI_SkyMap_100_2048_R3.01_full.fits",
+                "143": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/HFI_SkyMap_143_2048_R3.01_full.fits",
+                "217": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/HFI_SkyMap_217_2048_R3.01_full.fits",
+                "353": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/HFI_SkyMap_353_2048_R3.01_full.fits",
+                "545": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/HFI_SkyMap_545_2048_R3.01_full.fits",
+                "857": "https://irsa.ipac.caltech.edu/data/Planck/release_3/all-sky-maps/maps/HFI_SkyMap_857_2048_R3.01_full.fits",
+            },
         }
+        
+        if topology is None:
+            cmb_input_file = os.path.join(
+                self.output_directories["cmb_realisations"],
+                "cmb_r{realisation:04d}.fits",
+            )
+
+        elif topology == "Toy":
+            cmb_input_file = (
+                "/home/agnes/Skyclean/docs/circle/"
+                "step1_injected_pair_nside512_lmax800/"
+                "injected_map.fits"
+            )
+
+        elif topology == "E1":
+            cmb_input_file = (
+                "/home/agnes/Skyclean/docs/circle/"
+                "topology_realization_maps_nside128_lmax300/"
+                "topology_realization_{realisation:03d}_nside128_lmax300.fits"
+            )
+
+        else:
+            raise ValueError(
+                "topology must be None, 'Toy', or 'E1'."
+            )
 
         self.file_templates = {
         # ---------------- downloaded maps ----------------
-        "cmb":   os.path.join(self.output_directories["cmb_realisations"], "cmb_r{realisation:04d}.fits"),
+        "cmb":   cmb_input_file,
         "sync":  os.path.join(self.output_directories["cmb_realisations"], "sync_f{frequency}.fits"),
         "dust":  os.path.join(self.output_directories["cmb_realisations"], "dust_f{frequency}.fits"),
         "noise": os.path.join(self.output_directories["cmb_realisations"], "noise_f{frequency}_r{realisation:05d}.fits"),
@@ -74,6 +116,8 @@ class FileTemplates():
         "faint_irps":    os.path.join(self.output_directories["cmb_realisations"], "faint_irps_f{frequency}.fits"),
         "faint_radiops":  os.path.join(self.output_directories["cmb_realisations"], "faint_radiops_f{frequency}.fits"),
         "strong_uchii":   os.path.join(self.output_directories["cmb_realisations"], "strong_uchii_f{frequency}.fits"),
+        "total": os.path.join(self.output_directories["cmb_realisations"], "total_f{frequency}.fits"),
+        "real": os.path.join(self.output_directories["cmb_realisations"], "real_f{frequency}.fits"),
 
         # ---------------- processed maps ----------------
         "processed_cmb":   os.path.join(self.output_directories["processed_maps"], "processed_cmb_r{realisation:04d}_lmax{lmax}.npy"),
@@ -89,6 +133,9 @@ class FileTemplates():
         "processed_strong_uchii":  os.path.join(self.output_directories["processed_maps"], "processed_strong_uchii_f{frequency}_lmax{lmax}.npy"),
         "cfn":             os.path.join(self.output_directories["cfn"],            "cfn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
         "fn":              os.path.join(self.output_directories["fn"], "fn_f{frequency}_r{realisation:04d}_lmax{lmax}.npy"),
+        "processed_total": os.path.join(self.output_directories["processed_maps"], "processed_total_f{frequency}_lmax{lmax}.npy"),
+        "processed_real": os.path.join(self.output_directories["processed_maps"], "processed_real_f{frequency}_lmax{lmax}.npy"),
+        "processed_real": os.path.join(self.output_directories["processed_maps"],"processed_real_f{frequency}_lmax{lmax}.fits"),
 
         # ---------------- wavelet transforms ----------------
         "wavelet_coeffs": os.path.join(
