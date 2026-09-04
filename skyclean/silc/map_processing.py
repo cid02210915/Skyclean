@@ -17,6 +17,7 @@ class ProcessMaps():
                  directory: str = "data/", 
                  method = "jax_cuda", 
                  overwrite: bool = False, 
+                 topology: str | None = None,
                 ): 
         """
         Parameters: 
@@ -42,7 +43,7 @@ class ProcessMaps():
         self.overwrite = overwrite
         self.templates = FileTemplates(directory="/Scratch/agnes/data")
 
-        files = FileTemplates(directory)
+        files = FileTemplates(directory, topology=topology,)
         self.file_templates = files.file_templates
         # file_template, file_templates
         
@@ -139,13 +140,11 @@ class ProcessMaps():
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=noise_realisation
                     )
-    
                 elif comp == "cmb":
                     # Minimal fix: always use the same CMB realisation
                     filepath = self.file_templates[comp].format(
-                        realisation=0
+                        realisation=realisation
                     )
-    
                 else:
                     filepath = self.file_templates[comp].format(
                         frequency=frequency, realisation=realisation
@@ -194,6 +193,84 @@ class ProcessMaps():
             cfn += hp_map_reduced
     
         return cfn
+
+    def process_real_map(
+        self,
+        frequency: str,
+        realisation: int,
+        save: bool = True,
+    ):
+
+        desired_lmax = self.desired_lmax
+
+        nside = HPTools.get_nside_from_lmax(
+            desired_lmax
+        )
+
+        standard_fwhm_rad = np.radians(
+            5 / 60
+        )
+
+        # Raw Planck map
+        filepath = self.file_templates["real"].format(
+            frequency=frequency,
+            realisation=realisation,
+            lmax=desired_lmax,
+        )
+
+        hp_map = hp.read_map(
+            filepath,
+            field=0,
+        )
+
+        # 545 / 857 MJy/sr -> K_CMB
+        hp_map = HPTools.unit_convert(
+            hp_map,
+            frequency,
+        )
+
+        # Native Planck beam
+        beam_path = None
+
+        if frequency not in {
+            "030",
+            "044",
+            "070",
+        }:
+            beam_path = (
+                self.templates.hfi_beam_path(
+                    frequency
+                )
+            )
+        # Native beam -> common 5' beam
+        # and reduce to target lmax / NSIDE
+        hp_map_processed = (
+            HPTools.deconvolve_and_convolve_and_reduce(
+                hp_map,
+                lmax=desired_lmax,
+                nside=nside,
+                frequency=frequency,
+                standard_fwhm_rad=standard_fwhm_rad,
+                beam_path=beam_path,
+            )
+        )
+        if save:
+
+            output_path = (
+                self.file_templates["processed_real"]
+                .format(
+                    frequency=frequency,
+                    realisation=realisation,
+                    lmax=desired_lmax,
+                )
+            )
+            save_map(
+                output_path,
+                hp_map_processed,
+                self.overwrite,
+            )
+
+        return hp_map_processed
         
     def process_single_component(self, comp: str, frequency: str, realisation: int,
                              save: bool = True, noise_realisation: int | None = None):
@@ -263,23 +340,108 @@ class ProcessMaps():
 
     def produce_and_save_maps(self):
         """
-        Produce CFN maps across realisations and frequencies.
+        Prepare input maps for the wavelet step.
 
-        Returns:
-            None
+        cfn  -> construct simulated CFN
+        real -> process observed Planck frequency map
         """
-        desired_lmax = self.desired_lmax
-        for realisation in range(self.realisations):
-            realisation += self.start_realisation  # Adjust for starting realisation
-            for frequency in self.frequencies:
-                cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
-                if os.path.exists(cfn_output_path) and self.overwrite == False:
-                    print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
-                    continue
-                cfn_map = self.create_cfn(frequency, realisation, save=True)
-                hp.write_map(cfn_output_path, cfn_map, overwrite=True)
-                print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
 
+        desired_lmax = self.desired_lmax
+
+        for realisation in range(self.realisations):
+
+            realisation += self.start_realisation
+
+            for frequency in self.frequencies:
+
+                # ==========================================
+                # Real Planck data
+                # ==========================================
+
+                if self.wavelet_components[0] == "real":
+
+                    output_path = (
+                        self.file_templates[
+                            "processed_real"
+                        ].format(
+                            frequency=frequency,
+                            realisation=realisation,
+                            lmax=desired_lmax,
+                        )
+                    )
+
+                    if (
+                        os.path.exists(output_path)
+                        and self.overwrite == False
+                    ):
+                        print(
+                            f"Processed real map at "
+                            f"{frequency} GHz already exists. "
+                            f"Skipping processing."
+                        )
+                        continue
+
+                    real_map = self.process_real_map(
+                        frequency,
+                        realisation,
+                    )
+
+                    hp.write_map(
+                        output_path,
+                        real_map,
+                        overwrite=True,
+                    )
+
+                    print(
+                        f"Processed real map at "
+                        f"{frequency} GHz saved to "
+                        f"{output_path}"
+                    )
+
+
+                # ==========================================
+                # Simulated CFN
+                # ==========================================
+
+                else:
+
+                    output_path = (
+                        self.file_templates["cfn"].format(
+                            frequency=frequency,
+                            realisation=realisation,
+                            lmax=desired_lmax,
+                        )
+                    )
+
+                    if (
+                        os.path.exists(output_path)
+                        and self.overwrite == False
+                    ):
+                        print(
+                            f"CFN map at {frequency} GHz "
+                            f"for realisation {realisation} "
+                            f"already exists. "
+                            f"Skipping processing."
+                        )
+                        continue
+
+                    cfn_map = self.create_cfn(
+                        frequency,
+                        realisation,
+                        save=True,
+                    )
+
+                    hp.write_map(
+                        output_path,
+                        cfn_map,
+                        overwrite=True,
+                    )
+
+                    print(
+                        f"CFN map at {frequency} GHz "
+                        f"for realisation {realisation} "
+                        f"saved to {output_path}"
+                    )
 
     def create_wavelet_transform(self, comp: str, frequency: str, realisation: int, N_directions: int = 1, 
                                  lam: float = 2.0, method = "jax_cuda", visualise = False):
@@ -301,7 +463,25 @@ class ProcessMaps():
         lmax = self.desired_lmax
         L = lmax + 1
         # load in processed map
-        filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation, lmax=lmax, lam = lam) # input path
+        if comp == "real":
+            filepath = self.file_templates[
+                "processed_real"
+            ].format(
+                frequency=frequency,
+                realisation=realisation,
+                lmax=lmax,
+                lam=lam,
+            )
+        else:
+        
+            filepath = self.file_templates[
+                comp
+            ].format(
+                frequency=frequency,
+                realisation=realisation,
+                lmax=lmax,
+                lam=lam,
+            )
         wavelet_coeffs_path = self.file_templates["wavelet_coeffs"]
         scaling_coeffs_path = self.file_templates["scaling_coeffs"]
         if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, N_directions=N_directions,
