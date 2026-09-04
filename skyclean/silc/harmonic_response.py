@@ -636,51 +636,6 @@ class SimpleHarmonicWindows:
         scal_l   = scal_l * alpha
         kappa_jl = kappa_jl * alpha[None, :]
      
-        
-        # ---- optional: print Eq.(30) check ----
-        denom_post = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
-        '''
-        print("\n=== Eq.(30) check (should be ~1) ===")
-        for ell in [0, 1, 2, 5, 10, 20, 32, 64, 128, min(256, L-1), L-1]:
-            if ell < L:
-                print(f"ell={ell:4d}  value={denom_post[ell]:.6e}")
-        print("min/max over ell with denom>0:", np.nanmin(denom_post[mask]), np.nanmax(denom_post[mask]))
-        print("===================================\n")
-      
-        S = denom_post            # this is admissibility curve
-        ells = np.arange(L)
-        
-        plt.figure(figsize=(7,4))
-        plt.plot(ells, S)
-        plt.axhline(1.0, linestyle="--")
-        plt.xlabel(r"$\ell$")
-        plt.ylabel(r"$S(\ell)$")
-        plt.title(f"Admissibility check up to L-1 (L={L})")
-        plt.grid(alpha=0.4)
-        plt.tight_layout()
-        plt.show()
-        
-        # (optional) zoom near bandlimit, but still auto with L
-        k = min(50, L)  # show last k multipoles
-        plt.figure(figsize=(7,4))
-        plt.plot(ells[-k:], S[-k:], marker="o", markersize=3, linewidth=1)
-        plt.axhline(1.0, linestyle="--")
-        plt.xlabel(r"$\ell$")
-        plt.ylabel(r"$S(\ell)$")
-        plt.title(f"Admissibility tail (last {k} ells), L={L}")
-        plt.grid(alpha=0.4)
-        plt.tight_layout()
-        plt.show()
-        
-        # ---- pack into s2wav expected n-grid: (J, L, 2L-1), n=0 at mid ----
-        M = 2 * L - 1
-        mid = L - 1
-    
-        wav_jln = np.zeros((len(js), L, M), dtype=np.complex128)
-        wav_jln[:, :, mid] = kappa_jl.astype(np.complex128)
-    
-        return jnp.array(wav_jln), jnp.array(scal_l.astype(np.complex128))
-        ''' 
         # ---- pack into s2wav expected n-grid: (J, L, 2L-1), directional ----
 
         s_elm = filters.tiling_direction(L, N_directions)  # shape (L, 2L-1)
@@ -699,17 +654,73 @@ class SimpleHarmonicWindows:
             + w_wav * np.sum(np.abs(wav_jln)**2, axis=(0, 2))
         )
         '''
-        plt.figure(figsize=(7,4))
-        plt.plot(np.arange(L), S)
-        plt.axhline(1.0, linestyle="--")
-        plt.xlabel(r"$\ell$")
-        plt.ylabel(r"$S(\ell)$")
-        plt.title(f"Eq.(30) directional admissibility, N={N_directions}")
-        plt.grid(alpha=0.4)
+        # Plot directional weights |ζ_{ell,m}|² against m
+        ell_plot = max(
+            1,
+            N_directions - 1,
+        )
+
+        m_values = np.arange(
+            -ell_plot,
+            ell_plot + 1,
+        )
+
+        zeta_lm = s_elm[
+            ell_plot,
+            L - 1 + m_values,
+        ]
+
+        plt.figure(
+            figsize=(7, 4)
+        )
+
+        plt.stem(
+            m_values,
+            np.abs(zeta_lm)**2,
+            basefmt=" ",
+        )
+
+        plt.xlabel(r"$m$")
+        plt.ylabel(
+            r"$|\zeta_{\ell m}|^2$"
+        )
+
+        plt.title(
+            rf"Directional weights: "
+            rf"$N={N_directions}$, "
+            rf"$\ell={ell_plot}$"
+        )
+
+        plt.xticks(m_values)
+        plt.grid(alpha=0.3)
         plt.tight_layout()
         plt.show()
-        
-        print("Eq.(30) min/max =", np.min(S), np.max(S))
-        print("max |S-1| =", np.max(np.abs(S - 1.0)))
+
+        # Plot full directional admissibility against ell
+        plt.figure(
+            figsize=(7, 4)
+        )
+
+        plt.plot(
+            ells,
+            S,
+        )
+
+        plt.axhline(
+            1.0,
+            color="black",
+            linestyle="--",
+        )
+
+        plt.xlabel(r"$\ell$")
+        plt.ylabel(r"$S_\ell$")
+
+        plt.title(
+            "Directional admissibility"
+        )
+
+        plt.grid(alpha=0.5)
+        plt.tight_layout()
+        plt.show()
         '''
         return jnp.array(wav_jln), jnp.array(scal_l.astype(np.complex128))
