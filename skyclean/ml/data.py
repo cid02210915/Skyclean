@@ -7,6 +7,7 @@ import healpy as hp
 import matplotlib.pyplot as plt
 
 from skyclean.silc import utils, HPTools, MWTools, SamplingConverters, FileTemplates
+from skyclean.silc.utils import ilc_mode_tag, ilc_mode_candidates
 from skyclean.silc.file_templates import register_pixel_ps_component_template
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Reduce TF/XLA log noise.
 
@@ -19,7 +20,8 @@ jax.config.update("jax_enable_x64", False)
 
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
-                 nsamp: int = 1200, constraint: bool = False, 
+                 nsamp: int = 1200, constraint: bool = False,
+                 pcilc: bool = False, pcilc_eps: float | None = None, 
                  batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False,
                  prefetch: bool = False):
         """
@@ -53,10 +55,11 @@ class CMBFreeILC():
         self.nsamp = nsamp
         self.random = random
         self.prefetch = prefetch
-        if constraint == True:
-            self.mode = "con"
-        else: 
-            self.mode = "uncon"
+        self.constraint = constraint
+        self.pcilc = pcilc
+        self.pcilc_eps = pcilc_eps
+        # Must match the tag ProduceSILC wrote into the ILC filenames.
+        self.mode = ilc_mode_tag(constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps)
 
         self.a = 1E-5
 
@@ -101,18 +104,18 @@ class CMBFreeILC():
         """
         H, W, lmax, N = self.H, self.W, self.lmax, self.n_channels_in
         
-        if os.path.exists(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax)) and os.path.exists(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax)):
+        if os.path.exists(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions)) and os.path.exists(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions)):
             #print(f"Loading existing random test maps for realisation {realisation}...")
-            test_foreground_estimate = np.load(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax))
-            test_ilc_residual = np.load(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax))
+            test_foreground_estimate = np.load(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions))
+            test_ilc_residual = np.load(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions))
         else:
             print(f"Creating random test maps for realisation {realisation}...")
             np.random.seed(realisation)
             test_foreground_estimate = np.random.randn(H, W, N).astype(np.float32)
             test_ilc_residual = np.random.randn(H, W, 1).astype(np.float32)
             # save the maps up to expected realisations 
-            np.save(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax), test_foreground_estimate)
-            np.save(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax), test_ilc_residual)
+            np.save(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions), test_foreground_estimate)
+            np.save(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions), test_ilc_residual)
         return test_foreground_estimate, test_ilc_residual
         
     
@@ -131,15 +134,15 @@ class CMBFreeILC():
         L = lmax + 1
         extract_comp, component, nsamp, mode = self.extract_comp, self.component, self.nsamp, self.mode
         frequencies = '_'.join(self.frequencies)
-        if os.path.exists(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode)) and os.path.exists(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode)):
-            foreground_estimate = np.load(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode))
-            ilc_residual = np.load(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode))
-            ilc_map_mwss = np.load(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode))
+        if os.path.exists(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode)) and os.path.exists(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode)):
+            foreground_estimate = np.load(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))
+            ilc_residual = np.load(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))
+            ilc_map_mwss = np.load(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))
         else:
             print(f"Creating residual maps for realisation {realisation}...")
             # load ilc (already in MW sampling)
-            ilc_map_mw = np.load(self.file_templates["ilc_synth"].format(
-            extract_comp=extract_comp, mode=mode, component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp))
+            ilc_synth_path = self._resolve_ilc_synth_path(realisation, frequencies, lam)
+            ilc_map_mw = np.load(ilc_synth_path)
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
             # load cmb and convert to MW sampling
             cmb_map_hp = hp.read_map(self.file_templates["processed_cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
@@ -156,10 +159,40 @@ class CMBFreeILC():
                 foreground_estimate[:, :, i] = cfn_maps_mwss[i] - ilc_map_mwss
                 ilc_residual[:, :, 0] = ilc_map_mwss - cmb_map_mwss
             # save the maps
-            np.save(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode), ilc_map_mwss)
-            np.save(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode), foreground_estimate)
-            np.save(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, lam=lam, nsamp=nsamp, mode=mode), ilc_residual)
+            np.save(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode), ilc_map_mwss)
+            np.save(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode), foreground_estimate)
+            np.save(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode), ilc_residual)
         return foreground_estimate, ilc_residual, ilc_map_mwss
+
+    def _resolve_ilc_synth_path(self, realisation: int, frequencies: str, lam: float):
+        """Locate the SILC ilc_synth map, tolerating the legacy 'uncon'/'con' mode tag.
+
+        Parameters:
+            realisation (int): The realisation number.
+            frequencies (str): Underscore-joined frequency tag.
+            lam (float): The lambda parameter for the wavelet transform.
+
+        Returns:
+            str: Path to an existing ilc_synth file.
+        """
+        candidates = [
+            self.file_templates["ilc_synth"].format(
+                extract_comp=self.extract_comp, mode=mode_try, component=self.component,
+                frequencies=frequencies, realisation=realisation, lmax=self.lmax,
+                N_directions=self.N_directions, lam=lam, nsamp=self.nsamp,
+            )
+            for mode_try in ilc_mode_candidates(
+                constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps
+            )
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        raise FileNotFoundError(
+            "Could not find an ilc_synth map for realisation "
+            f"{realisation}. Tried:\n  " + "\n  ".join(candidates) +
+            "\nRun the SILC pipeline (step_ilc) for this configuration first."
+        )
 
     def signed_log_transform(self, x: tf.Tensor):
         return jnp.sign(x) * jnp.log1p(jnp.abs(x) / self.a)

@@ -4,6 +4,7 @@
 CMB-Free ILC Model Inference Class.
 """
 
+import argparse
 import csv
 import os
 import re
@@ -15,6 +16,7 @@ from flax import nnx, serialization
 from scipy.stats import kurtosis, skew
 
 from .model import S2_UNET
+from skyclean.silc.utils import ilc_mode_tag
 from .data import CMBFreeILC
 from .train import resolve_checkpoint_target
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
@@ -28,7 +30,8 @@ class Inference:
                  directory="data/", seed=0, model_path=None,
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3,
                  momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False,
-                 run_id: str | None = None):
+                 pcilc: bool = False, pcilc_eps: float | None = None,
+                 run_id: str | None = None, filter_type: str = "axisymmetric"):
 
         self.extract_comp = extract_comp
         self.component = component
@@ -38,6 +41,7 @@ class Inference:
         self.N_directions = N_directions
         self.lam = lam
         self.chs = chs if chs is not None else [512, 256, 128, 64]
+        self.filter_type = filter_type
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
@@ -48,6 +52,8 @@ class Inference:
         self.momentum = momentum
         self.nsamp = nsamp
         self.constraint = constraint
+        self.pcilc = pcilc
+        self.pcilc_eps = pcilc_eps
         self.run_id = (run_id or "").strip()
         if not self.run_id:
             raise ValueError("run_id must be provided for inference outputs.")
@@ -71,6 +77,8 @@ class Inference:
             N_directions=self.N_directions,
             nsamp=self.nsamp,
             constraint=self.constraint,
+            pcilc=self.pcilc,
+            pcilc_eps=self.pcilc_eps,
             lam=self.lam,
             batch_size=1,
             directory=self.directory
@@ -102,7 +110,7 @@ class Inference:
         # 构建和训练时完全一致的模型结构
         L = self.lmax + 1
         ch_in = len(self.frequencies)
-        model = S2_UNET(L, ch_in, chs=self.chs, rngs=nnx.Rngs(self.seed))
+        model = S2_UNET(L, ch_in, chs=self.chs, filter_type=self.filter_type, rngs=nnx.Rngs(self.seed))
 
         # 拆分模型，获取空的state模板
         graphdef, empty_state = nnx.split(model)
@@ -146,7 +154,8 @@ class Inference:
                 'channels': expected_ch_in,
                 'frequencies': self.frequencies,
                 'N_directions': self.N_directions,
-                'lam': self.lam
+                'lam': self.lam,
+                'filter_type': self.filter_type
             }
         }
 
@@ -454,10 +463,7 @@ class Inference:
         try:
             chs = "_".join(str(n) for n in self.chs)
 
-            if self.constraint:
-                mode = "con"
-            else:
-                mode = "uncon"
+            mode = ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
             frequencies = '_'.join(self.frequencies)
             checkpoint_tag = (
                 f"checkpoint_{self.loaded_checkpoint_epoch}"
@@ -478,6 +484,7 @@ class Inference:
                     component=self.component,
                     realisation=realisation,
                     lmax=self.lmax,
+                    N_directions=self.N_directions,
                     lam=self.lam,
                     nsamp=self.nsamp,
                     rn=self.rn,
@@ -506,6 +513,8 @@ class Inference:
         try:
             chs = "_".join(str(n) for n in self.chs)
             model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}_chs{chs}"
+            if self.filter_type != "axisymmetric":
+                model_config += f"_ft{self.filter_type}"
             checkpoint_tag = (
                 f"checkpoint_{self.loaded_checkpoint_epoch}"
                 if self.loaded_checkpoint_epoch is not None
@@ -538,6 +547,7 @@ class Inference:
             'lmax': self.lmax,
             'N_directions': self.N_directions,
             'lam': self.lam,
+            'filter_type': self.filter_type,
             'directory': self.directory,
             'model_dir': self.file_templates.output_directories["ml_models"],
             'checkpoint_format': "flax serialization (msgpack, no Orbax)"
@@ -550,38 +560,146 @@ class Inference:
     
 
 
-if __name__ == "__main__":
-    frequencies = ["030", "100", "353"]
-    realisations = 1000
-    lmax = 511
-    N_directions = 1
-    lam = 2.0
-    directory = "/Scratch/matthew/data/"
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run inference with a trained Skyclean ML model.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "Example usage:\n"
+            "  python -m skyclean.ml.inference \\\n"
+            "    --run-id 20250101_120000 \\\n"
+            "    --frequencies 030 100 353 \\\n"
+            "    --realisations 1000 \\\n"
+            "    --lmax 511 \\\n"
+            "    --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \\\n"
+            "    --realisation 0 \\\n"
+            "    --mse"
+        ),
+    )
+
+    # ----- match Inference signature -----
+    parser.add_argument("--extract-comp", type=str, default="cmb",
+                        help="Component the model was trained to extract.")
+    parser.add_argument("--component", type=str, default="cfn",
+                        help="Input map product key, e.g. cfn, cfne, cfne_circ, or cfne_pix_N.")
+    parser.add_argument("--frequencies", nargs="+", default=["030", "100", "353"],
+                        help="Frequency channels the model was trained on.")
+    parser.add_argument("--realisations", type=int, default=1000,
+                        help="Total number of realisations in the dataset (defines the splits).")
+    parser.add_argument("--lmax", type=int, default=511, help="Maximum multipole.")
+    parser.add_argument("--N-directions", type=int, default=1, help="Number of wavelet directions.")
+    parser.add_argument("--lam", type=float, default=2.0, help="Wavelet dilation parameter.")
+    parser.add_argument("--nsamp", type=int, default=1200,
+                        help="Number of Monte Carlo samples used by the ILC inputs.")
+    parser.add_argument("--constraint", action="store_true",
+                        help="Load constrained-ILC inputs instead of unconstrained.")
+    parser.add_argument("--pcilc", action="store_true",
+                        help="Load partially-constrained ILC (pcILC) inputs.")
+    parser.add_argument("--pcilc-eps", type=float, default=None,
+                        help="pcILC epsilon tolerance. Required with --pcilc; must match the SILC run.")
+    parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64],
+                        help="Channel configuration. Must match the trained model.")
+    parser.add_argument("--filter-type", type=str, default="axisymmetric",
+                        choices=["axisymmetric", "directional", "square"],
+                        help="DISCO filter type for S2_UNET conv blocks. Must match the trained\n"
+                             "model: a mismatch fails at checkpoint restore.")
+    parser.add_argument("--directory", type=str, default="data/", help="Base data directory.")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed used to build the model skeleton before restoring weights.")
+    parser.add_argument("--run-id", type=str, required=True,
+                        help="Run folder under ML/models, also used to lay out the prediction outputs.")
+    parser.add_argument("--model-dir", type=str, default="",
+                        help="Run directory or checkpoint_<epoch> directory to load. "
+                             "If empty, the latest checkpoint under ML/models/<run-id> is used.")
+    parser.add_argument("--checkpoint-epoch", type=int, default=None,
+                        help="Specific epoch checkpoint to load. Only used with --model-dir "
+                             "pointing at a run directory.")
+    parser.add_argument("--rn", type=int, default=None,
+                        help="Realisation count recorded in output filenames. Defaults to --realisations.")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size recorded in output filenames.")
+    parser.add_argument("--epochs", type=int, default=120, help="Epoch count recorded in output filenames.")
+    parser.add_argument("--learning-rate", type=float, default=1e-3,
+                        help="Learning rate recorded in output filenames.")
+    parser.add_argument("--momentum", type=float, default=0.9,
+                        help="Momentum recorded in output filenames.")
+
+    # ----- what to run -----
+    parser.add_argument("--realisation", type=int, default=None,
+                        help="Predict this single realisation. Omit to predict the whole test split.")
+    parser.add_argument("--masked", action="store_true",
+                        help="Apply the Galactic mask to predictions and metrics.")
+    parser.add_argument("--mse", action="store_true",
+                        help="Also report ILC vs NN MSE for the selected realisation.")
+    parser.add_argument("--metrics-table", action="store_true",
+                        help="Write the test-set metrics table and scatter plots.")
+    parser.add_argument("--force-load", action="store_true", default=True,
+                        help="Skip the model compatibility check (default).")
+    parser.add_argument("--no-force-load", dest="force_load", action="store_false",
+                        help="Run the model compatibility check before loading.")
+
+    args = parser.parse_args()
+
+    model_path = None
+    if args.model_dir.strip():
+        model_path = os.path.abspath(args.model_dir.strip())
+        if args.checkpoint_epoch is not None:
+            ckpt_dir, _, _ = resolve_checkpoint_target(model_path, epoch=args.checkpoint_epoch)
+            model_path = str(ckpt_dir)
+    elif args.checkpoint_epoch is not None:
+        parser.error("--checkpoint-epoch requires --model-dir.")
 
     inference = Inference(
-        extract_comp="cmb",
-        component="cfn",
-        frequencies=frequencies,
-        realisations=realisations,
-        lmax=lmax,
-        N_directions=N_directions,
-        lam=lam,
-        directory=directory,
-        run_id="example_run",
+        extract_comp=args.extract_comp,
+        component=args.component,
+        frequencies=args.frequencies,
+        realisations=args.realisations,
+        lmax=args.lmax,
+        N_directions=args.N_directions,
+        lam=args.lam,
+        nsamp=args.nsamp,
+        constraint=args.constraint,
+        pcilc=args.pcilc,
+        pcilc_eps=args.pcilc_eps,
+        chs=args.chs,
+        filter_type=args.filter_type,
+        directory=args.directory,
+        seed=args.seed,
+        model_path=model_path,
+        rn=args.rn if args.rn is not None else args.realisations,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        momentum=args.momentum,
+        run_id=args.run_id,
     )
 
     print("\n1. Model Information:")
-    info = inference.get_model_info()
-    for key, value in info.items():
+    for key, value in inference.get_model_info().items():
         print(f"   {key}: {value}")
 
-    print("\n2. Running Prediction for Realisation 0:")
-    cmb_pred = inference.predict_cmb(realisation=0)
-    print("Prediction successful.")
+    inference.load_model(force_load=args.force_load)
 
-    print("\n3. Calculating MSE for Realisation 0:")
-    mse_ilc = inference.compute_mse(comp="ilc", realisation=0)
-    mse_nn = inference.compute_mse(comp="nn", realisation=0)
-    print(f"MSE (ILC): {mse_ilc:.6e}")
-    print(f"MSE (NN): {mse_nn:.6e}")
-    print(f"Improvement: {(mse_ilc - mse_nn) / mse_ilc * 100:.2f}%")
+    if args.realisation is None:
+        print("\n2. Predicting the test split:")
+        inference.predict_test_set(masked=args.masked)
+    else:
+        print(f"\n2. Predicting realisation {args.realisation}:")
+        inference.predict_cmb(realisation=args.realisation, masked=args.masked)
+        print("Prediction successful.")
+
+        if args.mse:
+            print(f"\n3. MSE for realisation {args.realisation}:")
+            mse_ilc = inference.compute_mse(comp="ilc", realisation=args.realisation, masked=args.masked)
+            mse_nn = inference.compute_mse(comp="nn", realisation=args.realisation, masked=args.masked)
+            print(f"MSE (ILC): {mse_ilc:.6e}")
+            print(f"MSE (NN): {mse_nn:.6e}")
+            print(f"Improvement: {(mse_ilc - mse_nn) / mse_ilc * 100:.2f}%")
+
+    if args.metrics_table:
+        print("\nWriting test metrics table...")
+        rows = inference.save_test_metrics_table(masked=args.masked)
+        inference.save_test_scatter_plots(rows)
+
+
+if __name__ == "__main__":
+    main()

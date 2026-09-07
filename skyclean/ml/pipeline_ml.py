@@ -26,6 +26,7 @@ tf.config.set_visible_devices([], "GPU")
 from skyclean.ml.train import Train, resolve_checkpoint_target
 from skyclean.ml.inference import Inference
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
+from skyclean.silc.utils import ilc_mode_tag
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
 
 
@@ -81,6 +82,10 @@ def parse_args():
     parser.add_argument("--nsamp", type=int, default=1200)
 
     parser.add_argument("--constraint", action="store_true", help="Enable constraint")
+    parser.add_argument("--pcilc", action="store_true",
+                        help="Use partially-constrained ILC (pcILC) inputs")
+    parser.add_argument("--pcilc-eps", type=float, default=None,
+                        help="pcILC epsilon tolerance. Required with --pcilc; must match the SILC run")
 
 
     parser.add_argument("--batch-size", type=int, default=32)
@@ -96,6 +101,10 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64])
+    parser.add_argument("--filter-type", type=str, default="axisymmetric",
+                        choices=["axisymmetric", "directional", "square"],
+                        help="DISCO filter type for S2_UNET conv blocks. Changing this changes the "
+                             "weight structure; use a fresh --run-id (e.g. include the filter type in the id).")
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--random", dest="random", action="store_true",
@@ -173,12 +182,15 @@ def step_train(args) -> str:
         lam=args.lam,
         nsamp=args.nsamp,
         constraint=args.constraint,
+        pcilc=args.pcilc,
+        pcilc_eps=args.pcilc_eps,
         batch_size=args.batch_size,
         split=args.split,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         momentum=args.momentum,
         chs=args.chs,
+        filter_type=args.filter_type,
         rngs=nnx.Rngs(args.seed),
         directory=args.directory,
         resume_training=args.resume_training,
@@ -230,7 +242,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
     ft = files.file_templates
     conv = MapAlmConverter(ft)
 
-    mode = "con" if args.constraint else "uncon"
+    mode = ilc_mode_tag(constraint=args.constraint, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
@@ -274,9 +286,11 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         frequencies=args.frequencies,
         realisation=realisation,
         lmax=lmax,
+        N_directions=args.N_directions,
         lam=lam_str,
         nsamp=nsamp,
         constraint=args.constraint,
+        mode=mode,
     )
     print(f"[Spectrum] loading ilc_synth map from: {out_synth['path']}")
     ell_synth, cl_synth = PowerSpectrumTT.from_mw_alm(np.asarray(out_synth["alm"]))
@@ -295,6 +309,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         frequencies=freq_tag,
         realisation=realisation,
         lmax=lmax,
+        N_directions=args.N_directions,
         lam=lam_str,
         nsamp=nsamp,
         rn=int(args.realisations),
@@ -329,8 +344,12 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
             lam=args.lam,
             nsamp=args.nsamp,
             constraint=args.constraint,
+            pcilc=args.pcilc,
+            pcilc_eps=args.pcilc_eps,
             chs=args.chs,
+            filter_type=args.filter_type,
             directory=args.directory,
+            seed=args.seed,
             model_path=ckpt_dir,
             rn=args.realisations,
             batch_size=args.batch_size,
@@ -414,8 +433,12 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         lam=args.lam,
         nsamp=args.nsamp,
         constraint=args.constraint,
+        pcilc=args.pcilc,
+        pcilc_eps=args.pcilc_eps,
         chs=args.chs,
+        filter_type=args.filter_type,
         directory=args.directory,
+        seed=args.seed,
         model_path=ckpt_dir,  # points directly to checkpoint_<epoch>
         rn=args.realisations,
         batch_size=args.batch_size,
@@ -430,7 +453,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
     test_ids = inference.data_handler.get_split_indices()["test"]
     print(f"[Evaluate] Predicting CMB for {len(test_ids)} test realisations...")
-    mode = "con" if args.constraint else "uncon"
+    mode = ilc_mode_tag(constraint=args.constraint, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
@@ -451,6 +474,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
             frequencies=freq_tag,
             realisation=int(realisation),
             lmax=int(args.lmax),
+            N_directions=args.N_directions,
             lam=lam_str,
             nsamp=int(args.nsamp),
             rn=int(args.realisations),
@@ -624,3 +648,5 @@ if __name__ == "__main__":
 # 030 044 070 100 143 217 353 545 857
 # python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 7 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --split 0.3 0.3 0.4 --nsamp 1200 --epochs 2 --eval-every 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id test
 # --resume-training
+# add --filter-type directional (or square) for directional DISCO filters;
+# use a distinct --run-id per filter type, e.g. --run-id test_directional

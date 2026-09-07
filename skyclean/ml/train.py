@@ -146,12 +146,14 @@ def print_gpu_usage(stage_name: str, jax_device_id: int = 0):
 class Train:
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int,
                  lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, nsamp: int = 1200, constraint: bool = False,
+                 pcilc: bool = False, pcilc_eps: float | None = None,
                  batch_size: int = 32, split: list = [0.8, 0.1, 0.1], epochs: int = 120,
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0),
                  directory: str = "data/", resume_training: bool = False, loss_tag: str | None = 'pixel',
                  random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
                  prefetch: bool = False, run_id: str | None = None,
-                 early_stopping_patience: int = 2, early_stopping_min_delta: float = 1e-3):
+                 early_stopping_patience: int = 2, early_stopping_min_delta: float = 1e-3,
+                 filter_type: str = "axisymmetric"):
 
         self.component = component
         self.extract_comp = extract_comp
@@ -175,6 +177,10 @@ class Train:
         self.eval_steps = eval_steps
         self.prefetch = prefetch
         self.run_id = (run_id or datetime.now().strftime("%Y%m%d_%H%M%S")).strip()
+        self.filter_type = filter_type
+        self.constraint = constraint
+        self.pcilc = pcilc
+        self.pcilc_eps = pcilc_eps
         self.early_stopping_patience = early_stopping_patience # how many epochs to wait for improvement before stopping
         self.early_stopping_min_delta = early_stopping_min_delta # minimum improvement in eval loss to reset patience counter
 
@@ -194,9 +200,11 @@ class Train:
             raise ValueError("run_id cannot be empty.")
         self.random_generator = random_generator
 
-        self.dataset = CMBFreeILC(extract_comp, component, frequencies, realisations, lmax, N_directions, lam,
-                                  nsamp, constraint, batch_size, split, directory, random=random_generator,
-                                  prefetch=prefetch)
+        self.dataset = CMBFreeILC(extract_comp=extract_comp, component=component, frequencies=frequencies,
+                                  realisations=realisations, lmax=lmax, N_directions=N_directions, lam=lam,
+                                  nsamp=nsamp, constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps,
+                                  batch_size=batch_size, split=split, directory=directory,
+                                  random=random_generator, prefetch=prefetch)
 
         files = FileTemplates(directory)
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
@@ -323,6 +331,7 @@ class Train:
         payload = dict(config)
         payload["run_id"] = self.run_id
         payload["model_dir"] = self.model_dir
+        payload["filter_type"] = self.filter_type
         payload["created_at"] = datetime.now().isoformat(timespec="seconds")
 
         with open(path, "w", encoding="utf-8") as f:
@@ -603,8 +612,8 @@ class Train:
 
         train_iter, val_iter = iter(tfds.as_numpy(train_ds)), iter(tfds.as_numpy(val_ds))
 
-        model = S2_UNET(L, len(self.frequencies), chs=self.chs, rngs=self.rngs)
-        print(f"[Model] Channel configuration: {self.chs}")
+        model = S2_UNET(L, len(self.frequencies), chs=self.chs, filter_type=self.filter_type, rngs=self.rngs)
+        print(f"[Model] Channel configuration: {self.chs} | filter_type: {self.filter_type}")
         print_gpu_usage("After model creation")
 
         optimizer = nnx.Optimizer(model, optax.adam(self.learning_rate))
@@ -895,14 +904,34 @@ def main():
     parser.add_argument('--frequencies', nargs='+', default=["030", "044", "070"], help='List of frequencies')
     parser.add_argument('--realisations', type=int, default=1000, help='Number of data realisations')
     parser.add_argument('--lmax', type=int, default=1023, help='Maximum multipole')
+    parser.add_argument('--N-directions', type=int, default=1, help='Number of wavelet directions')
+    parser.add_argument('--lam', type=float, default=2.0, help='Wavelet dilation parameter')
+    parser.add_argument('--nsamp', type=int, default=1200, help='Number of Monte Carlo samples used by the ILC inputs')
+    parser.add_argument('--constraint', action='store_true', help='Load constrained-ILC inputs instead of unconstrained')
+    parser.add_argument('--pcilc', action='store_true',
+                        help='Load partially-constrained ILC (pcILC) inputs')
+    parser.add_argument('--pcilc-eps', type=float, default=None,
+                        help='pcILC epsilon tolerance. Required with --pcilc; must match the SILC run')
     parser.add_argument('--epochs', type=int, default=3, help='Number of training epochs')
     parser.add_argument('--batch-size', type=int, default=8, help='Batch size')
+    parser.add_argument('--split', nargs='+', type=float, default=[0.8, 0.1, 0.1],
+                        help='Train/validation/test split ratios')
     parser.add_argument('--directory', type=str, default='/Scratch/matthew/data/', help='Base data directory')
     parser.add_argument('--run-id', type=str, default='test_run', help='Unique run ID')
-    parser.add_argument('--random', type=bool, default=False, help='Generate random test maps')
+    parser.add_argument('--random', action='store_true', help='Generate random test maps')
+    parser.add_argument('--no-random', dest='random', action='store_false',
+                        help='Disable random test map generation (default)')
+    parser.set_defaults(random=False)
     parser.add_argument('--loss-tag', type=str, default='pixel', choices=['pixel', 'harmonic'], help='Loss type')
     parser.add_argument('--learning-rate', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--momentum', type=float, default=0.9, help='Optimiser momentum')
+    parser.add_argument('--seed', type=int, default=0, help='Random seed used to initialise the model')
     parser.add_argument('--resume-training', action='store_true', help='Resume from latest checkpoint')
+    parser.add_argument('--eval-every', type=int, default=1, help='Run evaluation every N epochs')
+    parser.add_argument('--eval-batches', '--eval-steps', dest='eval_batches', type=int, default=-1,
+                        help='Number of validation batches per evaluation run. -1 means the full set')
+    parser.add_argument('--prefetch', action='store_true',
+                        help='Enable tf.data prefetching in training')
     parser.add_argument(
         '--early-stopping-patience',
         type=int,
@@ -916,6 +945,10 @@ def main():
         help='Minimum validation-loss improvement required to reset early stopping',
     )
     parser.add_argument('--chs', nargs='+', type=int, default=[512, 256, 128, 64], help='Channel configuration')
+    parser.add_argument('--filter-type', type=str, default='axisymmetric',
+                        choices=['axisymmetric', 'directional', 'square'],
+                        help='DISCO filter type for S2_UNET conv blocks. Changing this changes the '
+                             'weight structure; use a fresh --run-id (e.g. include the filter type in the id).')
 
     args = parser.parse_args()
 
@@ -925,17 +958,30 @@ def main():
         frequencies=args.frequencies,
         realisations=args.realisations,
         lmax=args.lmax,
+        N_directions=args.N_directions,
+        lam=args.lam,
+        nsamp=args.nsamp,
+        constraint=args.constraint,
+        pcilc=args.pcilc,
+        pcilc_eps=args.pcilc_eps,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        split=args.split,
         directory=args.directory,
         run_id=args.run_id,
         random_generator=args.random,
         loss_tag=args.loss_tag,
         learning_rate=args.learning_rate,
+        momentum=args.momentum,
+        rngs=nnx.Rngs(args.seed),
         resume_training=args.resume_training,
         chs=args.chs,
+        eval_every=args.eval_every,
+        eval_steps=args.eval_batches,
+        prefetch=args.prefetch,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
+        filter_type=args.filter_type,
     )
 
     trainer.save_run_config(vars(args))
