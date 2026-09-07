@@ -1,6 +1,7 @@
 import healpy as hp
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 from .map_tools import *
 from .utils import *
@@ -97,87 +98,102 @@ class Visualise():
         #plt.savefig('components.pdf', dpi=1400)
         plt.show()
 
-    def visualise_wavelet_maps(self, comps: list = ['cmb', 'cfn', 'ilc']):
+    def visualise_wavelet_maps(self, comps: list = ['cmb', 'cfn', 'ilc'],
+                               scales: list | None = None,
+                               lam: float | None = None,
+                               mode: str | None = None,
+                               nsamp: int | None = None):
         """
         visualise wavelet maps for each frequency and scale.
 
         CURRENTLY HARDCODED SO THAT COMPS SHOULD BE ['cmb', 'cfn', 'ilc']
 
         Parameters:
-            comps (list): List of components to visualise. e.g. ['sync', 'cmb', 'noise'].
-
+            comps (list): List of components to visualise. e.g. ['cmb', 'cfn', 'ilc'].
+            scales (list): Wavelet band indices to show. Defaults to every band in the bank.
+            lam (float): lambda used when the coefficients were written. Defaults to lam_list[0].
+            mode (str): ILC mode tag in the trimmed-map filenames ('uncon'/'con').
+            nsamp (int): nsamp tag in the trimmed-map filenames.
         """
-        file_templates = {}
-        for comp in comps:
-            file_templates[comp] = self.file_templates['wavelet_coeffs'].format(comp=comp)
-        scales = self.scales
-        frequencies = self.frequencies
+        import s2wav.filters as s2wav_filters
+
+        lam   = self.lam_list[0] if lam is None else lam
+        nsamp = self.nsamp if nsamp is None else nsamp
+        mode  = ("con" if self.constraint else "uncon") if mode is None else mode
+
         realisation = self.realisation
+        lmax        = self.lmax
+        frequencies = self.frequencies
+
+        if scales is None:
+            filt = s2wav_filters.filters_directional_vectorised(
+                lmax + 1, self.N_directions, lam=lam
+            )
+            scales = list(range(len(filt[0])))
+
+        def _band_path(comp, freq, scale):
+            """Fully-specified path for one wavelet band."""
+            if comp == 'ilc':
+                return self.file_templates['trimmed_maps'].format(
+                    mode=mode, component=self.component, extract_comp=self.extract_comp,
+                    scale=scale, realisation=realisation, lmax=lmax,
+                    N_directions=self.N_directions, lam=lam, nsamp=nsamp,
+                )
+            return self.file_templates['wavelet_coeffs'].format(
+                comp=comp, frequency=freq, scale=scale, realisation=realisation,
+                lmax=lmax, N_directions=self.N_directions, lam=lam,
+            )
+
+        def _load_band(comp, freq, scale):
+            arr = np.real(np.load(_band_path(comp, freq, scale)))
+            # directional bands are (2N-1, L, 2L-1); show the first orientation
+            return arr[0] if arr.ndim == 3 else arr
+
         n_freq   = len(frequencies)
         n_scales = len(scales)
-        # four blocks: CMB_total (n_freq), ILC (1), CMB–ILC (n_freq), CMB-only–ILC (1)
+        # four blocks: CFN (n_freq), ILC (1), CFN–ILC (n_freq), CMB-only–ILC (1)
         nrows = 2*n_freq + 2
         ncols = n_scales
 
         fig = plt.figure(figsize=(5*ncols, 5*nrows))
         fig.subplots_adjust(top=0.90, left=0.12, right=0.98, hspace=0.3)
 
-        # 1) CMB_total block
-        csn_dict = {}
+        # 1) CFN block
+        cfn_bands = {}
         for i, freq in enumerate(frequencies):
-            coeffs = MWTools.load_wavelet_scaling_coeffs(
-                n_scales, realisation,
-                file_templates['cfn'], freq
-            )
-            csn_dict[freq] = coeffs
-            for j, scale in enumerate(scales):
-                panel = i*ncols + j + 1
+            cfn_bands[freq] = [_load_band('cfn', freq, s) for s in scales]
+            for j, band in enumerate(cfn_bands[freq]):
                 MWTools.visualise_mw_map(
-                    coeffs[scale],
-                    title="",   # per‐cell titles cleared
-                    fig=fig, nrows=nrows, ncols=ncols, panel=panel
+                    band, title="",
+                    fig=fig, nrows=nrows, ncols=ncols, panel=i*ncols + j + 1,
                 )
 
         # 2) ILC row
-        ilc_coeffs = MWTools.load_wavelet_scaling_coeffs(
-            n_scales, realisation,
-            file_templates['ilc'], None
-        )
+        ilc_bands = [_load_band('ilc', None, s) for s in scales]
         ilc_row = n_freq
-        for j, scale in enumerate(scales):
-            panel = ilc_row*ncols + j + 1
+        for j, band in enumerate(ilc_bands):
             MWTools.visualise_mw_map(
-                ilc_coeffs[scale],
-                title="", fig=fig, nrows=nrows, ncols=ncols, panel=panel
+                band, title="",
+                fig=fig, nrows=nrows, ncols=ncols, panel=ilc_row*ncols + j + 1,
             )
 
-        # 3) CMB_total–ILC block
+        # 3) CFN–ILC block
         for i, freq in enumerate(frequencies):
-            diff_row   = n_freq + 1 + i
-            coeffs     = csn_dict[freq]
-            for j, scale in enumerate(scales):
-                panel = diff_row*ncols + j + 1
-                diff_map = coeffs[scale] - ilc_coeffs[scale]
+            diff_row = n_freq + 1 + i
+            for j, band in enumerate(cfn_bands[freq]):
                 MWTools.visualise_mw_map(
-                    diff_map,
-                    title="", fig=fig, nrows=nrows, ncols=ncols, panel=panel
+                    band - ilc_bands[j], title="",
+                    fig=fig, nrows=nrows, ncols=ncols, panel=diff_row*ncols + j + 1,
                 )
 
-        # 4) CMB-only–ILC bottom row (first freq)
-        cmb_only = MWTools.load_wavelet_scaling_coeffs(
-            n_scales, realisation,
-            file_templates['cmb'], frequencies[0]
-        )
+        # 4) CMB-only–ILC bottom row (first frequency)
+        cmb_bands = [_load_band('cmb', frequencies[0], s) for s in scales]
         bottom = 2*n_freq + 1
-        for j, scale in enumerate(scales):
-            panel = bottom*ncols + j + 1
-            diff  = cmb_only[scale] - ilc_coeffs[scale]
+        for j, band in enumerate(cmb_bands):
             MWTools.visualise_mw_map(
-                diff,
-                title="", fig=fig, nrows=nrows, ncols=ncols, panel=panel
+                band - ilc_bands[j], title="",
+                fig=fig, nrows=nrows, ncols=ncols, panel=bottom*ncols + j + 1,
             )
-
-        
 
         # — Column titles at top —
         for j, scale in enumerate(scales):
@@ -271,6 +287,7 @@ class Visualise():
                                         realisation=self.realisation, 
                                         frequencies="_".join(str(n) for n in self.frequencies),
                                         lmax=lmax,
+                                        N_directions=self.N_directions,
                                         lam=lam,
                                         nsamp=self.nsamp,
                                         rn=self.rn,
@@ -353,6 +370,7 @@ class Visualise():
                 frequencies="_".join(str(x) for x in frequencies),
                 realisation=self.realisation, 
                 lmax=self.lmax, 
+                N_directions=self.N_directions,
                 lam=lam,
                 nsamp=1200
             )
@@ -594,7 +612,7 @@ class Visualise():
         all_freq: bool = False,                   # this implementation is for all_freq=False
         masked: bool = False,
     ):
-        """
+        r"""
         Visualise the ratio or residual of power spectra between components and a reference
         component for a single frequency (all_freq=False).
 
@@ -691,6 +709,7 @@ class Visualise():
                         frequencies="_".join(str(x) for x in frequencies),
                         realisation=realisation,
                         lmax=lmax,
+                        N_directions=self.N_directions,
                         lam=lam0,
                         nsamp=nsamp,
                         rn=rn,
@@ -708,6 +727,7 @@ class Visualise():
                         frequencies="_".join(str(x) for x in frequencies),
                         realisation=realisation,
                         lmax=lmax,
+                        N_directions=self.N_directions,
                         lam=lam0,
                         nsamp=nsamp,
                     )
@@ -804,6 +824,7 @@ class Visualise():
                         frequencies="_".join(str(x) for x in frequencies),
                         realisation=realisation,
                         lmax=lmax,
+                        N_directions=self.N_directions,
                         lam=lam0,
                         nsamp=nsamp,
                         rn=rn,
@@ -831,7 +852,7 @@ class Visualise():
         input_unit: str = "uK",
         masked: bool = False,
     ):
-        """
+        r"""
         Visualise cross power spectra C_ell^{XY} (or D_ell^{XY}) for one or more
         component pairs.
 

@@ -25,6 +25,7 @@ class MapAlmConverter:
         extract_comp: Optional[str] = None,
         frequencies: Optional[Union[str, int, Iterable[int]]] = None,
         lam: Optional[Union[int, float, str]] = None,
+        N_directions: int = 1,
         nsamp: float | None = None, 
         constraint: bool | None = None, 
         mode: Optional[str] = None,
@@ -37,7 +38,7 @@ class MapAlmConverter:
             component=component, source=source,
             frequency=frequency, realisation=realisation, lmax=lmax,
             extract_comp=extract_comp, frequencies=frequencies, lam=lam, 
-            nsamp=nsamp, constraint=constraint, mode=mode,
+            N_directions=N_directions, nsamp=nsamp, constraint=constraint, mode=mode,
         )
 
         print(
@@ -90,7 +91,8 @@ class MapAlmConverter:
         extract_comp: Optional[str],
         frequencies: Optional[Union[str, int, Iterable[int]]],
         lam: Optional[Union[int, float, str]],
-        nsamp: Optional[Union[int, float]],  
+        N_directions: int = 1,
+        nsamp: Optional[Union[int, float]] = None,  
         constraint: Optional[bool] = None,
         mode: Optional[str] = None,
     ) -> str:
@@ -163,6 +165,7 @@ class MapAlmConverter:
                     frequencies=freq_str,
                     realisation=int(realisation),
                     lmax=int(lmax),
+                    N_directions=int(N_directions),
                     lam=lam_str,
                     nsamp=nsamp_str,
                 )
@@ -178,6 +181,7 @@ class MapAlmConverter:
                 frequencies=freq_str,
                 realisation=int(realisation),
                 lmax=int(lmax),
+                N_directions=int(N_directions),
                 lam=lam_str,
                 nsamp=nsamp_str,
             )
