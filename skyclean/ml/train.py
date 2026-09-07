@@ -143,6 +143,13 @@ def print_gpu_usage(stage_name: str, jax_device_id: int = 0):
         print(f"[GPU Memory] {stage_name}: failed to query GPU memory ({e!r})")
 
 
+def resolve_filter_type(filter_type: str | None, N_directions: int = 1) -> str:
+    """Resolve the DISCO filter type, deriving it from the wavelet directionality."""
+    if filter_type in (None, "auto"):
+        return "axisymmetric" if int(N_directions) == 1 else "directional"
+    return str(filter_type)
+
+
 class Train:
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int,
                  lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, nsamp: int = 1200, constraint: bool = False,
@@ -153,7 +160,7 @@ class Train:
                  random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
                  prefetch: bool = False, run_id: str | None = None,
                  early_stopping_patience: int = 2, early_stopping_min_delta: float = 1e-3,
-                 filter_type: str = "axisymmetric"):
+                 filter_type: str | None = "auto"):
 
         self.component = component
         self.extract_comp = extract_comp
@@ -177,7 +184,7 @@ class Train:
         self.eval_steps = eval_steps
         self.prefetch = prefetch
         self.run_id = (run_id or datetime.now().strftime("%Y%m%d_%H%M%S")).strip()
-        self.filter_type = filter_type
+        self.filter_type = resolve_filter_type(filter_type, N_directions)
         self.constraint = constraint
         self.pcilc = pcilc
         self.pcilc_eps = pcilc_eps
@@ -945,10 +952,11 @@ def main():
         help='Minimum validation-loss improvement required to reset early stopping',
     )
     parser.add_argument('--chs', nargs='+', type=int, default=[512, 256, 128, 64], help='Channel configuration')
-    parser.add_argument('--filter-type', type=str, default='axisymmetric',
-                        choices=['axisymmetric', 'directional', 'square'],
-                        help='DISCO filter type for S2_UNET conv blocks. Changing this changes the '
-                             'weight structure; use a fresh --run-id (e.g. include the filter type in the id).')
+    parser.add_argument('--filter-type', type=str, default='auto',
+                        choices=['auto', 'axisymmetric', 'directional', 'square'],
+                        help="DISCO filter type for S2_UNET conv blocks. 'auto' (default) follows "
+                             '--N-directions: axisymmetric when it is 1, directional otherwise. '
+                             'Changing this changes the weight structure; use a fresh --run-id.')
 
     args = parser.parse_args()
 

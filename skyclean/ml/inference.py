@@ -18,7 +18,7 @@ from scipy.stats import kurtosis, skew
 from .model import S2_UNET
 from skyclean.silc.utils import ilc_mode_tag
 from .data import CMBFreeILC
-from .train import resolve_checkpoint_target
+from .train import resolve_checkpoint_target, resolve_filter_type
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
 from skyclean.silc import SamplingConverters
 
@@ -31,7 +31,7 @@ class Inference:
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3,
                  momentum: float = 0.9, nsamp: int = 1200, constraint: bool = False,
                  pcilc: bool = False, pcilc_eps: float | None = None,
-                 run_id: str | None = None, filter_type: str = "axisymmetric"):
+                 run_id: str | None = None, filter_type: str | None = "auto"):
 
         self.extract_comp = extract_comp
         self.component = component
@@ -41,7 +41,7 @@ class Inference:
         self.N_directions = N_directions
         self.lam = lam
         self.chs = chs if chs is not None else [512, 256, 128, 64]
-        self.filter_type = filter_type
+        self.filter_type = resolve_filter_type(filter_type, N_directions)
         self.directory = directory
         self.seed = seed
         self.model_path = model_path
@@ -599,10 +599,11 @@ def main():
                         help="pcILC epsilon tolerance. Required with --pcilc; must match the SILC run.")
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64],
                         help="Channel configuration. Must match the trained model.")
-    parser.add_argument("--filter-type", type=str, default="axisymmetric",
-                        choices=["axisymmetric", "directional", "square"],
-                        help="DISCO filter type for S2_UNET conv blocks. Must match the trained\n"
-                             "model: a mismatch fails at checkpoint restore.")
+    parser.add_argument("--filter-type", type=str, default="auto",
+                        choices=["auto", "axisymmetric", "directional", "square"],
+                        help="DISCO filter type for S2_UNET conv blocks. 'auto' (default) follows\n"
+                             "--N-directions: axisymmetric when it is 1, directional otherwise.\n"
+                             "Must match the trained model: a mismatch fails at checkpoint restore.")
     parser.add_argument("--directory", type=str, default="data/", help="Base data directory.")
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed used to build the model skeleton before restoring weights.")

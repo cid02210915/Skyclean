@@ -101,10 +101,11 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64])
-    parser.add_argument("--filter-type", type=str, default="axisymmetric",
-                        choices=["axisymmetric", "directional", "square"],
-                        help="DISCO filter type for S2_UNET conv blocks. Changing this changes the "
-                             "weight structure; use a fresh --run-id (e.g. include the filter type in the id).")
+    parser.add_argument("--filter-type", type=str, default="auto",
+                        choices=["auto", "axisymmetric", "directional", "square"],
+                        help="DISCO filter type for S2_UNET conv blocks. 'auto' (default) follows "
+                             "--N-directions: axisymmetric when it is 1, directional otherwise. "
+                             "Changing this changes the weight structure; use a fresh --run-id.")
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--random", dest="random", action="store_true",
@@ -644,9 +645,30 @@ if __name__ == "__main__":
     main()
 
 
-# Example usage:
-# 030 044 070 100 143 217 353 545 857
-# python3 -m skyclean.ml.pipeline_ml --mode train+evaluate --extract-comp "cmb" --component "cfn" --frequencies 030 044 070 100 143 217 353 545 857 --realisations 7 --lmax 511 --N-directions 1 --lam 2.0 --batch-size 1 --split 0.3 0.3 0.4 --nsamp 1200 --epochs 2 --eval-every 1 --learning-rate 1e-3 --momentum 0.90 --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ --run-id test
-# --resume-training
-# add --filter-type directional (or square) for directional DISCO filters;
-# use a distinct --run-id per filter type, e.g. --run-id test_directional
+''' example usage
+030 044 070 100 143 217 353 545 857
+
+python3 -m skyclean.ml.pipeline_ml \
+  --mode train+evaluate \
+  --extract-comp cmb \
+  --component cfn \
+  --frequencies 030 044 070 \
+  --chs 1 16 16 32 64 \
+  --realisations 100 \
+  --lmax 511 \
+  --N-directions 4 \
+  --lam 2.0 \
+  --nsamp 1200 \
+  --batch-size 10 \
+  --epochs 300 \
+  --split 0.9 0.05 0.05 \
+  --learning-rate 1e-3 \
+  --momentum 0.90 \
+  --eval-every 5 \
+  --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \
+  --seed 42 \
+  --early-stopping-min-delta 1e-4 \
+  --run-id CFN_lmax511_N4_r100
+
+  --resume-training \
+'''
