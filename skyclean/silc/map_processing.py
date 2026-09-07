@@ -240,10 +240,10 @@ class ProcessMaps():
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
 
         if 'all' in self.components:
-            # load all components in download_templates except for 'extra_feature', 'cib', and 'mask' 
+            # Load all components in download_templates except those that are not sky components:
             components = ['cmb']
             for comp in self.download_templates.keys():
-                if comp == "extra_feature" or comp == "cib" or comp == "mask":
+                if comp == "extra_feature" or comp == "cib" or comp == "mask" or comp == "real" or comp == "total":
                     continue
                 else:
                     components.append(comp)

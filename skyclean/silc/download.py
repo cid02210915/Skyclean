@@ -272,7 +272,7 @@ class DownloadData():
         print("Downloading foreground components...")
         if 'all' in self.components:
             for component in self.download_templates:
-                if component == "cmb" or component == "noise" or component == "extra_feature" or component == "cib" or component == "mask":
+                if component == "cmb" or component == "noise" or component == "extra_feature" or component == "cib" or component == "mask" or component == "real" or component == "total":
                     continue
                 else:
                     for frequency in self.frequencies:
