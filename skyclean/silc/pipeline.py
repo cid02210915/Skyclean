@@ -1,7 +1,6 @@
 import argparse
 import os
 import time
-from turtle import mode
 import numpy as np
 import jax
 import subprocess, sys
@@ -14,6 +13,7 @@ from .file_templates import FileTemplates, pixel_ps_component_name
 from .ilc import ProduceSILC  
 from .power_spec import MapAlmConverter, PowerSpectrumTT, PowerSpectrumCrossTT
 from .mixing_matrix_constraint import SpectralVector
+from .custom_s2wav_bandlimits import j_max_silc
 
 
 class Pipeline:
@@ -54,6 +54,7 @@ class Pipeline:
         pcilc_component: str = "tsz",
         pcilc_eps: float | None = None,
         pcilc_pick: str = "minvar",
+        topology: str | None = None,
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -73,6 +74,8 @@ class Pipeline:
         self.constraint = constraint
         self.F = F
         self.reference_vectors = reference_vectors
+        self.F_source = "theory"
+        self.F_kwargs = {}
         #self.scales = scales
         self.lam_str = f"{lam:.1f}" 
         self.nsamp = nsamp
@@ -86,7 +89,6 @@ class Pipeline:
         self.ps_radius_range = tuple(ps_radius_range)
         self.ps_brightness_scale = float(ps_brightness_scale)
         self.ps_injection_mode = ps_injection_mode
-        
 
         
 
@@ -94,6 +96,8 @@ class Pipeline:
         self.pcilc_component = str(pcilc_component).lower()
         self.pcilc_eps = pcilc_eps
         self.pcilc_pick = str(pcilc_pick)
+
+        self.topology = topology
 
     # -------------------------
     # Steps
@@ -149,7 +153,7 @@ class Pipeline:
             ps_radius_range = self.ps_radius_range,
             ps_brightness_scale = self.ps_brightness_scale,
             ps_injection_mode = self.ps_injection_mode,
-
+            topology=self.topology,
         )
         processor.produce_and_save_maps()
 
@@ -184,6 +188,7 @@ class Pipeline:
             ps_radius_range = self.ps_radius_range,
             ps_brightness_scale = self.ps_brightness_scale,
             ps_injection_mode = self.ps_injection_mode,
+            topology=self.topology,
         )
         processor.produce_and_save_wavelet_transforms(
             self.N_directions,
@@ -238,10 +243,13 @@ class Pipeline:
         if getattr(self, "scales", None) is not None:
             scales = list(self.scales)
         else:
-            # derive number of wavelet bands from the filter bank (no disk probing)
+            # Derive the number of wavelet bands from the SILC fixed band-edge table
+            # (no disk probing). This must match the bank the wavelet transform
+            # actually uses -- SimpleHarmonicWindows.build_s2wav_filters builds
+            # j_max_silc(L)+1 bands -- rather than s2wav's lambda-geometric bank,
+            # which disagrees and raises outright once j_max_silc(L) == 0 (small L).
             L = self.lmax + 1
-            filt = filters.filters_directional_vectorised(L, self.N_directions, lam=self.lam)
-            J = len(filt[0])              # number of wavelet bands (excludes scaling)
+            J = int(j_max_silc(L, lam=self.lam)) + 1   # wavelet bands (excludes scaling)
             scales = list(range(J))       # use only wavelet bands for ILC
     
         # Constraint inputs (build F/ref on demand; default empirical)
@@ -275,7 +283,15 @@ class Pipeline:
                 # build_F_empirical(base_dir, file_templates, frequencies, realization, mask_path, components_order)
                 if "realisation" in kwargs and "realization" not in kwargs:
                     kwargs["realization"] = kwargs.pop("realisation")
-                    
+
+                # both are required positionally, so fall back to this pipeline's own paths
+                kwargs.setdefault("base_dir", self.directory)
+                kwargs.setdefault(
+                    "file_templates",
+                    FileTemplates(self.directory, topology=self.topology).file_templates,
+                )
+                kwargs.setdefault("realization", self.start_realisation)
+
                 kwargs = {k: v for k, v in kwargs.items()
                           if k in ("base_dir", "file_templates", "realization", "mask_path",
                                    "components_order", "override_vectors")}
@@ -340,6 +356,7 @@ class Pipeline:
         realisation: int | None = None,        # defaults to self.start_realisation
         lmax: int | None = None,               # defaults to self.lmax
         lam: str | float | int | None = None,  # defaults to self.lam_str
+        N_directions: int | None = None,
         field: int = 0,
         nsamp: float | int | None = None,
         overwrite: bool | None = None,
@@ -362,6 +379,7 @@ class Pipeline:
         lam_   = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         freqs  = self.frequencies if frequencies is None else list(frequencies)
         nsamp_ = getattr(self, "nsamp", None) if nsamp is None else nsamp
+        N_directions_ = self.N_directions if N_directions is None else int(N_directions)
 
         # --- templates + processed-CFN detection ---
         ft = FileTemplates(self.directory).file_templates
@@ -390,7 +408,7 @@ class Pipeline:
             out = conv.to_alm(
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
-                realisation=r, lmax=lmax_, lam=lam_,
+                realisation=r, lmax=lmax_, lam=lam_, N_directions=N_directions_,
                 nsamp=nsamp_, constraint=constraint_, mode=mode,
             )
             src = "ilc_synth"
@@ -451,6 +469,7 @@ class Pipeline:
                 lmax=lmax_,
                 lam=lam_,
                 nsamp=nsamp_,
+                N_directions=N_directions_
             )
             os.makedirs(os.path.dirname(spec_path), exist_ok=True)
             if overwrite or not os.path.exists(spec_path):
@@ -511,6 +530,7 @@ class Pipeline:
         realisation: int | None = None,
         lmax: int | None = None,
         lam: str | float | int | None = None,
+        N_directions: int | None = None,
         nsamp: int | float | None = None,
         constraint: bool | None = None,
         field: int = 0,
@@ -526,6 +546,7 @@ class Pipeline:
         rY = r_default if realisation_Y is None else int(realisation_Y)
         lmax_ = self.lmax if lmax is None else int(lmax)
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
+        N_directions_ = self.N_directions if N_directions is None else int(N_directions)
         nsamp_ = getattr(self, "nsamp", 1200) if nsamp is None else int(nsamp)
         constraint_ = getattr(self, "constraint", False) if constraint is None else bool(constraint)
         fX    = self.frequencies if frequencies_X is None else list(frequencies_X)
@@ -560,7 +581,7 @@ class Pipeline:
                 out = conv.to_alm(
                     component=comp_in, source="ilc_synth",
                     extract_comp=tgt, frequencies=frequencies,
-                    realisation=r_use, lmax=lmax_, lam=lam_,
+                    realisation=r_use, lmax=lmax_, lam=lam_, N_directions=N_directions_,
                     nsamp=nsamp_, constraint=constraint_,  mode=mode_use
                 )
                 if mode_use is not None:
@@ -742,7 +763,7 @@ class Pipeline:
             steps = ["download", "process", "wavelets", "ilc"]
 
         start_time = time.perf_counter()
-        print(f"==== RUN for lam={self.lam}, realisation {self.start_realisation} to {self.start_realisation + self.realisations} ====")
+        print(f"==== RUN for lam={self.lam}, N={self.N_directions}, realisation {self.start_realisation} to {self.start_realisation + self.realisations} ====")
 
         if "download" in steps:
             self.step_download()
@@ -764,7 +785,7 @@ class Pipeline:
             self.step_cross_power_spec()
 
         elapsed = time.perf_counter() - start_time
-        print(f"SELECTED STEPS COMPLETED IN {elapsed:.2f} SECONDS (lam={self.lam}).")
+        print(f"SELECTED STEPS COMPLETED IN {elapsed:.2f} SECONDS (lam={self.lam}, N={self.N_directions}).")
 
 
 # when not using multi-processing 
@@ -789,7 +810,6 @@ def main():
             "    --brightness-percentile 75 100 \\\n"
             "    --mode random \\\n"
             "    --random-seed 1 \\\n"
-            "    --factor 60 \\\n"
             "    --ps-injection-mode pixel_ps \\\n"
             "    --overwrite \\\n"
             "    --steps process"
@@ -825,7 +845,7 @@ def main():
                         help="If set, save intermediate ILC products (covariances, weights, etc.).")
     parser.add_argument('--overwrite', action='store_true',
                         help="If set, overwrite existing files.")
-    parser.add_argument('--directory', type=str, default='/Scratch/agnes/data',
+    parser.add_argument('--directory', type=str, default='/Scratch/cindy/testing/Skyclean/skyclean/data',
                         help="Base directory for input/output data.")
     parser.add_argument('--ps-component', type=str, default='strongirps',
                         help="Point-source component template key used for injected extra features.")
@@ -849,8 +869,8 @@ def main():
                         choices=['circular_ps', 'pixel_ps'],
                         default='pixel_ps',
                         help="How to build injected extra features.")
-    
-
+    parser.add_argument('--topology', type=str, choices=['Toy', 'E1'], default=None,
+                        help="Topology CMB realisation set to use. Omit for the standard (non-topology) CMB maps.")
 
     # Constrained ILC options (pipeline already supports these)
     parser.add_argument(
@@ -864,6 +884,16 @@ def main():
         default=1200,
         help="Number of Monte Carlo samples (nsamp) for constrained ILC."
     )
+
+    # pcILC options
+    parser.add_argument('--pcilc', action='store_true',
+                        help="Enable pcILC (partially constrained ILC). Mutually exclusive with --constraint.")
+    parser.add_argument('--pcilc-component', type=str, default='tsz',
+                        help="Component deprojected by pcILC.")
+    parser.add_argument('--pcilc-eps', type=float, default=None,
+                        help="pcILC deprojection tolerance. Omit for the ILC default.")
+    parser.add_argument('--pcilc-pick', type=str, default='minvar',
+                        help="pcILC weight selection rule (e.g. 'minvar').")
 
     # Which steps to run (now including power spectra)
     parser.add_argument(
@@ -899,6 +929,11 @@ def main():
         directory=args.directory,
         constraint=args.constraint,
         nsamp=args.nsamp,
+        topology=args.topology,
+        pcilc=args.pcilc,
+        pcilc_component=args.pcilc_component,
+        pcilc_eps=args.pcilc_eps,
+        pcilc_pick=args.pcilc_pick,
         ps_component=args.ps_component,
         n_points=args.n_points,
         match_n_points_to_target_density=args.match_n_points_to_target_density,
@@ -916,11 +951,20 @@ if __name__ == "__main__": # Run main() only when the file is executed as a scri
     main()    
 
 # example usage:
-# 1. CFN with multiple components (no extra feature injection)
-# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --overwrite --steps process wavelets ilc
+# 1. CFN only
+# python -m skyclean.silc.pipeline --components cmb noise tsz --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 --realisations 1 --start-realisation 0 --lmax 300 --N-directions 3 --overwrite --steps process wavelets ilc
 #
 # 2. CFNE using pixel point-source injection
-# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 1.0 --ps-brightness-scale 1.0 --ps-injection-mode pixel_ps --overwrite --steps process wavelets ilc
+# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 1.0 --ps-brightness-scale 1.0 --ps-injection-mode pixel_ps --overwrite --steps process wavelets ilc
 #
 # 3. CFNE_CIRC using circular point-source injection
-# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne_circ --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --method jax_cuda --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 3.0 --ps-brightness-scale 5.0 --ps-injection-mode circular_ps --overwrite --steps process wavelets ilc
+# python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne_circ --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 3.0 --ps-brightness-scale 5.0 --ps-injection-mode circular_ps --overwrite --steps process wavelets ilc
+#
+# 4. Constrained ILC (F is built from theory, with the ('cmb','tsz') subset of --components as columns)
+# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --constraint --nsamp 1200 --steps ilc
+#
+# 5. pcILC deprojecting tSZ (mutually exclusive with --constraint)
+# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --pcilc --pcilc-component tsz --pcilc-pick minvar --steps ilc
+#
+# 6. Topology CMB realisations
+# python -m skyclean.silc.pipeline --components cmb noise --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 --realisations 1 --start-realisation 0 --lmax 511 --topology E1 --steps process wavelets ilc
