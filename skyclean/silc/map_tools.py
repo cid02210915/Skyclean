@@ -11,6 +11,7 @@ import s2fft
 import s2wav
 import s2wav.filters as filters
 from .utils import *
+from .custom_s2wav_bandlimits import ELL_PEAK, LAM_LIST
 from .harmonic_response import build_axisym_filter_bank
 from .harmonic_response import SimpleHarmonicWindows
 from .power_spec import PowerSpectrumTT
@@ -407,15 +408,12 @@ class MWTools():
         lam: float,   # kept for API compatibility, but we’ll override internally
     ):
         # --- define the filter bank here ---
-        ell_peaks = [64, 128, 256, 512, 705, 917,
-                     1192, 1550, 2015, 2539, 3047, 3600]
-        lam_list  = [2.0,  2.0,  2.0, 1.377,
-                     1.3,  1.3,  1.3, 1.3,
-                     1.26005, 1.2001, 1.2, 1.1815]
+        ell_peaks = ELL_PEAK
+        lam_list  = list(LAM_LIST)
 
         # 1) build filters (wav_jln, scal_l)
         wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(
-            L, ell_peaks, lam_list
+            L, ell_peaks, lam_list, N_directions=N_directions
         )
         filters = (wav_jln, scal_l)
 
@@ -508,13 +506,10 @@ class MWTools():
             raise ValueError("Must specify band_index (0-based) when passing a single wavelet band.")
 
         # ---- same ell_peaks / lam_list as inverse_wavelet_transform ----
-        ell_peaks = [64, 128, 256, 512, 705, 917,
-                     1192, 1550, 2015, 2539, 3047, 3600]
-        lam_list  = [2.0,  2.0,  2.0, 1.377,
-                     1.3,  1.3,  1.3, 1.3,
-                     1.26005, 1.2001, 1.2, 1.1815]
+        ell_peaks = ELL_PEAK
+        lam_list  = list(LAM_LIST)
 
-        wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(L, ell_peaks, lam_list)
+        wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(L, ell_peaks, lam_list, N_directions=N_directions)
         filters = (wav_jln, scal_l)
         lam_safe = float(np.max(lam_list))
 
@@ -620,7 +615,7 @@ class MWTools():
 
 
     @staticmethod
-    def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, comp: str, frequency: str, realisation: int, lmax: int, lam: float, wav_template: str, scal_template: str):
+    def save_wavelet_scaling_coeffs(wavelet_coeffs: list, scaling_coeffs: np.ndarray, comp: str, frequency: str, realisation: int, lmax: int, lam: float, wav_template: str, scal_template: str, N_directions: int = 1):
         """ Saves the wavelet and scaling coefficients to files.    
 
         Parameters:
@@ -633,6 +628,7 @@ class MWTools():
             lam (float): lambda factor (scaling) for the wavelet transform.
             wav_template (str): Template for the wavelet coefficient file path.
             scal_template (str): Template for the scaling coefficient file path.
+            N_directions (int): Number of directions for the wavelet transform.
 
         Returns:
             None
@@ -643,7 +639,7 @@ class MWTools():
         if np_scaling.ndim == 3 and np_scaling.shape[0] == 1:
             np_scaling = np_scaling[0]
         np.save(
-            scal_template.format(comp=comp, frequency=frequency, realisation=realisation, lmax=lmax, lam=lam),
+            scal_template.format(comp=comp, frequency=frequency, realisation=realisation, lmax=lmax, N_directions=N_directions, lam=lam),
             np_scaling,
         )
     
@@ -654,7 +650,7 @@ class MWTools():
             if np_wav.ndim == 3 and np_wav.shape[0] == 1:
                 np_wav = np_wav[0]
             np.save(
-                wav_template.format(comp=comp, frequency=frequency, scale=scale, realisation=realisation, lmax=lmax, lam=lam),
+                wav_template.format(comp=comp, frequency=frequency, scale=scale, realisation=realisation, lmax=lmax, N_directions=N_directions, lam=lam),
                 np_wav,
             )
             
@@ -663,13 +659,10 @@ class MWTools():
     def inverse_wavelet_transform(wavelet_coeffs: list, L: int, lam: float, N_directions: int = 1):
 
         # same ell_peaks / lam_list as forward
-        ell_peaks = [64, 128, 256, 512, 705, 917,
-                     1192, 1550, 2015, 2539, 3047, 3600]
-        lam_list  = [2.0,  2.0,  2.0, 1.377,
-                     1.3,  1.3,  1.3, 1.3,
-                     1.26005, 1.2001, 1.2, 1.1815]
+        ell_peaks = ELL_PEAK
+        lam_list = list(LAM_LIST)
 
-        wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(L, ell_peaks, lam_list)
+        wav_jln, scal_l = SimpleHarmonicWindows.build_s2wav_filters(L, ell_peaks, lam_list, N_directions=N_directions)
         filters = (wav_jln, scal_l)
         lam_safe = float(np.max(lam_list))
         print("\n[DEBUG synthesis] L =", L, "N =", N_directions, "lam_safe =", lam_safe)
@@ -708,9 +701,13 @@ class MWTools():
         print("[DEBUG synthesis] filters wav_jln shape:", np.asarray(wav_jln).shape)
         print("[DEBUG synthesis] len(wav_coeffs) passed into s2wav.synthesis:", len(wav_coeffs))
 
+        # s2wav.synthesis expects f_scal with shape [n_theta, n_phi]; the forward
+        # transform replicates the scaling map across the 2N-1 direction axis so the
+        # ILC can treat every block alike, so undo that here. A leading axis of length
+        # 1 (N_directions=1) used to broadcast away silently, which hid this for N=1.
         mw_map = s2wav.synthesis(
             wav_coeffs,
-            f_scal=f_scal_tiled,
+            f_scal=f_scal,
             L=L,
             N=N_directions,
             lam=lam_safe,
@@ -757,7 +754,7 @@ class MWTools():
     '''
 
     @staticmethod
-    def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str):
+    def load_wavelet_scaling_coeffs(frequency: str, num_wavelets: int, realisation: int, wav_template: str, scal_template: str, N_directions: int = 1):
         """
         Loads the wavelet and scaling coefficients from files.
 
@@ -765,19 +762,21 @@ class MWTools():
             frequency (str): Frequency of the map.
             num_wavelets (int): Number of wavelet coefficients to load.
             realisation (int): realisation number for the map.  
+            N_directions (int): Number of directions for the wavelet transform.
             wav_template (str): Template for the wavelet coefficient file path.
             scal_template (str): Template for the scaling coefficient file path.
         
         Returns:
             tuple: A tuple containing the wavelet coefficients and scaling coefficients.
         """
-        wavelet_coeffs = [np.real(np.load(wav_template.format(frequency=frequency, scale=scale, realisation=realisation))) for scale in range(num_wavelets)]
-        scaling_coeffs = np.real(np.load(scal_template.format(frequency=frequency, realisation=realisation)))
+        wavelet_coeffs = [np.real(np.load(wav_template.format(frequency=frequency, scale=scale, realisation=realisation, N_directions=N_directions))) for scale in range(num_wavelets)]
+        scaling_coeffs = np.real(np.load(scal_template.format(frequency=frequency, realisation=realisation, N_directions=N_directions)))
         return wavelet_coeffs, scaling_coeffs
     
     
     @staticmethod
-    def visualise_mw_map(mw_map: np.ndarray, title: str = None, coord: list = ["G"], unit: str = r"K", directional: bool = False, method = "jax_cuda",):
+    def visualise_mw_map(mw_map: np.ndarray, title: str = None, coord: list = ["G"], unit: str = r"K", directional: bool = False, method = "jax_cuda",
+                         fig=None, nrows: int = 1, ncols: int = 1, panel: int = 1,):
         """
         Visualizes a MW pixel wavelet coefficient map using HEALPix mollview.
 
@@ -787,38 +786,43 @@ class MWTools():
             coord (list): List of coordinate systems to use for the visualization.
             directional (bool): If plotting wavelet transform maps, set to True (even if N_directions = 1). If plotting normal MW maps, set to False. 
             unit (str): Unit of the map data, default is Kelvin (K).  
+            fig (matplotlib.figure.Figure): Existing figure to draw into. If given, the map is
+                placed at `panel` of an (nrows, ncols) grid and no figure is created/shown/saved.
+            nrows, ncols, panel (int): Subplot grid position, only used when `fig` is given.
         """
+        # When `fig` is supplied the map is drawn into the caller's subplot grid at
+        # `panel`; otherwise this makes (and shows/saves) its own standalone figure.
+        embed = fig is not None
+
         if directional:
-            nrows = 1
-            ncols = mw_map.shape[0] # number of directions
-            fig = plt.figure(figsize=(5*ncols, 5*nrows))
-            
+            n_dir = mw_map.shape[0]
+            if not embed:
+                nrows, ncols, panel = 1, n_dir, 1
+                fig = plt.figure(figsize=(5*ncols, 5*nrows))
             lmax = mw_map.shape[1] - 1
-            for i in range(ncols):
+            for i in range(n_dir):
                 hp_map = SamplingConverters.mw_map_2_hp_map(mw_map[i], lmax, method=method)
-                panel = i + 1
                 hp.mollview(
                     hp_map,
                     coord=coord,
-                    title=title+f", dir {i+1}",
+                    title=f"{title or ''}, dir {i+1}",
                     unit=unit,
-                    fig = fig.number,
-                    sub = (nrows, ncols, panel)
-                    # min=min, max=max,  # Uncomment and adjust these as necessary for better visualization contrast
+                    fig=fig.number,
+                    sub=(nrows, ncols, panel + i),
                 )
-                # plt.figure(dpi=1200)
         else:
             lmax = mw_map.shape[0] - 1
             hp_map = SamplingConverters.mw_map_2_hp_map(mw_map, lmax, method=method)
-            hp.mollview(
-                hp_map,
-                coord=coord,
-                title=title,
-                unit=unit,
-                # min=min, max=max,  # Uncomment and adjust these as necessary for better visualization contrast
-            )                                           
-        plt.savefig(f'{title}.png')
-        plt.show()
+            if embed:
+                hp.mollview(hp_map, coord=coord, title=title, unit=unit,
+                            fig=fig.number, sub=(nrows, ncols, panel))
+            else:
+                hp.mollview(hp_map, coord=coord, title=title, unit=unit)
+
+        if not embed:
+            if title:
+                plt.savefig(f'{title}.png')
+            plt.show()
 
     '''
     @staticmethod
@@ -856,6 +860,7 @@ class MWTools():
         L: int,
         ell_peaks,
         lam_list,
+        N_directions: int = 1,
         scal_ell_cut: float = 64.0,
         scal_lam: float | None = None,
         truncate: bool = True,
@@ -865,6 +870,7 @@ class MWTools():
             L=int(L),
             ell_peaks=np.asarray(ell_peaks),
             lam_list=np.asarray(lam_list),
+            N_directions=int(N_directions),
             scal_ell_cut=float(scal_ell_cut),
             scal_lam=scal_lam,
             truncate=bool(truncate),
