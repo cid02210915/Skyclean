@@ -103,7 +103,17 @@ class DownloadData():
             if component == "noise" and realisation is not None:
                 remote_realisation = int(realisation) % 300
 
-            url = template.format(frequency=remote_frequency, realisation=remote_realisation)
+            if component == "real":
+                # Real Planck sky maps have a fixed URL per frequency
+                # read the specific URL for this frequency instead of formatting a template.
+                if freq not in template:
+                    raise KeyError(
+                        f"No download URL for real map at frequency '{freq}'. "
+                        f"Available: {sorted(template)}"
+                    )
+                url = template[freq]
+            else:
+                url = template.format(frequency=remote_frequency, realisation=remote_realisation)
 
             
             # stronguchii @ 070 is "_full.f" on PLA, but we want to save as ".fits" locally
