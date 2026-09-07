@@ -42,6 +42,7 @@ class ProcessMaps():
                  directory: str = "data/", 
                  method = "jax_cuda", 
                  overwrite: bool = False, 
+                 topology: str | None = None,
                  ps_component: str = 'strongirps',
                  n_points: int | None = 10,
                  match_n_points_to_target_density: bool = False,
@@ -77,7 +78,7 @@ class ProcessMaps():
         self.directory = directory
         self.overwrite = overwrite
         self.templates = FileTemplates(directory=directory)
-        files = FileTemplates(directory)
+        files = FileTemplates(directory, topology=topology,)
         self.ps = PointSource(
                     ps_component=ps_component,
                     frequencies=frequencies,
@@ -234,7 +235,7 @@ class ProcessMaps():
             np.ndarray: The CFN map in HP format.
         """
         desired_lmax = self.desired_lmax
-        standard_fwhm_rad = np.radians(5/60)
+        standard_fwhm_rad = np.radians(5 / 60)
         nside = HPTools.get_nside_from_lmax(desired_lmax)
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
 
@@ -302,8 +303,7 @@ class ProcessMaps():
                         frequency=frequency, realisation=realisation
                     )
                 elif comp != "extra_feature":
-                    filepath = self.file_templates[comp].format(
-                        frequency=frequency, realisation=realisation
+                    filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation
                     )
     
                 if comp != "extra_feature":
@@ -786,17 +786,19 @@ class ProcessMaps():
         wavelet_coeffs_path = self.file_templates["wavelet_coeffs"]
         scaling_coeffs_path = self.file_templates["scaling_coeffs"]
         if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, 
-                                                     realisation=realisation, lmax=lmax, lam = lam)) and self.overwrite == False:
+                                                     realisation=realisation, lmax=lmax, N_directions=N_directions, lam = lam)) and self.overwrite == False:
             # test if scale 0 exists; this means the transform has already been created
             print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation} already exist. Skipping generation.")
             return None
         hp_map = read_map_with_known_order(filepath)
         L = lmax + 1
         mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method = method)
-        MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)
+        if visualise:
+            MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)
         wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=N_directions, lam=lam)
         MWTools.save_wavelet_scaling_coeffs(wavelet_coeffs, scaling_coeffs, comp, frequency, 
-                                            realisation, lmax, lam, wavelet_coeffs_path, scaling_coeffs_path)
+                                            realisation, lmax, lam, wavelet_coeffs_path, scaling_coeffs_path,
+                                            N_directions=N_directions)
         return wavelet_coeffs, scaling_coeffs
     
 
