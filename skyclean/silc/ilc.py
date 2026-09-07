@@ -1565,15 +1565,7 @@ class ProduceSILC():
         print(f"[DEBUG] wavelet_js_custom(L)={SILCTools.wavelet_js_custom(int(L_max))}")
 
         # --- determine output mode for naming ---
-        if pcilc:
-            if pcilc_eps is None:
-                raise ValueError("pcilc=True requires pcilc_eps")
-            eps_str = f"{float(pcilc_eps):.6g}"
-            mode = f"pcilc_eps{eps_str}"
-        elif constraint:
-            mode = "cilc"
-        else:
-            mode = "ilc"
+        mode = ilc_mode_tag(constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps)
  
         def _check_against_F(W, F, f, tol=1e-6):
             W = np.asarray(W)

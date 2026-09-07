@@ -14,6 +14,7 @@ from .ilc import ProduceSILC
 from .power_spec import MapAlmConverter, PowerSpectrumTT, PowerSpectrumCrossTT
 from .mixing_matrix_constraint import SpectralVector
 from .custom_s2wav_bandlimits import j_max_silc
+from .utils import ilc_mode_tag
 
 
 class Pipeline:
@@ -729,7 +730,9 @@ class Pipeline:
         ell = ell_proc
 
         # 3) save combined spectra
-        mode = "con" if getattr(self, "constraint", False) else "uncon"
+        mode = ilc_mode_tag(constraint=getattr(self, "constraint", False),
+                            pcilc=getattr(self, "pcilc", False),
+                            pcilc_eps=getattr(self, "pcilc_eps", None))
 
         out_dir = os.path.join(self.directory, "power_spectra")
         os.makedirs(out_dir, exist_ok=True)

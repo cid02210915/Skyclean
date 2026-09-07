@@ -14,6 +14,7 @@ from ..ml.inference import Inference
 class Visualise(): 
     def __init__(self, inference: Inference, component: str, extract_comp: str, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
                  rn: int = 30, N_directions: int = 1, constraint: bool = False, batch_size: int = 32, epochs: int = 120, 
+                 pcilc: bool = False, pcilc_eps: float | None = None,
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, nsamp: int = 1200, 
                  ):
         """
@@ -41,12 +42,14 @@ class Visualise():
         self.chs = chs
         self.nsamp = nsamp
         self.constraint = constraint
+        self.pcilc = pcilc
+        self.pcilc_eps = pcilc_eps
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
         self.output_directories = files.output_directories
 
-        self.data_handler = CMBFreeILC(extract_comp=extract_comp, component=component, frequencies=frequencies, realisations=rn, lmax=lmax, N_directions=N_directions, lam=lam_list[0], nsamp=nsamp, constraint=constraint, batch_size=batch_size, shuffle=False, split=[0.8, 0.2], directory=directory)
+        self.data_handler = CMBFreeILC(extract_comp=extract_comp, component=component, frequencies=frequencies, realisations=rn, lmax=lmax, N_directions=N_directions, lam=lam_list[0], nsamp=nsamp, constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps, batch_size=batch_size, split=[0.8, 0.2], directory=directory)
 
 
     def visualise_maps(self, comps: list):
@@ -112,14 +115,14 @@ class Visualise():
             comps (list): List of components to visualise. e.g. ['cmb', 'cfn', 'ilc'].
             scales (list): Wavelet band indices to show. Defaults to every band in the bank.
             lam (float): lambda used when the coefficients were written. Defaults to lam_list[0].
-            mode (str): ILC mode tag in the trimmed-map filenames ('uncon'/'con').
+            mode (str): ILC mode tag in the trimmed-map filenames ('ilc'/'cilc'/'pcilc_eps*').
             nsamp (int): nsamp tag in the trimmed-map filenames.
         """
         import s2wav.filters as s2wav_filters
 
         lam   = self.lam_list[0] if lam is None else lam
         nsamp = self.nsamp if nsamp is None else nsamp
-        mode  = ("con" if self.constraint else "uncon") if mode is None else mode
+        mode  = ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps) if mode is None else mode
 
         realisation = self.realisation
         lmax        = self.lmax
@@ -276,10 +279,7 @@ class Visualise():
         if spectrum_template_key in self.file_templates:
             if component == 'ilc_improved':
                 chs = "_".join(str(n) for n in self.chs)
-                if self.constraint == False:
-                    mode = "uncon"
-                else:
-                    mode = "con"
+                mode = ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
                 spectrum_path = self.file_templates[spectrum_template_key].format(
                                         mode=mode,
                                         extract_comp=self.extract_comp,
@@ -364,7 +364,7 @@ class Visualise():
         if component in mw_components:
             # MW-format component - use the general MW power spectrum function
             map_path = self.file_templates[component].format(
-                mode='uncon',
+                mode=ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps),
                 extract_comp='cmb',
                 component='cfn',
                 frequencies="_".join(str(x) for x in frequencies),
@@ -657,10 +657,7 @@ class Visualise():
         lr = self.lr
         momentum = self.momentum
         chs = "_".join(str(n) for n in self.chs)
-        if self.constraint == True:
-            mode = "con"
-        else:
-            mode = "uncon"
+        mode = ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
 
         # Normalise comp_a into a list
         if isinstance(comp_a, str):

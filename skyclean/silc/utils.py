@@ -124,3 +124,47 @@ def admissibility(Phi_l0, Psi_j_l0, ells, tol=1e-6):
 
     ok = np.all(np.abs(S[1:] - 1.0) < tol)
     return S, bool(ok)
+
+
+def ilc_mode_tag(constraint: bool = False, pcilc: bool = False, pcilc_eps: float | None = None) -> str:
+    """
+    Canonical ILC mode tag used in output filenames.
+
+    This is the single definition of the ``{mode}`` field shared by the SILC
+    outputs (ilc_synth, trimmed_maps, ...) and the ML products derived from
+    them (foreground_estimate, ilc_residual, ilc_improved, ...). Keep the SILC
+    writer and every ML reader on this function so the two cannot drift apart.
+
+    Parameters:
+        constraint (bool): True for constrained ILC (cILC).
+        pcilc (bool): True for partially-constrained ILC (pcILC).
+        pcilc_eps (float): Epsilon tolerance, required when pcilc is True.
+
+    Returns:
+        str: "ilc", "cilc", or "pcilc_eps{eps}".
+    """
+    if pcilc and constraint:
+        raise ValueError("Choose either constraint=True (cILC) OR pcilc=True (pcILC), not both.")
+    if pcilc:
+        if pcilc_eps is None:
+            raise ValueError("pcilc=True requires pcilc_eps (epsilon).")
+        return f"pcilc_eps{float(pcilc_eps):.6g}"
+    if constraint:
+        return "cilc"
+    return "ilc"
+
+
+def ilc_mode_candidates(constraint: bool = False, pcilc: bool = False, pcilc_eps: float | None = None) -> list:
+    """
+    Mode tags to try when *reading* an existing file, most current first.
+
+    Filenames written before the ilc/cilc/pcilc naming used "uncon"/"con".
+    Writers should always use ilc_mode_tag(); only readers need this fallback.
+
+    Returns:
+        list: Candidate ``{mode}`` values, in the order they should be tried.
+    """
+    tag = ilc_mode_tag(constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps)
+    if pcilc:
+        return [tag]  # pcILC postdates the legacy naming, so it has no alias
+    return [tag, "con" if constraint else "uncon"]

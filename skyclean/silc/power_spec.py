@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 
 from typing import Optional, Union, Iterable, Dict, Any
 
+from .utils import ilc_mode_candidates
+
 class MapAlmConverter:
     def __init__(self, file_templates: Dict[str, str]):
         self.file_templates = file_templates
@@ -145,17 +147,11 @@ class MapAlmConverter:
                 nsamp = 1200  
             nsamp_str = str(int(nsamp))
 
-            mode = "con" if constraint else "uncon"
-
-            if nsamp is None:
-                nsamp = 1200  
-            nsamp_str = str(int(nsamp))
-
             # explicit mode takes priority (e.g. "pcilc_eps0.2")
             if mode is not None:
                 mode_candidates = [str(mode)]
             else:
-                mode_candidates = ["cilc", "con"] if constraint else ["ilc", "uncon"]
+                mode_candidates = ilc_mode_candidates(constraint=bool(constraint))
         
             for mode_try in mode_candidates:
                 kw = dict(
