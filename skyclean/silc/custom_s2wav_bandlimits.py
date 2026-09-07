@@ -97,6 +97,17 @@ ELL_PEAK = np.array(
              dtype=int,
 )
 
+# Per-band dilation factors that go with the band edges above. Defined here so
+# every consumer (ilc.py, map_tools.py, harmonic_response.py) shares one bank
+# instead of re-typing it; see the module docstring for the patch workflow.
+LAM_LIST = [2.0,  2.0,  2.0, 1.377,
+            1.3,  1.3,  1.3, 1.3,
+            1.26005, 1.2001, 1.2, 1.1815]
+
+# Harmonic support of the scaling window (matches scal_bandlimit_silc -> min(65, L)).
+SCAL_ELL_CUT = 64.0
+SCAL_BAND    = (0, 64, 64)   # (ell_min, ell_peak, ell_max)
+
 
 # ----------------------------------------------------------------------
 # j_max: how many wavelet bands to use
