@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 from .custom_s2wav_bandlimits import j_max_silc
-
+import s2wav.filters as filters
 
 class AxisymmetricGenerators:
     """
@@ -490,6 +490,8 @@ class SimpleHarmonicWindows:
               * 1D axisymmetric array over ℓ, or
               * 2D array with shape (n_ell, n_m) or (L, 2L-1)
         """
+        import numpy as np
+        import matplotlib.pyplot as plt
 
         plt.figure(figsize=(12, 6))
 
@@ -500,17 +502,24 @@ class SimpleHarmonicWindows:
         ell = self.ells
         twoell1 = 2.0 * ell + 1.0
 
+        # transition from log-like spacing to linear spacing
+        ell_transition = 80
+
         # ----- scaling contribution -----
         phi = self.scaling_band(truncate=truncate)
-        scal_contrib = (4.0 * np.pi / twoell1) * np.abs(phi)**2
+        scal_contrib = (4.0 * np.pi / twoell1) * np.abs(phi) ** 2
 
         ell_min_s, ell_peak_s, ell_max_s = self.scal_band
-        print(f"scal -> ell_min = {ell_min_s:4d}, ell_peak = {ell_peak_s:4d}, ell_max = {ell_max_s:4d}")
+        print(
+            f"scal -> ell_min = {ell_min_s:4d}, "
+            f"ell_peak = {ell_peak_s:4d}, "
+            f"ell_max = {ell_max_s:4d}"
+        )
 
         plt.plot(ell, scal_contrib, label="scal", linewidth=2)
-        plt.axvline(ell_min_s,  color='k', linestyle='--', alpha=0.15)
-        plt.axvline(ell_peak_s, color='k', linestyle=':',  alpha=0.3)
-        plt.axvline(ell_max_s,  color='k', linestyle='--', alpha=0.15)
+        plt.axvline(ell_min_s,  color="k", linestyle="--", alpha=0.15)
+        plt.axvline(ell_peak_s, color="k", linestyle=":",  alpha=0.30)
+        plt.axvline(ell_max_s,  color="k", linestyle="--", alpha=0.15)
 
         total = scal_contrib.copy()
 
@@ -519,11 +528,11 @@ class SimpleHarmonicWindows:
             psi_j = self.wavelet_band(j, truncate=truncate)
 
             if psi_j.ndim == 1:
-                # axisymmetric-like case
-                msum = np.abs(psi_j)**2
+                # axisymmetric case
+                msum = np.abs(psi_j) ** 2
             else:
                 # directional case: sum over m
-                msum = np.sum(np.abs(psi_j)**2, axis=1)
+                msum = np.sum(np.abs(psi_j) ** 2, axis=1)
 
             wav_contrib = (8.0 * np.pi**2 / twoell1) * msum
             total += wav_contrib
@@ -532,35 +541,56 @@ class SimpleHarmonicWindows:
             print(f"j = {j:2d}  ->  ell_min = {ell_min:4d}, ell_max = {ell_max:4d}")
 
             plt.plot(ell, wav_contrib, label=f"j={j}")
-            plt.axvline(ell_min,  color='k', linestyle='--', alpha=0.15)
-            plt.axvline(ell_peak, color='k', linestyle=':',  alpha=0.3)
-            plt.axvline(ell_max,  color='k', linestyle='--', alpha=0.15)
+            plt.axvline(ell_min,  color="k", linestyle="--", alpha=0.15)
+            plt.axvline(ell_peak, color="k", linestyle=":",  alpha=0.30)
+            plt.axvline(ell_max,  color="k", linestyle="--", alpha=0.15)
 
-        plt.xlim(2, self.L - 1)
-        #plt.xscale("log")
+        # ----- axis formatting -----
+        plt.xlim(0, self.L - 1)
+
+        # log-like at small ell, linear at large ell
+        #plt.xscale("symlog", linthresh=ell_transition, linscale=1.0)
+
+        # obvious transition marker
+        plt.axvline(
+            ell_transition,
+            color="black",
+            linestyle="-",
+            linewidth=2.6,
+            alpha=0.85,
+            zorder=5
+        )
+
 
         plt.xlabel(r"$\ell$", fontsize=axis_label_size)
-        plt.ylabel("Wavelet Hamonic Response", fontsize=axis_label_size)
-        plt.xticks(fontsize=tick_size)
+        plt.ylabel("Wavelet Harmonic Response", fontsize=axis_label_size)
+
+        plt.xticks(
+            [2, 5, 10, 20, 50, ell_transition, 200, 500, 1000, 2000, 3000],
+            fontsize=tick_size
+        )
         plt.yticks(fontsize=tick_size)
+
         plt.grid(True, alpha=0.3)
         plt.title("Scaling + Wavelet harmonic windows", fontsize=axis_label_size)
-    
-        # legend to the right, with larger font
+
         plt.legend(
             loc="center left",
             bbox_to_anchor=(1.02, 0.5),
             fontsize=legend_size,
             frameon=False
         )
+
         plt.tight_layout()
         plt.show()
+
 
     @staticmethod
     def build_s2wav_filters(
         L: int,
         ell_peaks,
         lam_list,
+        N_directions: int,
         scal_ell_cut: float = 64.0,
         scal_lam: float | None = None,
         truncate: bool = True,
@@ -586,7 +616,8 @@ class SimpleHarmonicWindows:
         scal_l = hw.scaling_band(truncate=truncate).astype(np.float64)  # (L,)
     
         # ============================================================
-        # Enforce admissibility Eq.(30) directly (axisymmetric => m=0)
+        # Enforce admissibility
+        # sibility Eq.(30) directly (axisymmetric => m=0)
         #   (4π/(2ℓ+1)) |Φ_{ℓ0}|^2 + (8π^2/(2ℓ+1)) Σ_j |Ψ^j_{ℓ0}|^2 = 1
         # ============================================================
         ells = np.arange(L, dtype=np.float64)
@@ -605,50 +636,91 @@ class SimpleHarmonicWindows:
         scal_l   = scal_l * alpha
         kappa_jl = kappa_jl * alpha[None, :]
      
-        
-        # ---- optional: print Eq.(30) check ----
-        denom_post = w_scal * (np.abs(scal_l) ** 2) + w_wav * np.sum(np.abs(kappa_jl) ** 2, axis=0)
-        '''
-        print("\n=== Eq.(30) check (should be ~1) ===")
-        for ell in [0, 1, 2, 5, 10, 20, 32, 64, 128, min(256, L-1), L-1]:
-            if ell < L:
-                print(f"ell={ell:4d}  value={denom_post[ell]:.6e}")
-        print("min/max over ell with denom>0:", np.nanmin(denom_post[mask]), np.nanmax(denom_post[mask]))
-        print("===================================\n")
-        '''
-        S = denom_post            # this is admissibility curve
-        ells = np.arange(L)
+        # ---- pack into s2wav expected n-grid: (J, L, 2L-1), directional ----
 
-        '''
-        plt.figure(figsize=(7,4))
-        plt.plot(ells, S)
-        plt.axhline(1.0, linestyle="--")
-        plt.xlabel(r"$\ell$")
-        plt.ylabel(r"$S(\ell)$")
-        plt.title(f"Admissibility check up to L-1 (L={L})")
-        plt.grid(alpha=0.4)
+        s_elm = filters.tiling_direction(L, N_directions)  # shape (L, 2L-1)
+
+        wav_jln = (
+            kappa_jl[:, :, None]
+            * s_elm[None, :, :]
+        ).astype(np.complex128)
+
+        # ============================================================
+        # Full Eq.(30) check
+        # ============================================================
+        
+        S = (
+            w_scal * np.abs(scal_l)**2
+            + w_wav * np.sum(np.abs(wav_jln)**2, axis=(0, 2))
+        )
+        r'''
+        # Plot directional weights |ζ_{ell,m}|² against m
+        ell_plot = max(
+            1,
+            N_directions - 1,
+        )
+
+        m_values = np.arange(
+            -ell_plot,
+            ell_plot + 1,
+        )
+
+        zeta_lm = s_elm[
+            ell_plot,
+            L - 1 + m_values,
+        ]
+
+        plt.figure(
+            figsize=(7, 4)
+        )
+
+        plt.stem(
+            m_values,
+            np.abs(zeta_lm)**2,
+            basefmt=" ",
+        )
+
+        plt.xlabel(r"$m$")
+        plt.ylabel(
+            r"$|\zeta_{\ell m}|^2$"
+        )
+
+        plt.title(
+            rf"Directional weights: "
+            rf"$N={N_directions}$, "
+            rf"$\ell={ell_plot}$"
+        )
+
+        plt.xticks(m_values)
+        plt.grid(alpha=0.3)
         plt.tight_layout()
         plt.show()
 
-        # (optional) zoom near bandlimit, but still auto with L
-        k = min(50, L)  # show last k multipoles
-        plt.figure(figsize=(7,4))
-        plt.plot(ells[-k:], S[-k:], marker="o", markersize=3, linewidth=1)
-        plt.axhline(1.0, linestyle="--")
+        # Plot full directional admissibility against ell
+        plt.figure(
+            figsize=(7, 4)
+        )
+
+        plt.plot(
+            ells,
+            S,
+        )
+
+        plt.axhline(
+            1.0,
+            color="black",
+            linestyle="--",
+        )
+
         plt.xlabel(r"$\ell$")
-        plt.ylabel(r"$S(\ell)$")
-        plt.title(f"Admissibility tail (last {k} ells), L={L}")
-        plt.grid(alpha=0.4)
+        plt.ylabel(r"$S_\ell$")
+
+        plt.title(
+            "Directional admissibility"
+        )
+
+        plt.grid(alpha=0.5)
         plt.tight_layout()
         plt.show()
         '''
-        
-        # ---- pack into s2wav expected n-grid: (J, L, 2L-1), n=0 at mid ----
-        M = 2 * L - 1
-        mid = L - 1
-    
-        wav_jln = np.zeros((len(js), L, M), dtype=np.complex128)
-        wav_jln[:, :, mid] = kappa_jl.astype(np.complex128)
-    
         return jnp.array(wav_jln), jnp.array(scal_l.astype(np.complex128))
-    
