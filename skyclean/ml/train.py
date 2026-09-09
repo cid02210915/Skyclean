@@ -211,7 +211,8 @@ class Train:
                                   realisations=realisations, lmax=lmax, N_directions=N_directions, lam=lam,
                                   nsamp=nsamp, constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps,
                                   batch_size=batch_size, split=split, directory=directory,
-                                  random=random_generator, prefetch=prefetch)
+                                  random=random_generator, prefetch=prefetch,
+                                  produce_residuals=False, run_id=self.run_id)
 
         files = FileTemplates(directory)
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
@@ -993,7 +994,8 @@ def main():
     )
 
     trainer.save_run_config(vars(args))
-    trainer.execute_training_procedure()
+    trainer.dataset.produce_residuals()  # data-preparation step; skips maps that already exist
+    trainer.execute_training_procedure()  # training step
 
 
 if __name__ == '__main__':

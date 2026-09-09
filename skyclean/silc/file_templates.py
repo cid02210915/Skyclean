@@ -308,6 +308,9 @@ class FileTemplates():
         "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
         "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
         "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        # train-split normalisation statistics (signed-log mean/std of F and R), fitted once by CMBFreeILC.find_dataset_mean_std;
+        # stored in the model run folder ML/models/<run_id>/ next to the checkpoints they belong to
+        "ml_norm_stats":      os.path.join(self.output_directories["ml_models"], "{run_id}", "norm_stats_{component}_f{frequencies}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}_ntrain{n_train}.npz"),
         # ML test maps (randomly generated) for memory check
         "test_foreground_estimate": os.path.join(self.output_directories["ml_test_maps"], "test_foreground_estimate_r{realisation:04d}_lmax{lmax}_N{N_directions}.npy"),
         "test_ilc_residual":       os.path.join(self.output_directories["ml_test_maps"], "test_ilc_residual_r{realisation:04d}_lmax{lmax}_N{N_directions}.npy"),

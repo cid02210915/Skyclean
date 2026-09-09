@@ -11,7 +11,10 @@ jax.config.update("jax_enable_x64", False)
 jax.config.update("jax_default_matmul_precision", "float32")
 
 print("CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
-print("JAX GPUs =", jax.devices("gpu"))
+try:
+    print("JAX GPUs =", jax.devices("gpu"))
+except RuntimeError:
+    print("JAX GPUs = none (CPU only; sufficient for --mode prepare)")
 
 import time, re, argparse
 from pathlib import Path
@@ -25,6 +28,7 @@ tf.config.set_visible_devices([], "GPU")
 
 from skyclean.ml.train import Train, resolve_checkpoint_target
 from skyclean.ml.inference import Inference
+from skyclean.ml.data import CMBFreeILC
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
 from skyclean.silc.utils import ilc_mode_tag
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
@@ -55,17 +59,43 @@ def resolve_evaluate_target(args) -> str:
     return run_dir
 
 
+PIPELINE_STEPS = ("prepare", "train", "evaluate", "apply")
+
+
+def parse_mode(mode: str) -> list[str]:
+    """Helper function to parse the --mode argument, ensures that the specified steps are valid and returns them in execution order.
+    Split a '+'-joined --mode string into pipeline steps, returned in execution order.
+    """
+    tokens = [t.strip().lower() for t in str(mode).split("+") if t.strip()]
+    if not tokens:
+        raise ValueError("--mode cannot be empty.")
+    unknown = [t for t in tokens if t not in PIPELINE_STEPS]
+    if unknown:
+        raise ValueError(
+            f"Unknown step(s) in --mode: {unknown}. Choose from {list(PIPELINE_STEPS)}, joined with '+'."
+        )
+    if len(set(tokens)) != len(tokens):
+        raise ValueError(f"--mode lists a step more than once: {mode!r}")
+    return [step for step in PIPELINE_STEPS if step in tokens]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Pipeline (train + evaluate) for Skyclean ML."
+        description="Pipeline (prepare + train + evaluate + apply) for Skyclean ML."
     )
 
     parser.add_argument(
         "--mode",
         type=str,
         default="train",
-        choices=["train", "evaluate", "train+evaluate"],
-        help="Which stages to run."
+        metavar="STEP[+STEP...]",
+        help="Which steps to run, joined with '+', from: "
+             "'prepare' (data-preparation step: generate the model input/target maps from the SILC outputs), "
+             "'train' (training step; reuses prepared maps if present, otherwise generates them first), "
+             "'evaluate' (predict and score the held-out test split), "
+             "'apply' (apply the trained model to the observed Planck sky; needs the SILC run with "
+             "--components real --wavelet-components real). "
+             "E.g. prepare, train, evaluate, apply, prepare+train, train+evaluate, prepare+train+evaluate. Default: train."
     )
 
     # ----- match Train signature -----
@@ -166,12 +196,48 @@ def parse_args():
     parser.set_defaults(prefetch=False)
     parser.set_defaults(random=False)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        parse_mode(args.mode)
+    except ValueError as e:
+        parser.error(str(e))
+    return args
+
+
+def step_prepare_data(args) -> None:
+    """
+    Data-preparation step: generate the model input and target.
+    maps for every realisation from the SILC outputs, or random test maps with --random.
+    Existing maps are kept. Runs on CPU; no model or run directory is created.
+    """
+    dataset = CMBFreeILC(
+        extract_comp=args.extract_comp,
+        component=args.component,
+        frequencies=args.frequencies,
+        realisations=args.realisations,
+        lmax=args.lmax,
+        N_directions=args.N_directions,
+        lam=args.lam,
+        nsamp=args.nsamp,
+        constraint=args.constraint,
+        pcilc=args.pcilc,
+        pcilc_eps=args.pcilc_eps,
+        batch_size=args.batch_size,
+        split=args.split,
+        directory=args.directory,
+        random=args.random,
+        prefetch=args.prefetch,
+        produce_residuals=False,
+    )
+    dataset.produce_residuals()
+    print(f"[Prepare] Input/target maps ready for {args.realisations} realisations.")
+    if not args.random and dataset.load_normalization_stats() is None:
+        dataset.find_dataset_mean_std()  # fits on the train split and saves norm_stats_*.npz
 
 
 def step_train(args) -> str:
     """
-    Train model and return the resolved model_dir where checkpoints were saved.
+    Training step: train the model and return the resolved model_dir where checkpoints were saved.
     """
     trainer = Train(
         extract_comp=args.extract_comp,
@@ -207,7 +273,8 @@ def step_train(args) -> str:
     cfg_path = trainer.save_run_config(vars(args))
     print(f"[train] run_id={trainer.run_id}")
     print(f"[train] config saved: {cfg_path}")
-    trainer.execute_training_procedure()
+    trainer.dataset.produce_residuals()  # data-preparation step; skips maps that already exist
+    trainer.execute_training_procedure()  # training step
     return trainer.model_dir
 
 
@@ -591,6 +658,50 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     return test_ids
 
 
+def step_apply(args, ckpt_dir: str | None = None) -> str:
+    """
+    Apply the trained model to the observed Planck sky (Inference.predict_and_visualise_real_sky): saves the
+    cleaned CMB map (MW .npy + HEALPix .fits), the ILC / improved / difference map figure and the TT spectra of the
+    processed real, ILC and improved maps under <directory>/ML/cmb_prediction/<run_id>/ilc_improved_maps/checkpoint_<epoch>/.
+    Needs the SILC pipeline run with --components real --wavelet-components real (same lmax/N/lam/nsamp).
+    Returns the .npy path.
+    """
+    inference = Inference(
+        extract_comp=args.extract_comp,
+        component=args.component,
+        frequencies=args.frequencies,
+        realisations=args.realisations,
+        lmax=args.lmax,
+        N_directions=args.N_directions,
+        lam=args.lam,
+        nsamp=args.nsamp,
+        constraint=args.constraint,
+        pcilc=args.pcilc,
+        pcilc_eps=args.pcilc_eps,
+        chs=args.chs,
+        filter_type=args.filter_type,
+        directory=args.directory,
+        seed=args.seed,
+        model_path=ckpt_dir,  # points directly to checkpoint_<epoch>
+        rn=args.realisations,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        momentum=args.momentum,
+        run_id=args.run_id,
+    )
+    model = inference.load_model(force_load=True)
+    if not model:
+        raise RuntimeError("[Apply] Model failed to load (load_model returned falsy).")
+
+    # The observed sky has no realisations; SILC still tags its from-real outputs with r0000
+    # (its --start-realisation, assumed 0), so that index is used to locate the ilc_synth file.
+    print("[Apply] Predicting the observed Planck sky...")
+    real = inference.predict_and_visualise_real_sky(realisation=0)
+    print(f"[Apply] Outputs saved under: {os.path.dirname(real['save_path'])}")
+    return real["save_path"]
+
+
 def resolve_checkpoint_dir(args, model_dir: str) -> str:
     ckpt_dir, _, _ = resolve_checkpoint_target(model_dir, epoch=args.checkpoint_epoch)
     return str(ckpt_dir)
@@ -602,39 +713,48 @@ def main():
     print(f"JAX 64-bit mode: {jax.config.jax_enable_x64}")
 
     args = parse_args()
-    if args.resume_training and args.mode not in {"train", "train+evaluate"}:
+    steps = parse_mode(args.mode)
+    if args.resume_training and "train" not in steps:
         raise ValueError(
-            "--resume-training is only valid when --mode is 'train' or 'train+evaluate'."
+            "--resume-training is only valid when --mode includes 'train'."
         )
-    if args.mode == "evaluate" and not args.run_id.strip() and not args.model_dir.strip():
+    needs_model = [s for s in ("evaluate", "apply") if s in steps]
+    if needs_model and "train" not in steps and not args.run_id.strip() and not args.model_dir.strip():
         raise ValueError(
-            "Evaluate mode requires either --run-id or --model-dir."
+            f"{'/'.join(needs_model)} mode requires either --run-id or --model-dir."
         )
 
     model_dir_from_train = None
 
-    if args.mode == "train":
+    if "prepare" in steps:
+        print("[Prepare] Starting data preparation...")
+        step_prepare_data(args)
+        print("[Prepare] Done.")
+
+    if "train" in steps:
         print("[Train] Starting training...")
         model_dir_from_train = step_train(args)
-        print(f"[Train] Done.")
+        print("[Train] Done.")
 
-    if args.mode == "train+evaluate":
-        print("[Train] Starting training...")
-        model_dir_from_train = step_train(args)
-        print(f"[Train] Done.")
+    if "evaluate" in steps:
         print("[Evaluate] Starting evaluation...")
-        ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
-        step_evaluate(args, ckpt_dir=ckpt_dir)
-        print("[Evaluate] Done.")
-
-    if args.mode == "evaluate":
-        print("[Evaluate] Starting evaluation...")
-        model_dir_from_train = resolve_evaluate_target(args)
-        print(f"Model directory: {model_dir_from_train}")
+        if model_dir_from_train is None:
+            model_dir_from_train = resolve_evaluate_target(args)
+            print(f"Model directory: {model_dir_from_train}")
         ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
         print(f'Loaded model from: {ckpt_dir}')
         step_evaluate(args, ckpt_dir=ckpt_dir)
         print("[Evaluate] Done.")
+
+    if "apply" in steps:
+        print("[Apply] Applying the trained model to the observed Planck sky...")
+        if model_dir_from_train is None:
+            model_dir_from_train = resolve_evaluate_target(args)
+            print(f"Model directory: {model_dir_from_train}")
+        ckpt_dir = resolve_checkpoint_dir(args, model_dir_from_train)
+        print(f'Loaded model from: {ckpt_dir}')
+        step_apply(args, ckpt_dir=ckpt_dir)
+        print("[Apply] Done.")
 
     elapsed_seconds = time.perf_counter() - start_time
     elapsed_minutes = elapsed_seconds / 60.0
@@ -646,29 +766,61 @@ if __name__ == "__main__":
 
 
 ''' example usage
-030 044 070 100 143 217 353 545 857
+
+# Steps (join with '+'):
+#   prepare  = data-preparation step: generate model input/target maps from the SILC outputs (CPU)
+#   train    = training step (GPU): reuses prepared maps/stats if they exist, otherwise generates them first
+#   evaluate = predict and score the held-out test split
+#   apply    = apply the trained model to the observed Planck sky (SILC run with --components real --wavelet-components real)
+# CPU-only preparation (e.g. while the GPU is busy): JAX_PLATFORMS=cpu python3 -m skyclean.ml.pipeline_ml --mode prepare ...
 
 python3 -m skyclean.ml.pipeline_ml \
-  --mode train+evaluate \
+  --mode prepare+train \
   --extract-comp cmb \
   --component cfn \
-  --frequencies 030 044 070 \
+  --frequencies 030 044 070 100 143 217 353 545 857 \
   --chs 1 16 16 32 64 \
-  --realisations 100 \
+  --realisations 20 \
   --lmax 511 \
   --N-directions 4 \
   --lam 2.0 \
   --nsamp 1200 \
-  --batch-size 10 \
-  --epochs 300 \
-  --split 0.9 0.05 0.05 \
+  --batch-size 2 \
+  --epochs 100 \
+  --split 0.8 0.1 0.1 \
   --learning-rate 1e-3 \
   --momentum 0.90 \
-  --eval-every 5 \
+  --eval-every 1 \
   --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \
   --seed 42 \
   --early-stopping-min-delta 1e-4 \
-  --run-id CFN_lmax511_N4_r100
+  --run-id CFN_lmax511_N4_r20
 
   --resume-training \
+
+# Apply a trained run to the real Planck sky:
+python3 -m skyclean.ml.pipeline_ml \
+  --mode apply \
+  --run-id CFN_lmax511_N4_r300 \
+  --component cfn \
+  --frequencies 030 044 070 100 143 217 353 545 857 \
+  --chs 1 16 16 32 64 \
+  --realisations 300 \
+  --lmax 511 \
+  --N-directions 4 \
+  --lam 2.0 \
+  --nsamp 1200 \
+  --batch-size 2 \
+  --epochs 100 \
+  --split 0.8 0.1 0.1 \
+  --learning-rate 1e-3 \
+  --momentum 0.90 \
+  --directory /Scratch/cindy/testing/Skyclean/skyclean/data/
+
+# --checkpoint-epoch = optional; default: latest checkpoint in the run folder
+# The SILC real run is assumed to use --start-realisation 0 (its outputs are tagged r0000).
+# Outputs: <directory>/ML/cmb_prediction/<run-id>/ilc_improved_maps/checkpoint_<epoch>/
+#   ilc_cmb_from-real_improved_..._ckpt<epoch>.npy   cleaned CMB map (MW sampling)
+#   ..._ckpt<epoch>_maps.png                         ILC / improved / difference mollviews
+#   ..._ckpt<epoch>_spectra.png / .npz               TT spectra: processed real (per freq), ILC, improved
 '''

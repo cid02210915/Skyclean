@@ -23,7 +23,8 @@ class CMBFreeILC():
                  nsamp: int = 1200, constraint: bool = False,
                  pcilc: bool = False, pcilc_eps: float | None = None, 
                  batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False,
-                 prefetch: bool = False):
+                 prefetch: bool = False, produce_residuals: bool = True, stats_component: str | None = None,
+                 run_id: str | None = None):
         """
         Parameters:
             extract_comp (str): Component to be extracted. e.g. "cmb"
@@ -40,6 +41,13 @@ class CMBFreeILC():
             directory (str): Directory where data is stored / saved to.
             random (bool): Whether to create random maps for testing purposes. True/False.
             prefetch (bool): Whether to enable tf.data prefetch on the batched datasets.
+            produce_residuals (bool): Whether to create the input/target maps for every realisation on construction.
+                Pass False to run produce_residuals() explicitly later (the data-preparation step); Train does this.
+            stats_component (str): Component whose train-split normalization statistics are applied. Defaults to
+                component. A real-map instance (component="real") must pass the simulation product the model was
+                trained on (e.g. "cfn") with the same realisations/split: statistics are never fitted on the real sky.
+            run_id (str): Model run folder under ML/models where the normalization statistics are saved to / loaded
+                from (next to the checkpoints). Required to save or load the statistics.
         """ 
         self.frequencies = frequencies
         self.n_channels_in = len(frequencies)
@@ -51,6 +59,8 @@ class CMBFreeILC():
         self.split = self._normalize_split(split)
         self.directory = directory
         self.component = component
+        self.stats_component = stats_component or component
+        self.run_id = (run_id or "").strip()
         self.extract_comp = extract_comp
         self.nsamp = nsamp
         self.random = random
@@ -70,7 +80,8 @@ class CMBFreeILC():
         # data shapes
         self.H = lmax + 2
         self.W = 2 * (lmax + 1) # for MWSS sampling
-        self.produce_residuals()  # Create residual maps for all realisations
+        if produce_residuals:
+            self.produce_residuals()  # Create residual maps for all realisations
         #self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
 
     def _split_indices(self):
@@ -119,11 +130,15 @@ class CMBFreeILC():
         return test_foreground_estimate, test_ilc_residual
         
     
-    def create_residual_mwss_maps(self, realisation: int): 
+    def create_residual_mwss_maps(self, realisation: int, component: str | None = None): 
         """For a single realisation, create the ILC residual maps (CMB free) in MWSS sampling format. 
 
         Parameters:
             realisation (int): The realisation number to process.
+            component (str): Input map product to read instead of self.component. Use "real" to build the
+                model input from the observed Planck sky (processed_real maps + ilc_synth from-real): there is
+                no truth CMB, so ilc_residual is returned as None and the normalisation still comes from
+                self.component (the simulations the model was trained on).
 
         Returns:
             foreground_estimate (np.ndarray): F(i) = CFN(i) - ILC where i is the frequency component (hence have N_freq input channels) of shape (H, W, N_freq)
@@ -132,52 +147,60 @@ class CMBFreeILC():
         """
         H, W, lmax, lam = self.H, self.W, self.lmax, self.lam
         L = lmax + 1
-        extract_comp, component, nsamp, mode = self.extract_comp, self.component, self.nsamp, self.mode
+        extract_comp, nsamp, mode = self.extract_comp, self.nsamp, self.mode
+        component = component or self.component
+        has_truth = component != "real"  # the observed sky has no processed_cmb, so no ILC - CMB residual
         frequencies = '_'.join(self.frequencies)
-        if os.path.exists(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode)) and os.path.exists(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode)):
+        if os.path.exists(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode)) and (not has_truth or os.path.exists(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))):
             foreground_estimate = np.load(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))
-            ilc_residual = np.load(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))
+            ilc_residual = np.load(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode)) if has_truth else None
             ilc_map_mwss = np.load(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))
         else:
             print(f"Creating residual maps for realisation {realisation}...")
             # load ilc (already in MW sampling)
-            ilc_synth_path = self._resolve_ilc_synth_path(realisation, frequencies, lam)
+            ilc_synth_path = self._resolve_ilc_synth_path(realisation, frequencies, lam, component=component)
             ilc_map_mw = np.load(ilc_synth_path)
             ilc_map_mwss = SamplingConverters.mw_map_2_mwss_map(ilc_map_mw, L=L)
-            # load cmb and convert to MW sampling
-            cmb_map_hp = hp.read_map(self.file_templates["processed_cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
-            cmb_map_mw = SamplingConverters.hp_map_2_mw_map(cmb_map_hp, lmax) # highly expensive? involves s2fft.forwards.
-            cmb_map_mwss = SamplingConverters.mw_map_2_mwss_map(cmb_map_mw, L=L)
+            # load cmb and convert to MW sampling (simulations only)
+            if has_truth:
+                cmb_map_hp = hp.read_map(self.file_templates["processed_cmb"].format(realisation=realisation, lmax=lmax), dtype=np.float32)
+                cmb_map_mw = SamplingConverters.hp_map_2_mw_map(cmb_map_hp, lmax) # highly expensive? involves s2fft.forwards.
+                cmb_map_mwss = SamplingConverters.mw_map_2_mwss_map(cmb_map_mw, L=L)
             # load cfn maps across frequencies and convert to MW sampling
-            cfn_maps_hp = [hp.read_map(self.file_templates[component].format(frequency=frequency, realisation=realisation, lmax=lmax), dtype=np.float32) for frequency in self.frequencies]
+            # ("real" reads the processed_real maps, which have the same beam/unit treatment as a simulated CFN)
+            input_key = "processed_real" if component == "real" else component
+            cfn_maps_hp = [hp.read_map(self.file_templates[input_key].format(frequency=frequency, realisation=realisation, lmax=lmax), dtype=np.float32) for frequency in self.frequencies]
             cfn_maps_mw = [SamplingConverters.hp_map_2_mw_map(cfn_map_hp, lmax) for cfn_map_hp in cfn_maps_hp]
             cfn_maps_mwss = [SamplingConverters.mw_map_2_mwss_map(cfn_map_mw, L=L) for cfn_map_mw in cfn_maps_mw]
             # create foreground estimate and ilc residual
             foreground_estimate = np.zeros((H, W, self.n_channels_in), dtype=np.float32)
-            ilc_residual = np.zeros((H, W, 1), dtype=np.float32)
+            ilc_residual = np.zeros((H, W, 1), dtype=np.float32) if has_truth else None
             for i, _ in enumerate(self.frequencies):
                 foreground_estimate[:, :, i] = cfn_maps_mwss[i] - ilc_map_mwss
-                ilc_residual[:, :, 0] = ilc_map_mwss - cmb_map_mwss
+                if has_truth:
+                    ilc_residual[:, :, 0] = ilc_map_mwss - cmb_map_mwss
             # save the maps
             np.save(self.file_templates["ilc_mwss"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode), ilc_map_mwss)
             np.save(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode), foreground_estimate)
-            np.save(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode), ilc_residual)
+            if has_truth:
+                np.save(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode), ilc_residual)
         return foreground_estimate, ilc_residual, ilc_map_mwss
 
-    def _resolve_ilc_synth_path(self, realisation: int, frequencies: str, lam: float):
+    def _resolve_ilc_synth_path(self, realisation: int, frequencies: str, lam: float, component: str | None = None):
         """Locate the SILC ilc_synth map, tolerating the legacy 'uncon'/'con' mode tag.
 
         Parameters:
             realisation (int): The realisation number.
             frequencies (str): Underscore-joined frequency tag.
             lam (float): The lambda parameter for the wavelet transform.
+            component (str): Input product tag in the ilc_synth filename; defaults to self.component.
 
         Returns:
             str: Path to an existing ilc_synth file.
         """
         candidates = [
             self.file_templates["ilc_synth"].format(
-                extract_comp=self.extract_comp, mode=mode_try, component=self.component,
+                extract_comp=self.extract_comp, mode=mode_try, component=component or self.component,
                 frequencies=frequencies, realisation=realisation, lmax=self.lmax,
                 N_directions=self.N_directions, lam=lam, nsamp=self.nsamp,
             )
@@ -206,8 +229,11 @@ class CMBFreeILC():
             tf.Tensor: Transformed and normalized tensor.
         """
         if not hasattr(self, "_cached_stats"):
-            train_idx, _, _ = self._split_indices()
-            self._cached_stats = self.find_dataset_mean_std(indices=train_idx)
+            stats = self.load_normalization_stats()
+            if stats is None:
+                train_idx, _, _ = self._split_indices()
+                stats = self.find_dataset_mean_std(indices=train_idx)
+            self._cached_stats = stats
         (self.signed_log_F_mean,
          self.signed_log_R_mean,
          self.signed_log_F_std,
@@ -336,7 +362,8 @@ class CMBFreeILC():
 
         # Freeze normalization on the training split only, then reuse it for all splits.
         if not random:
-            self._cached_stats = self.find_dataset_mean_std(indices=train_idx)
+            stats = self.load_normalization_stats()
+            self._cached_stats = stats if stats is not None else self.find_dataset_mean_std(indices=train_idx)
 
         # TODO: k-fold cross-validation is better.
         train_ds = self._make_dataset(train_idx, random, drop_remainder=True)
@@ -362,6 +389,12 @@ class CMBFreeILC():
             F_mean, F_std (np.ndarray) have shape (num_channels,).
             R_mean, R_std (np.ndarray) have shape (1,).
         """
+        if self.component == "real":
+            raise ValueError(
+                "Normalization statistics must be fitted on the simulations the model was trained on, not on the "
+                "observed sky. Construct CMBFreeILC(component='real', stats_component='cfn', ...) with the training "
+                "realisations/split and prepare the statistics on the 'cfn' instance first."
+            )
         if indices is None:
             if hasattr(self, "_cached_stats"):
                 return self._cached_stats
@@ -395,7 +428,62 @@ class CMBFreeILC():
         stats = (signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std)
         if np.array_equal(indices, self._split_indices()[0]):
             self._cached_stats = stats
+            print(f"Saved normalization statistics to: {self.save_normalization_stats(stats, indices)}")
         return stats
+
+    def normalization_stats_path(self) -> str:
+        """Path of the train-split normalization statistics of stats_component for this data configuration,
+        under the model run folder ML/models/<run_id>/."""
+        if not self.run_id:
+            raise ValueError("run_id is required to locate the normalization statistics (ML/models/<run_id>/norm_stats_*.npz).")
+        n_train = len(self._split_indices()[0])
+        return self.file_templates["ml_norm_stats"].format(run_id=self.run_id, component=self.stats_component, frequencies='_'.join(self.frequencies), lmax=self.lmax, N_directions=self.N_directions, lam=self.lam, nsamp=self.nsamp, mode=self.mode, n_train=n_train)
+
+    def save_normalization_stats(self, stats, train_idx) -> str:
+        """Persist (F_mean, R_mean, F_std, R_std) with the training indices they were fitted on. Returns the path."""
+        signed_log_F_mean, signed_log_R_mean, signed_log_F_std, signed_log_R_std = stats
+        path = self.normalization_stats_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        np.savez(path, signed_log_F_mean=np.asarray(signed_log_F_mean, dtype=np.float64), signed_log_R_mean=np.asarray(signed_log_R_mean, dtype=np.float64),
+                 signed_log_F_std=np.asarray(signed_log_F_std, dtype=np.float64), signed_log_R_std=np.asarray(signed_log_R_std, dtype=np.float64),
+                 train_indices=np.asarray(train_idx, dtype=int), a=np.float64(self.a))
+        return path
+
+    def load_normalization_stats(self):
+        """Load the persisted train-split statistics of stats_component, or None if they have not been fitted yet."""
+        path = self.normalization_stats_path()
+        if not os.path.exists(path):
+            return None
+        with np.load(path) as f:
+            return (f["signed_log_F_mean"], f["signed_log_R_mean"], f["signed_log_F_std"], f["signed_log_R_std"])
+
+    def missing_residual_realisations(self) -> list:
+        """Realisation IDs whose input/target maps are not on disk yet. Empty for a real-map instance: the single
+        observed sky is checked when it is read (create_residual_mwss_maps with component='real')."""
+        if self.component == "real":
+            return []
+        lmax, lam, nsamp, mode, component = self.lmax, self.lam, self.nsamp, self.mode, self.component
+        frequencies = '_'.join(self.frequencies)
+        missing = []
+        for realisation in range(self.realisations):
+            if self.random:
+                exists = os.path.exists(self.file_templates["test_foreground_estimate"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions)) and os.path.exists(self.file_templates["test_ilc_residual"].format(realisation=realisation, lmax=lmax, N_directions=self.N_directions))
+            else:
+                exists = os.path.exists(self.file_templates["foreground_estimate"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode)) and os.path.exists(self.file_templates["ilc_residual"].format(component=component, frequencies=frequencies, realisation=realisation, lmax=lmax, N_directions=self.N_directions, lam=lam, nsamp=nsamp, mode=mode))
+            if not exists:
+                missing.append(realisation)
+        return missing
+
+    def unprepared_reasons(self) -> list:
+        """Why the inputs are not ready (empty once the maps exist and the statistics of stats_component are saved)."""
+        reasons = []
+        missing = self.missing_residual_realisations()
+        if missing:
+            reasons.append(f"{len(missing)} of {self.realisations} realisations have no cached input/target maps (first missing: realisation {missing[0]})")
+        if not self.random and self.load_normalization_stats() is None:
+            reasons.append(f"no normalization statistics for '{self.stats_component}' at {self.normalization_stats_path()}"
+                           + (" (fit them on the simulation instance first)" if self.component == "real" else ""))
+        return reasons
     
 
     def load_mask_hp(self,fsky=0.7, apodization=2) -> np.ndarray:

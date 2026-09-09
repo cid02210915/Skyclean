@@ -10,6 +10,7 @@ import os
 import re
 import matplotlib.pyplot as plt
 import numpy as np
+import healpy as hp
 import jax
 import jax.numpy as jnp
 from flax import nnx, serialization
@@ -21,6 +22,8 @@ from .data import CMBFreeILC
 from .train import resolve_checkpoint_target, resolve_filter_type
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
 from skyclean.silc import SamplingConverters
+from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumTT
+import s2fft
 
 
 class Inference:
@@ -81,7 +84,8 @@ class Inference:
             pcilc_eps=self.pcilc_eps,
             lam=self.lam,
             batch_size=1,
-            directory=self.directory
+            directory=self.directory,
+            run_id=self.run_id,
         )
 
     def load_model(self, force_load=False):
@@ -176,15 +180,19 @@ class Inference:
         result['message'] = "Basic checkpoint path checks passed."
         return result
 
-    def predict_cmb(self, realisation, save_result=True, masked=False):
-        """Predict CMB for a specific realisation."""
+    def predict_cmb(self, realisation, save_result=True, masked=False, component=None):
+        """Predict CMB for a specific realisation.
+
+        component="real" applies the model to the observed Planck sky (SILC run with --components real);
+        realisation is then the SILC --start-realisation index used in the ilc_synth filename.
+        """
         if self.model is None:
             print("Loading model...")
             self.model = self.load_model()
             print("Loaded model.")
 
-        print(f"Predicting CMB for realisation {realisation}...")
-        outputs = self._predict_realisation_outputs(realisation)
+        print(f"Predicting CMB for realisation {realisation}{' (observed sky)' if component == 'real' else ''}...")
+        outputs = self._predict_realisation_outputs(realisation, component=component)
         cmb_mw = outputs["cmb_mw"]
 
         if save_result:
@@ -193,7 +201,7 @@ class Inference:
                 cmb_mw *= mask_mw
                 self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw)
             else:
-                self._save_cmb_prediction(cmb_mw, realisation)
+                self._save_cmb_prediction(cmb_mw, realisation, component=component)
 
         #print(f"CMB prediction completed for realisation {realisation}.")
         #print(f"Prediction shape: {cmb_mw.shape}")
@@ -201,14 +209,14 @@ class Inference:
 
         return cmb_mw
 
-    def _predict_realisation_outputs(self, realisation):
-        """Run a single forward pass and return prediction artefacts."""
+    def _predict_realisation_outputs(self, realisation, component=None):
+        """Run a single forward pass and return prediction artefacts ("residual" is None for component="real")."""
         if self.model is None:
             print("Loading model...")
             self.model = self.load_model()
             print("Loaded model.")
 
-        F, R, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation)
+        F, R, ilc_mwss = self.data_handler.create_residual_mwss_maps(realisation, component=component)
         F_norm = self.data_handler.transform(F).astype(np.float32)
         F_norm = jnp.expand_dims(F_norm, axis=0)
 
@@ -216,9 +224,9 @@ class Inference:
         R_pred = self.data_handler.inverse_transform(R_pred_norm)
         R_pred = jnp.squeeze(R_pred, axis=(0, 3))
 
-        residual = np.asarray(R)
+        residual = None if R is None else np.asarray(R)
         ilc_mwss = np.asarray(ilc_mwss)
-        if residual.ndim == 3 and residual.shape[-1] == 1:
+        if residual is not None and residual.ndim == 3 and residual.shape[-1] == 1:
             residual = residual[..., 0]
         if ilc_mwss.ndim == 3 and ilc_mwss.shape[-1] == 1:
             ilc_mwss = ilc_mwss[..., 0]
@@ -242,6 +250,83 @@ class Inference:
         print(f"[Inference] Saved test-set predictions to: "
               f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id, 'ilc_improved_maps')}")
         return outputs
+
+    def predict_and_visualise_real_sky(self, realisation: int = 0) -> dict:
+        """
+        Apply the model to the observed Planck sky, save the cleaned CMB map and its diagnostics.
+
+        Needs the SILC pipeline run with --components real --wavelet-components real (same lmax/N/lam/nsamp);
+        `realisation` is the SILC --start-realisation index in the from-real ilc_synth filename (default 0).
+        Normalisation statistics come from the simulations the model was trained on (self.component).
+
+        Saves, next to the prediction under ML/cmb_prediction/<run_id>/ilc_improved_maps/checkpoint_<epoch>/:
+          <stem>.npy                  : cleaned CMB map (MW sampling)
+          <stem>_maps.png             : mollviews of ILC, improved and their difference (the predicted
+                                        foreground residual, expected to look like dust/tSZ, not CMB)
+          <stem>_spectra.png / .npz   : TT D_ell of the processed_real input map at every frequency, the ILC and
+                                        the improved map (all carry the same common 5' beam, so they are directly
+                                        comparable; PowerSpectrumTT.plot_Dl_series)
+        Full sky (no mask).
+        Returns a dict with the maps, spectra and output paths.
+        """
+        lmax = self.lmax
+        L = lmax + 1
+        outputs = self._predict_realisation_outputs(realisation, component="real")
+        cmb_mw = np.asarray(outputs["cmb_mw"], dtype=np.float64)
+        ilc_mw = np.asarray(SamplingConverters.mwss_map_2_mw_map(outputs["ilc_mwss"], L=L), dtype=np.float64)
+        resid_mw = ilc_mw - cmb_mw  # predicted foreground residual removed from the ILC map
+
+        save_path = self._save_cmb_prediction(cmb_mw, realisation, component="real")
+        if save_path is None:
+            raise RuntimeError("[Inference] Failed to save the observed-sky CMB prediction.")
+        stem = os.path.splitext(save_path)[0]
+
+        # ---- maps ----
+        panels = [("ILC", ilc_mw), ("Improved (ML)", cmb_mw), ("ILC - improved (predicted residual)", resid_mw)]
+        fig = plt.figure(figsize=(18, 4.5))
+        for i, (title, m_mw) in enumerate(panels, start=1):
+            m_hp = SamplingConverters.mw_map_2_hp_map(m_mw, lmax=lmax) * 1e6
+            lim = 300.0 if i < 3 else float(np.percentile(np.abs(m_hp), 99))
+            hp.mollview(m_hp, sub=(1, 3, i), title=f"{title} [observed sky]", unit=r"$\mu$K",
+                        min=-lim, max=lim, fig=fig.number)
+        maps_png = stem + "_maps.png"
+        plt.savefig(maps_png, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[Inference] Saved maps figure to: {maps_png}")
+
+        # ---- spectra ----
+        alm_ilc = np.asarray(s2fft.forward(np.ascontiguousarray(ilc_mw), L=L))
+        alm_imp = np.asarray(s2fft.forward(np.ascontiguousarray(cmb_mw), L=L))
+        ell, cl_ilc = PowerSpectrumTT.from_mw_alm(alm_ilc)
+        _, cl_imp = PowerSpectrumTT.from_mw_alm(alm_imp)
+        Dl_ilc = PowerSpectrumTT.cl_to_Dl(ell, cl_ilc, input_unit="K")
+        Dl_imp = PowerSpectrumTT.cl_to_Dl(ell, cl_imp, input_unit="K")
+        # processed_real input maps (HEALPix, native beam -> common 5' beam, same as the ILC / improved maps)
+        conv = MapAlmConverter(self.file_templates.file_templates)
+        Dl_proc = np.zeros((len(self.frequencies), L))
+        curves = []
+        for i, frequency in enumerate(self.frequencies):
+            out_proc = conv.to_alm(component="real", source="processed", frequency=frequency, lmax=lmax)
+            _, cl_proc = PowerSpectrumTT.from_healpy_alm(out_proc["alm"])
+            Dl_proc[i] = PowerSpectrumTT.cl_to_Dl(ell, cl_proc, input_unit="K")
+            curves.append((ell[2:], Dl_proc[i, 2:], f"processed real {frequency} GHz", "--"))
+        curves += [(ell[2:], Dl_ilc[2:], "ILC [observed sky]", "-"),
+                   (ell[2:], Dl_imp[2:], "Improved (ML) [observed sky]", "-")]
+        spectra_png = stem + "_spectra.png"
+        PowerSpectrumTT.plot_Dl_series(curves, show=False)
+        plt.yscale("log")  # full-sky processed maps are foreground dominated, ~10^2-10^3 x the ILC
+        plt.savefig(spectra_png, dpi=200)
+        plt.close("all")
+        spectra_npz = stem + "_spectra.npz"
+        np.savez(spectra_npz, ell=ell, Dl_ilc=Dl_ilc, Dl_improved=Dl_imp,
+                 Dl_processed_real=Dl_proc, frequencies=np.asarray(self.frequencies))
+        print(f"[Inference] Saved spectra to: {spectra_png} and {spectra_npz}")
+
+        return {
+            "cmb_mw": cmb_mw, "ilc_mw": ilc_mw, "residual_mw": resid_mw,
+            "ell": ell, "Dl_ilc": Dl_ilc, "Dl_improved": Dl_imp, "Dl_processed_real": Dl_proc,
+            "save_path": save_path, "maps_png": maps_png, "spectra_png": spectra_png,
+        }
 
     def compute_mse(self, comp, realisation, save_result=True, masked=False):
         """Compute pixel-space MSE for a single realisation."""
@@ -458,8 +543,8 @@ class Inference:
             double_max=True,
         )
 
-    def _save_cmb_prediction(self, cmb_prediction, realisation):
-        """Save CMB prediction using FileTemplates."""
+    def _save_cmb_prediction(self, cmb_prediction, realisation, component=None):
+        """Save CMB prediction using FileTemplates. Returns the saved path (None on failure)."""
         try:
             chs = "_".join(str(n) for n in self.chs)
 
@@ -481,7 +566,7 @@ class Inference:
                     mode=mode,
                     extract_comp=self.extract_comp,
                     frequencies=frequencies,
-                    component=self.component,
+                    component=component or self.component,
                     realisation=realisation,
                     lmax=self.lmax,
                     N_directions=self.N_directions,
@@ -504,9 +589,11 @@ class Inference:
             np.save(save_path, cmb_prediction)
 
             print(f"Saved CMB prediction to: {save_path}")
+            return save_path
 
         except Exception as e:
             print(f"Warning: Failed to save CMB prediction: {str(e)}")
+            return None
 
     def _save_masked_cmb_prediction(self, cmb_prediction, realisation, mask):
         """Save masked CMB prediction"""
@@ -627,6 +714,12 @@ def main():
     # ----- what to run -----
     parser.add_argument("--realisation", type=int, default=None,
                         help="Predict this single realisation. Omit to predict the whole test split.")
+    parser.add_argument("--real", action="store_true",
+                        help="Apply the model to the observed Planck sky instead of a simulation. Needs the SILC "
+                             "pipeline run with --components real --wavelet-components real (same lmax, N, lam, nsamp). "
+                             "--realisation is then the SILC --start-realisation index (default 0). "
+                             "Writes the MW .npy prediction, a HEALPix .fits copy, the map figure and the TT "
+                             "spectra (see Inference.predict_and_visualise_real_sky).")
     parser.add_argument("--masked", action="store_true",
                         help="Apply the Galactic mask to predictions and metrics.")
     parser.add_argument("--mse", action="store_true",
@@ -680,7 +773,12 @@ def main():
 
     inference.load_model(force_load=args.force_load)
 
-    if args.realisation is None:
+    if args.real:
+        realisation = 0 if args.realisation is None else args.realisation
+        print(f"\n2. Predicting the observed Planck sky (ilc_synth realisation index {realisation}):")
+        inference.predict_and_visualise_real_sky(realisation=realisation)
+        print("Prediction successful.")
+    elif args.realisation is None:
         print("\n2. Predicting the test split:")
         inference.predict_test_set(masked=args.masked)
     else:
