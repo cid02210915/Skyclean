@@ -617,19 +617,87 @@ class ProcessMaps():
         return hp_map_reduced
 
 
-    def produce_and_save_maps(self):
+    def process_real_map(self, frequency: str, realisation: int, save: bool = True) -> np.ndarray:
         """
-        Produce CFN maps across realisations and frequencies.
-        center_lon_deg (list): list for longitudgnal positions (in degree) of n features on a single frequency map. With shape = (n features,)
+        Process one observed Planck frequency map so that it matches the simulated CFN physics.
 
-        sed (list): list for spectral dependence factor for each features on a map across different channels. Shape = (n features, m frequenceis)
+        Simulated CFN = sum(sky components * 5' beam) + noise * (5' beam / native beam), because
+        the noise component is deconvolved with the instrument beam. The real map is
+        sky * native beam + noise, so applying (5' beam / native beam) to it gives the same form.
+        Steps: read raw map -> unit conversion (545/857 MJy/sr -> K_CMB) -> deconvolve native beam
+        (LFI Gaussian table, HFI beam FITS) -> convolve 5' beam -> reduce to the target NSIDE.
+
+        Parameters:
+            frequency (str): Frequency channel, e.g. '143'.
+            realisation (int): Only used for logging / template formatting (the real map has no realisation).
+            save (bool): If True, writes to file_templates['processed_real'].
 
         Returns:
-            None
+            np.ndarray: Processed HEALPix map at the target NSIDE.
+        """
+        desired_lmax = self.desired_lmax
+        nside = HPTools.get_nside_from_lmax(desired_lmax)
+        standard_fwhm_rad = np.radians(5 / 60)
+
+        output_path = self.file_templates["processed_real"].format(
+            frequency=frequency, realisation=realisation, lmax=desired_lmax
+        )
+        if os.path.exists(output_path) and self.overwrite is False:
+            try:
+                return read_map_with_known_order(output_path)
+            except (FileNotFoundError, OSError) as exc:
+                print(f"Processed real map '{output_path}' is invalid ({exc}). Regenerating from source map.")
+
+        # Raw Planck map
+        filepath = self.file_templates["real"].format(frequency=frequency, realisation=realisation)
+        hp_map = self._repair_and_read_map(filepath, comp="real", frequency=frequency, realisation=realisation)
+        # 545 / 857 MJy/sr -> K_CMB
+        hp_map = HPTools.unit_convert(hp_map, frequency)
+
+        # Native Planck beam
+        beam_path = None
+        if frequency not in {"030", "044", "070"}:
+            beam_path = self.templates.hfi_beam_path(frequency)
+
+        # Native beam -> common 5' beam and reduce to target lmax / NSIDE
+        hp_map_processed = HPTools.deconvolve_and_convolve_and_reduce(
+            hp_map,
+            lmax=desired_lmax,
+            nside=nside,
+            frequency=frequency,
+            standard_fwhm_rad=standard_fwhm_rad,
+            beam_path=beam_path,
+        )
+        if save:
+            save_map(output_path, hp_map_processed, self.overwrite)
+            print(f"Processed real map at {frequency} GHz saved to {output_path}")
+        return hp_map_processed
+
+    def produce_and_save_maps(self):
+        """
+        Prepare input maps for the wavelet step.
+
+        CFN  -> construct simulated CFN across realisations and frequencies
+        real -> process observed Planck frequency map
         """
         desired_lmax = self.desired_lmax
         frequencies = self.frequencies
         target_nside = HPTools.get_nside_from_lmax(desired_lmax)
+
+        # ==========================================
+        # process real Planck map
+        # ==========================================
+        if "real" in self.components or self.wavelet_components[0] == "real":
+            # Observed Planck maps: write only processed_real files, never a CFN sum.
+            # There is a single observed sky, so no realisation loop: one processed map per frequency.
+            print("Processing observed Planck maps (wavelet input key: 'real' -> processed_real files).")
+            for frequency in frequencies:
+                self.process_real_map(frequency, self.start_realisation, save=True)
+            return
+
+        # ==========================================
+        # process simulated CFN
+        # ==========================================
         output_key = "cfne_circ" if (
             'extra_feature' in self.components and self.ps_injection_mode == "circular_ps"
         ) else (
@@ -716,6 +784,7 @@ class ProcessMaps():
                     # hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz, realisation {realisation}")
                 hp.write_map(cfn_output_path, cfn_map, overwrite=True)
                 print(f"CFN map at {frequency} GHz for realisation {realisation} saved to {cfn_output_path}")
+            # Below is only for testing pipeline power by injecting point sources
             if 'extra_feature' in self.components:
                 sed_path = os.path.join(
                     self.directory,
@@ -781,8 +850,10 @@ class ProcessMaps():
         """
         lmax = self.desired_lmax
         L = lmax + 1
-        # load in processed map
-        filepath = self.file_templates[comp].format(frequency=frequency, realisation=realisation, lmax=lmax, lam = lam) # input path
+        # load in processed map ('real' keeps the 'real' tag in the wavelet/ILC filenames but
+        # must read the processed map, never the raw downloaded FITS)
+        input_key = "processed_real" if comp == "real" else comp
+        filepath = self.file_templates[input_key].format(frequency=frequency, realisation=realisation, lmax=lmax, lam = lam) # input path
         wavelet_coeffs_path = self.file_templates["wavelet_coeffs"]
         scaling_coeffs_path = self.file_templates["scaling_coeffs"]
         if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, 
