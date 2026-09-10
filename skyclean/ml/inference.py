@@ -263,9 +263,12 @@ class Inference:
           <stem>.npy                  : cleaned CMB map (MW sampling)
           <stem>_maps.png             : mollviews of ILC, improved and their difference (the predicted
                                         foreground residual, expected to look like dust/tSZ, not CMB)
-          <stem>_spectra.png / .npz   : TT D_ell of the processed_real input map at every frequency, the ILC and
-                                        the improved map (all carry the same common 5' beam, so they are directly
-                                        comparable; PowerSpectrumTT.plot_Dl_series)
+          <stem>_spectra.png          : ratio of TT D_ell, ILC / processed cmb and improved (ML) / processed cmb,
+                                        linear axes; the reference is the processed simulated CMB ("true input
+                                        CMB": processed_cmb, realisation `realisation`, same lmax, the same map as
+                                        Pipeline.step_power_spec(source="processed", component="cmb",
+                                        frequency="143")); all maps are in K with the same common 5' beam
+          <stem>_spectra.npz          : ell and the three D_ell [µK^2] (ratios are only plotted, not stored)
         Full sky (no mask).
         Returns a dict with the maps, spectra and output paths.
         """
@@ -299,32 +302,41 @@ class Inference:
         alm_imp = np.asarray(s2fft.forward(np.ascontiguousarray(cmb_mw), L=L))
         ell, cl_ilc = PowerSpectrumTT.from_mw_alm(alm_ilc)
         _, cl_imp = PowerSpectrumTT.from_mw_alm(alm_imp)
+        # ILC / improved maps are in K -> D_ell in µK^2
         Dl_ilc = PowerSpectrumTT.cl_to_Dl(ell, cl_ilc, input_unit="K")
         Dl_imp = PowerSpectrumTT.cl_to_Dl(ell, cl_imp, input_unit="K")
-        # processed_real input maps (HEALPix, native beam -> common 5' beam, same as the ILC / improved maps)
+        # "True input CMB" reference: processed simulated CMB (HEALPix, K, common 5' beam), i.e. the same
+        # map as Pipeline.step_power_spec(unit="K", source="processed", component="cmb", frequency="143",
+        # realisation=realisation, lmax=lmax); the processed_cmb file is frequency independent.
         conv = MapAlmConverter(self.file_templates.file_templates)
-        Dl_proc = np.zeros((len(self.frequencies), L))
-        curves = []
-        for i, frequency in enumerate(self.frequencies):
-            out_proc = conv.to_alm(component="real", source="processed", frequency=frequency, lmax=lmax)
-            _, cl_proc = PowerSpectrumTT.from_healpy_alm(out_proc["alm"])
-            Dl_proc[i] = PowerSpectrumTT.cl_to_Dl(ell, cl_proc, input_unit="K")
-            curves.append((ell[2:], Dl_proc[i, 2:], f"processed real {frequency} GHz", "--"))
-        curves += [(ell[2:], Dl_ilc[2:], "ILC [observed sky]", "-"),
-                   (ell[2:], Dl_imp[2:], "Improved (ML) [observed sky]", "-")]
+        out_cmb = conv.to_alm(component="cmb", source="processed", frequency="143",
+                              realisation=realisation, lmax=lmax)
+        _, cl_cmb = PowerSpectrumTT.from_healpy_alm(out_cmb["alm"])
+        Dl_cmb = PowerSpectrumTT.cl_to_Dl(ell, cl_cmb, input_unit="K")
+        # ratios w.r.t. the processed cmb reference (both D_ell in µK^2, so the ratio is unitless)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio_ilc = Dl_ilc / Dl_cmb
+            ratio_imp = Dl_imp / Dl_cmb
         spectra_png = stem + "_spectra.png"
-        PowerSpectrumTT.plot_Dl_series(curves, show=False)
-        plt.yscale("log")  # full-sky processed maps are foreground dominated, ~10^2-10^3 x the ILC
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.plot(ell[2:], ratio_ilc[2:], "-", label="ILC / processed cmb")
+        ax.plot(ell[2:], ratio_imp[2:], "-", label="Improved (ML) / processed cmb")
+        ax.axhline(1.0, ls=":", color="red")
+        ax.set_xlabel(r"$\ell$")
+        ax.set_ylabel(r"Ratio of $C_\ell$")
+        ax.set_title("Observed Planck sky")
+        ax.grid(True, alpha=0.5)
+        ax.legend()
+        fig.tight_layout()
         plt.savefig(spectra_png, dpi=200)
         plt.close("all")
         spectra_npz = stem + "_spectra.npz"
-        np.savez(spectra_npz, ell=ell, Dl_ilc=Dl_ilc, Dl_improved=Dl_imp,
-                 Dl_processed_real=Dl_proc, frequencies=np.asarray(self.frequencies))
+        np.savez(spectra_npz, ell=ell, Dl_ilc=Dl_ilc, Dl_improved=Dl_imp, Dl_processed_cmb=Dl_cmb)
         print(f"[Inference] Saved spectra to: {spectra_png} and {spectra_npz}")
 
         return {
             "cmb_mw": cmb_mw, "ilc_mw": ilc_mw, "residual_mw": resid_mw,
-            "ell": ell, "Dl_ilc": Dl_ilc, "Dl_improved": Dl_imp, "Dl_processed_real": Dl_proc,
+            "ell": ell, "Dl_ilc": Dl_ilc, "Dl_improved": Dl_imp, "Dl_processed_cmb": Dl_cmb,
             "save_path": save_path, "maps_png": maps_png, "spectra_png": spectra_png,
         }
 

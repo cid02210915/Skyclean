@@ -661,8 +661,8 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 def step_apply(args, ckpt_dir: str | None = None) -> str:
     """
     Apply the trained model to the observed Planck sky (Inference.predict_and_visualise_real_sky): saves the
-    cleaned CMB map (MW .npy + HEALPix .fits), the ILC / improved / difference map figure and the TT spectra of the
-    processed real, ILC and improved maps under <directory>/ML/cmb_prediction/<run_id>/ilc_improved_maps/checkpoint_<epoch>/.
+    cleaned CMB map (MW .npy + HEALPix .fits), the ILC / improved / difference map figure and the D_ell ratio figure of the
+    ILC and improved maps over the processed simulated CMB (true input CMB reference) under <directory>/ML/cmb_prediction/<run_id>/ilc_improved_maps/checkpoint_<epoch>/.
     Needs the SILC pipeline run with --components real --wavelet-components real (same lmax/N/lam/nsamp).
     Returns the .npy path.
     """
@@ -822,5 +822,5 @@ python3 -m skyclean.ml.pipeline_ml \
 # Outputs: <directory>/ML/cmb_prediction/<run-id>/ilc_improved_maps/checkpoint_<epoch>/
 #   ilc_cmb_from-real_improved_..._ckpt<epoch>.npy   cleaned CMB map (MW sampling)
 #   ..._ckpt<epoch>_maps.png                         ILC / improved / difference mollviews
-#   ..._ckpt<epoch>_spectra.png / .npz               TT spectra: processed real (per freq), ILC, improved
+#   ..._ckpt<epoch>_spectra.png / .npz               ratio of TT D_ell: ILC / processed cmb, improved / processed cmb (npz also has the spectra)
 '''
