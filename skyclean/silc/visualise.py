@@ -671,10 +671,7 @@ class Visualise():
         mask_hp = None
         f_sky = None
         if masked:
-            mask_mw = self.data_handler.mask_mw_beamed()  # (T, P) in MW
-            mask_hp = SamplingConverters.mw_map_2_hp_map(mask_mw, lmax)
-            mask_hp = np.asarray(mask_hp, dtype=np.float32)
-
+            mask_hp = np.asarray(self.data_handler.mask_hp(), dtype=np.float64)  # HEALPix mask at this lmax's nside
             f_sky = float(np.mean(mask_hp))
             print(
                 f"visualise_component_ratio_power_spectra: "
@@ -741,9 +738,7 @@ class Visualise():
                     # original cached full-sky spectrum
                     cl = self.compute_and_save_mw_power_spec(
                         map_path, component=component, lam=lam0
-                    )
-                    if component == "ilc_improved":
-                        cl *= 1e6 
+                    ) * 1e12  # K^2 -> muK^2, same unit as the masked branch and the HEALPix components
                 return cl
 
             # HEALPix components
@@ -759,7 +754,7 @@ class Visualise():
                     realisation=realisation,
                 )
 
-            hp_map = hp.read_map(map_path, verbose=False) * 1e12
+            hp_map = hp.read_map(map_path, verbose=False) * 1e6  # K -> muK
             if masked:
                 hp_map *= mask_hp
             cl = hp.sphtfunc.anafast(hp_map, lmax=lmax)
@@ -879,12 +874,7 @@ class Visualise():
         f_sky = None
         f_sky2 = None
         if masked:
-            # MW mask → HP, apodised
-            mask_mw = self.data_handler.mask_mw_beamed()   # (T, P) in MW
-            mask_hp = SamplingConverters.mw_map_2_hp_map(
-                mask_mw, self.lmax
-            )
-            mask_hp = np.asarray(mask_hp, dtype=np.float32)
+            mask_hp = np.asarray(self.data_handler.mask_hp(), dtype=np.float64)  # HEALPix mask at this lmax's nside
 
             f_sky  = float(np.mean(mask_hp))       # <M>
             f_sky2 = float(np.mean(mask_hp**2))    # <M^2>

@@ -32,6 +32,8 @@ from skyclean.ml.data import CMBFreeILC
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
 from skyclean.silc.utils import ilc_mode_tag
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
+from skyclean.silc import HPTools
+import healpy as hp
 
 
 def resolve_evaluate_target(args) -> str:
@@ -152,6 +154,9 @@ def parse_args():
     )
     parser.add_argument("--resume-training", action="store_true")
     parser.add_argument("--loss-tag", type=str, default=None)
+    parser.add_argument("--masked", action="store_true",
+                        help="Masked ML: restrict the training loss/accuracy and the evaluation metrics to the Planck "
+                             "2018 common CMB intensity mask (fsky~0.78); the evaluation spectra are then pseudo-C_ell ")
 
     # ----- inference controls -----
     parser.add_argument("--model-dir", type=str, default="",
@@ -274,12 +279,12 @@ def step_train(args) -> str:
     print(f"[train] run_id={trainer.run_id}")
     print(f"[train] config saved: {cfg_path}")
     trainer.dataset.produce_residuals()  # data-preparation step; skips maps that already exist
-    trainer.execute_training_procedure()  # training step
+    trainer.execute_training_procedure(masked=args.masked)  # training step
     return trainer.model_dir
 
 
 
-def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
+def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: np.ndarray | None = None):
     """
     Compute TT power spectra for:
       - processed_cmb (HEALPix)
@@ -474,6 +479,28 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None):
         "path": improved_map_path,
     }
 
+    if mask_hp is not None:
+        # Masked evaluation: pseudo-C_ell of the masked maps. The same mask multiplies every map, so the mode
+        # coupling is common to the numerator and denominator of the ratios; dividing by <mask^2> puts the
+        # spectra back on the full-sky scale (the ratios are unaffected).
+        nside = HPTools.get_nside_from_lmax(lmax)
+        mask_hp = np.asarray(mask_hp, dtype=np.float64)
+        f_sky2 = float(np.mean(mask_hp ** 2))
+
+        def masked_hp_map(alm, fmt):
+            alm_hp = np.asarray(alm) if fmt == "healpy" else PowerSpectrumCrossTT.mw_to_healpy_alm(np.asarray(alm), lmax=lmax)
+            return hp.alm2map(np.ascontiguousarray(alm_hp, dtype=np.complex128), nside=nside) * mask_hp
+
+        maps = {
+            "processed_cmb": masked_hp_map(out_proc["alm"], "healpy"),
+            "ilc_synth": masked_hp_map(out_synth["alm"], "mw"),
+            "ilc_improved": masked_hp_map(alm_mw, "mw"),
+        }
+        for key in ("processed_cmb", "ilc_synth", "ilc_improved"):
+            results[key]["cl"] = hp.anafast(maps[key], lmax=lmax) / f_sky2
+        results["ilc-cmb"]["cl"] = hp.anafast(maps["ilc_synth"], map2=maps["processed_cmb"], lmax=lmax) / f_sky2
+        results["ml-cmb"]["cl"] = hp.anafast(maps["ilc_improved"], map2=maps["processed_cmb"], lmax=lmax) / f_sky2
+
     return results
 
 def step_evaluate(args, ckpt_dir: str | None = None):
@@ -533,6 +560,16 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         "ilc_improved_maps",
         f"checkpoint_{checkpoint_epoch}",
     )
+    suffix = "_masked" if args.masked else ""
+    out_dir = os.path.join(
+        inference.file_templates.output_directories["cmb_prediction"],
+        args.run_id,
+        "evaluation",
+        f"checkpoint_{checkpoint_epoch}",
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    metrics_csv = os.path.join(out_dir, f"test_metrics{suffix}.csv")
+
     missing_prediction = False
     for realisation in test_ids:
         filename = os.path.basename(inference.file_templates.file_templates["ilc_improved"].format(
@@ -558,28 +595,22 @@ def step_evaluate(args, ckpt_dir: str | None = None):
             missing_prediction = True
             break
 
-    if missing_prediction:
-        metrics_rows = inference.save_test_metrics_table(save_predictions=True)
-        inference.save_test_scatter_plots(metrics_rows)
+    if missing_prediction or not os.path.exists(metrics_csv):
+        metrics_rows = inference.save_test_metrics_table(masked=args.masked, save_predictions=True)
+        inference.save_test_scatter_plots(metrics_rows, masked=args.masked)
     else:
-        print("[evaluate] Existing CMB prediction files found for all test realisations; skipping prediction generation.")
+        print("[evaluate] Existing CMB prediction files and metrics table found for all test realisations; skipping prediction generation.")
 
+    mask_hp = inference.data_handler.mask_hp() if args.masked else None
     ratio_ilc_all = []
     ratio_ml_all = []
-    out_dir = os.path.join(
-        inference.file_templates.output_directories["cmb_prediction"],
-        args.run_id,
-        "evaluation",
-        f"checkpoint_{checkpoint_epoch}",
-    )
-    os.makedirs(out_dir, exist_ok=True)
 
     for realisation in test_ids:
         spec_args = argparse.Namespace(**vars(args))
         spec_args.realisation = int(realisation)
         spec_args.checkpoint_epoch = checkpoint_epoch
-        spec = generate_spectrum_for_one(spec_args, ckpt_dir=ckpt_dir)
-        bundle_path = os.path.join(out_dir, f"component_spectra_r{int(realisation):04d}.npz")
+        spec = generate_spectrum_for_one(spec_args, ckpt_dir=ckpt_dir, mask_hp=mask_hp)
+        bundle_path = os.path.join(out_dir, f"component_spectra_r{int(realisation):04d}{suffix}.npz")
         np.savez(
             bundle_path,
             ell=np.asarray(spec["processed_cmb"]["ell"], dtype=float),
@@ -608,7 +639,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     ratio_ml_mean = np.mean(ratio_ml_all, axis=0)
     ratio_ml_std = np.std(ratio_ml_all, axis=0)
 
-    ratio_npz = os.path.join(out_dir, "mean_ratio_spectra.npz")
+    ratio_npz = os.path.join(out_dir, f"mean_ratio_spectra{suffix}.npz")
     np.savez(
         ratio_npz,
         test_ids=np.asarray(test_ids, dtype=int),
@@ -624,7 +655,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
     import matplotlib.pyplot as plt
 
-    plot_path = os.path.join(out_dir, "mean_ratio_spectra.png")
+    plot_path = os.path.join(out_dir, f"mean_ratio_spectra{suffix}.png")
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(ell, ratio_ilc_mean, label="ILC Synth / Observed", color="blue")
     ax.fill_between(
@@ -647,7 +678,8 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     ax.set_xlim(2, ell.max())
     ax.set_xlabel(r"$\ell$", fontsize=14)
     ax.set_ylabel(r"$C_\ell^{\mathrm{ratio}}$", fontsize=14)
-    ax.set_title(f"Power Spectrum Ratio with Uncertainty ({args.run_id})", fontsize=15)
+    ax.set_title(f"Power Spectrum Ratio with Uncertainty ({args.run_id})"
+                 + (" — masked pseudo-$C_\\ell$" if args.masked else ""), fontsize=15)
     ax.grid(True, which="both", linestyle=":", linewidth=0.5)
     ax.legend(fontsize=14)
     fig.tight_layout()
@@ -663,6 +695,8 @@ def step_apply(args, ckpt_dir: str | None = None) -> str:
     Apply the trained model to the observed Planck sky (Inference.predict_and_visualise_real_sky): saves the
     cleaned CMB map (MW .npy + HEALPix .fits), the ILC / improved / difference map figure and the D_ell ratio figure of the
     ILC and improved maps over the processed simulated CMB (true input CMB reference) under <directory>/ML/cmb_prediction/<run_id>/ilc_improved_maps/checkpoint_<epoch>/.
+    With --masked the spectra are pseudo-C_ell of the masked maps divided by f_sky2 = <mask^2>, saved with a _masked suffix
+    (the ratios ILC / processed cmb and masked ML / processed cmb are stored in the npz as ratio_ilc, ratio_improved).
     Needs the SILC pipeline run with --components real --wavelet-components real (same lmax/N/lam/nsamp).
     Returns the .npy path.
     """
@@ -697,7 +731,7 @@ def step_apply(args, ckpt_dir: str | None = None) -> str:
     # The observed sky has no realisations; SILC still tags its from-real outputs with r0000
     # (its --start-realisation, assumed 0), so that index is used to locate the ilc_synth file.
     print("[Apply] Predicting the observed Planck sky...")
-    real = inference.predict_and_visualise_real_sky(realisation=0)
+    real = inference.predict_and_visualise_real_sky(realisation=0, masked=args.masked)
     print(f"[Apply] Outputs saved under: {os.path.dirname(real['save_path'])}")
     return real["save_path"]
 
@@ -797,6 +831,7 @@ python3 -m skyclean.ml.pipeline_ml \
   --run-id CFN_lmax511_N4_r20
 
   --resume-training \
+  --masked            # masked ML: loss/metrics restricted to the Planck 2018 common mask; evaluate outputs get a _masked suffix
 
 # Apply a trained run to the real Planck sky:
 python3 -m skyclean.ml.pipeline_ml \

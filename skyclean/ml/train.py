@@ -16,6 +16,8 @@ tf.config.set_visible_devices([], "GPU")
 import tensorflow_datasets as tfds
 import matplotlib.pyplot as plt
 import s2fft
+from s2fft.sampling import s2_samples
+import healpy as hp
 import functools
 import orbax.checkpoint as ocp
 import atexit
@@ -599,7 +601,7 @@ class Train:
         return state
 
     # ========== Main Training Procedure ==========
-    def execute_training_procedure(self, masked: bool = False, fsky: float = 0.7, apodization: int = 2):
+    def execute_training_procedure(self, masked: bool = False):
         """Execute full training pipeline."""
         print("[Train] Starting training procedure...")
         print(f"[Train] Run ID: {self.run_id} | Epochs: {self.epochs} | Batch size: {self.batch_size}")
@@ -684,15 +686,21 @@ class Train:
         norm_quad_weights = model.input_conv.conv.quad_weights.value / (4 * L)
         graphdef, state = nnx.split((model, optimizer, metrics))
 
-        # Mask configuration
+        # Mask configuration: the model always sees the full sky; only the loss/accuracy are restricted to the
+        # mask (pixel loss: weights = quadrature weights * mask; harmonic loss: spectra of the masked maps).
+        _, by0 = next(iter(tfds.as_numpy(train_ds.take(1))))
         if not masked:
-            _, by0 = next(iter(tfds.as_numpy(train_ds.take(1))))
             mask_mwss = jnp.ones_like(jnp.asarray(by0[0]), dtype=jnp.float32)
             print(f"[Mask] Training WITHOUT mask (shape: {mask_mwss.shape})")
         else:
-            mask_mwss = self.dataset.mask_mwss_beamed(fsky=fsky, apodization=apodization)
-            mask_mwss = jnp.asarray(mask_mwss, dtype=jnp.float32)
-            print(f"[Mask] Training WITH mask (shape: {mask_mwss.shape}, fsky={fsky}, apodization={apodization})")
+            # mask on the MWSS grid as (H, W, 1) float32: bilinear interpolation of the HEALPix mask, values kept in [0, 1]
+            L = self.dataset.lmax + 1
+            theta, phi = np.meshgrid(s2_samples.thetas(L, "mwss"), s2_samples.phis_equiang(L, "mwss"), indexing="ij")
+            mask_mwss = np.clip(hp.get_interp_val(self.dataset.mask_hp(), theta.ravel(), phi.ravel()).reshape(theta.shape), 0.0, 1.0)
+            mask_mwss = jnp.asarray(mask_mwss[..., None].astype(np.float32), dtype=jnp.float32)
+            if mask_mwss.shape != by0[0].shape:
+                raise ValueError(f"Mask shape {mask_mwss.shape} does not match the target maps {by0[0].shape}.")
+            print(f"[Mask] Training WITH the Planck common mask (shape: {mask_mwss.shape})")
 
         print_gpu_usage("Before training loop")
 

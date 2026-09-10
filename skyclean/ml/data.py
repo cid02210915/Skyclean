@@ -5,6 +5,8 @@ import sys
 import numpy as np
 import healpy as hp 
 import matplotlib.pyplot as plt
+from s2fft.sampling import s2_samples
+from s2fft.utils import quadrature
 
 from skyclean.silc import utils, HPTools, MWTools, SamplingConverters, FileTemplates
 from skyclean.silc.utils import ilc_mode_tag, ilc_mode_candidates
@@ -409,15 +411,31 @@ class CMBFreeILC():
         F_std_sum = np.zeros(self.n_channels_in, dtype=np.float64) #per channel std
         R_std_sum = 0 # only one output channel
 
+        # area weights of the MWSS rings, (H, 1, 1) so they broadcast over (H, W, C): a plain pixel mean over the
+        # equiangular grid over-counts the polar rows (same weighting as the pixel loss in train.py and the MSE in inference.py)
+        w = np.asarray(quadrature.quad_weights(self.lmax + 1, sampling="mwss"), dtype=np.float64)[:, None, None]
+        w_sum = float(np.sum(w) * self.W)
+
         # fit normalization on the training set only, then reuse for val and test.
+        # TODO (masked ML): these statistics are full-sky, masked pixels included. The --masked option only enters the
+        # training loss/accuracy and the evaluation metrics, not the data handler, so masked and unmasked runs share the
+        # same norm_stats file and the Galactic plane inflates the per-channel std. To fit on unmasked pixels only,
+        # multiply w by the MWSS mask here (and key normalization_stats_path on the mask so the two are not overwritten).
         for realisation in indices:
             F, R, _ = self.create_residual_mwss_maps(realisation) # load maps
-            signed_log_F = self.signed_log_transform(F)
-            signed_log_R = self.signed_log_transform(R)
-            F_mean_sum += np.mean(signed_log_F, axis=(0, 1))  # Sum over H and W
-            R_mean_sum += np.mean(signed_log_R, axis = (0, 1))
-            F_std_sum += np.std(signed_log_F, axis=(0, 1))  # Sum over H and W
-            R_std_sum += np.std(signed_log_R, axis = (0, 1))
+            signed_log_F = np.asarray(self.signed_log_transform(F), dtype=np.float64)
+            signed_log_R = np.asarray(self.signed_log_transform(R), dtype=np.float64)
+            # plain (unweighted) pixel statistics, replaced by the area-weighted ones below
+            # F_mean_sum += np.mean(signed_log_F, axis=(0, 1))  # Sum over H and W
+            # R_mean_sum += np.mean(signed_log_R, axis = (0, 1))
+            # F_std_sum += np.std(signed_log_F, axis=(0, 1))  # Sum over H and W
+            # R_std_sum += np.std(signed_log_R, axis = (0, 1))
+            F_mean = np.sum(w * signed_log_F, axis=(0, 1)) / w_sum  # weighted mean over H and W, per channel
+            R_mean = np.sum(w * signed_log_R, axis=(0, 1)) / w_sum
+            F_mean_sum += F_mean
+            R_mean_sum += R_mean
+            F_std_sum += np.sqrt(np.sum(w * (signed_log_F - F_mean) ** 2, axis=(0, 1)) / w_sum)  # weighted std
+            R_std_sum += np.sqrt(np.sum(w * (signed_log_R - R_mean) ** 2, axis=(0, 1)) / w_sum)
 
         n_stats = float(indices.size)
         signed_log_F_mean = F_mean_sum / n_stats
@@ -486,82 +504,40 @@ class CMBFreeILC():
         return reasons
     
 
-    def load_mask_hp(self,fsky=0.7, apodization=2) -> np.ndarray:
-            """
-            Load a mask in HEALPix FITS, given the desired f_sky value.
-            """
-            # Choose a column by index:
-            # 0: GAL020, 1: GAL040, 2: GAL060, 3: GAL070,
-            # 4: GAL080, 5: GAL090, 6: GAL097, 7: GAL099
-            # e.g. GAL070 = 70% sky retained
-            get_index = {0.2: 0,
-                         0.4: 1,
-                         0.6: 2,
-                         0.7: 3,
-                         0.8: 4,
-                         0.9: 5,
-                         0.97: 6,
-                         0.99: 7}
-            if fsky not in get_index:
-                raise ValueError(f"Unsupported f_sky={fsky}. Allowed values: {sorted(get_index.keys())}")
-            field_index = get_index[fsky]
-            mask_path = self.file_templates["mask"].format(apodization=apodization)
+    # ---------------- mask ----------------
+    # A mask is a pixel-domain weight (1 = observed, 0 = masked), not a band-limited sky signal. It is therefore
+    # resampled onto the MW / MWSS grids in pixel space (bilinear interpolation of the pixel-averaged HEALPix
+    # mask), not through a beam + harmonic transform, which rings and gives weights outside [0, 1].
 
-            if not os.path.exists(mask_path):
-                import urllib.request
-                url = self.download_templates["mask"].format(apodization=apodization)
-                os.makedirs(os.path.dirname(mask_path) or ".", exist_ok=True)
-                urllib.request.urlretrieve(url, mask_path)
-                print(f"Download mask for fsky={fsky} apodization={apodization}.")
-            else: 
-                print(f"Mask already exists: {mask_path} (skipping download)")
-            mask = hp.read_map(mask_path, field=field_index)
-            print(f"Mask with fsky={fsky} apodization={apodization} loaded from {mask_path}.")
-            return mask
-    
-    def mask_mwss(self,fsky=0.7, apodization=2) -> np.ndarray:
-        '''
-        Convert a healpix mask to mwss format.
-        '''
-        lmax = self.lmax
-        mask_hp = self.load_mask_hp(fsky=fsky, apodization=apodization)
-        mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp, lmax)
-        L = lmax + 1
-        mask_mwss = SamplingConverters.mw_map_2_mwss_map(mask_mw, L=L).astype(np.float32)
-        # Ensure (H,W,1)
-        mask_mwss = mask_mwss[..., None]
-        print(f'MWSS (fsky={fsky}, apodization={apodization}) shape: ', mask_mwss.shape)
-        return mask_mwss
+    def load_mask_hp(self) -> np.ndarray:
+        """Load the Planck 2018 common CMB intensity mask (binary, NSIDE 2048, Galactic coordinates, fsky~0.78)."""
+        mask_path = self.file_templates["mask"]
+        if not os.path.exists(mask_path):
+            import urllib.request
+            url = self.download_templates["mask"]
+            os.makedirs(os.path.dirname(mask_path) or ".", exist_ok=True)
+            print(f"Downloading mask from {url} ...")
+            urllib.request.urlretrieve(url, mask_path)
+        mask = hp.read_map(mask_path, dtype=np.float64)
+        print(f"Mask loaded from {mask_path} (fsky={mask.mean():.4f}).")
+        return mask
+        # Previous mask: Planck 2015 HFI Galactic-plane masks HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits,
+        # one field per retained sky fraction, selected with load_mask_hp(fsky, apodization):
+        # get_index = {0.2: 0, 0.4: 1, 0.6: 2, 0.7: 3, 0.8: 4, 0.9: 5, 0.97: 6, 0.99: 7}  # GAL020 .. GAL099
+        # mask = hp.read_map(self.file_templates["mask"].format(apodization=apodization), field=get_index[fsky])
 
-
-    def mask_mwss_beamed(self, fsky=0.7, apodization=2) -> np.ndarray:
-        """
-        Proceed the mask by convolving and reducing, then converting to MWSS sampling.
-        Return a mask in MWSS with shape (H, W, 1).
-        """
-        lmax = self.lmax
-        nside = HPTools.get_nside_from_lmax(lmax)
-        standard_fwhm_rad = np.radians(5/60)
-        mask_hp = self.load_mask_hp(fsky = fsky, apodization=apodization)
-        mask_hp_reduced = HPTools.convolve_and_reduce(
-                mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
-            )
-        L = lmax + 1
-        mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp_reduced, lmax)
-        mask_mwss = SamplingConverters.mw_map_2_mwss_map(mask_mw, L=L).astype(np.float32)
-        # Ensure (H,W,1)
-        mask_mwss = mask_mwss[..., None]
-        print('Beamed mask MWSS shape: ', mask_mwss.shape)
-        return mask_mwss
-
-    
-    def mask_mw_beamed(self, fsky=0.7, apodization=2) -> np.ndarray:
-        lmax = self.lmax
-        nside = HPTools.get_nside_from_lmax(lmax)
-        standard_fwhm_rad = np.radians(5/60)
-        mask_hp = self.load_mask_hp(fsky, apodization)
-        mask_hp_reduced = HPTools.convolve_and_reduce(
-            mask_hp, lmax=lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
-        )
-        mask_mw  = SamplingConverters.hp_map_2_mw_map(mask_hp_reduced, lmax)
-        return mask_mw
+    def mask_hp(self, apodisation_deg: float = 2.0) -> np.ndarray:
+        """Mask at the HEALPix NSIDE used for this lmax, apodised: 0 in the masked region, rising smoothly to 1 over
+        ~apodisation_deg inside the observed sky: Gaussian smoothing S of the pixel-averaged binary mask, mapped to
+        2S-1 (0 at the binary edge, 1 about one apodisation scale inside), clipped to [0, 1] and capped by the binary
+        mask so holes stay masked. 0 keeps the binary mask. Computed once per instance and apodisation (cached)."""
+        cache = self.__dict__.setdefault("_mask_hp", {})
+        if apodisation_deg not in cache:
+            nside = HPTools.get_nside_from_lmax(self.lmax)
+            mask = hp.ud_grade(self.load_mask_hp(), nside_out=nside)  # pixel average, no harmonic step
+            if apodisation_deg > 0:
+                smooth = hp.smoothing(mask, fwhm=np.radians(apodisation_deg))
+                mask = np.minimum(np.clip(2.0 * smooth - 1.0, 0.0, 1.0), mask)
+                print(f"Mask apodised over {apodisation_deg} deg: fsky={mask.mean():.4f}, <M^2>={np.mean(mask**2):.4f}.")
+            cache[apodisation_deg] = mask
+        return cache[apodisation_deg]

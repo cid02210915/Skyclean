@@ -14,7 +14,6 @@ import healpy as hp
 import jax
 import jax.numpy as jnp
 from flax import nnx, serialization
-from scipy.stats import kurtosis, skew
 
 from .model import S2_UNET
 from skyclean.silc.utils import ilc_mode_tag
@@ -24,6 +23,8 @@ from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_compon
 from skyclean.silc import SamplingConverters
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumTT
 import s2fft
+from s2fft.sampling import s2_samples
+from s2fft.utils import quadrature
 
 
 class Inference:
@@ -196,12 +197,16 @@ class Inference:
         cmb_mw = outputs["cmb_mw"]
 
         if save_result:
-            if masked:
-                mask_mw = self.data_handler.mask_mw_beamed()
-                cmb_mw *= mask_mw
+            # the full-sky map is always saved: it is what the evaluation (spectra, ratio plots) reads
+            self._save_cmb_prediction(cmb_mw, realisation, component=component)
+        if masked:
+            # mask on the MW grid (L, 2L-1): bilinear interpolation of the HEALPix mask, values kept in [0, 1]
+            L = self.data_handler.lmax + 1
+            theta, phi = np.meshgrid(s2_samples.thetas(L, "mw"), s2_samples.phis_equiang(L, "mw"), indexing="ij")
+            mask_mw = np.clip(hp.get_interp_val(self.data_handler.mask_hp(), theta.ravel(), phi.ravel()).reshape(theta.shape), 0.0, 1.0)
+            cmb_mw = cmb_mw * mask_mw
+            if save_result:
                 self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw)
-            else:
-                self._save_cmb_prediction(cmb_mw, realisation, component=component)
 
         #print(f"CMB prediction completed for realisation {realisation}.")
         #print(f"Prediction shape: {cmb_mw.shape}")
@@ -251,7 +256,7 @@ class Inference:
               f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id, 'ilc_improved_maps')}")
         return outputs
 
-    def predict_and_visualise_real_sky(self, realisation: int = 0) -> dict:
+    def predict_and_visualise_real_sky(self, realisation: int = 0, masked: bool = False) -> dict:
         """
         Apply the model to the observed Planck sky, save the cleaned CMB map and its diagnostics.
 
@@ -268,8 +273,11 @@ class Inference:
                                         CMB": processed_cmb, realisation `realisation`, same lmax, the same map as
                                         Pipeline.step_power_spec(source="processed", component="cmb",
                                         frequency="143")); all maps are in K with the same common 5' beam
-          <stem>_spectra.npz          : ell and the three D_ell [µK^2] (ratios are only plotted, not stored)
-        Full sky (no mask).
+          <stem>_spectra.npz          : ell, the three D_ell [µK^2] and the two ratios
+        masked=True: the three maps are multiplied by the Planck common mask in HEALPix and the spectra are the
+        pseudo-C_ell divided by f_sky2 = <mask^2> (the sky-fraction correction, exact for white spectra); the
+        same mask on all three maps makes the ratios mask-independent to first order. The figure and npz then
+        carry a `_masked` suffix and the npz also stores f_sky, f_sky2 and the mask-corrected pseudo-C_ell.
         Returns a dict with the maps, spectra and output paths.
         """
         lmax = self.lmax
@@ -298,50 +306,72 @@ class Inference:
         print(f"[Inference] Saved maps figure to: {maps_png}")
 
         # ---- spectra ----
-        alm_ilc = np.asarray(s2fft.forward(np.ascontiguousarray(ilc_mw), L=L))
-        alm_imp = np.asarray(s2fft.forward(np.ascontiguousarray(cmb_mw), L=L))
-        ell, cl_ilc = PowerSpectrumTT.from_mw_alm(alm_ilc)
-        _, cl_imp = PowerSpectrumTT.from_mw_alm(alm_imp)
-        # ILC / improved maps are in K -> D_ell in µK^2
-        Dl_ilc = PowerSpectrumTT.cl_to_Dl(ell, cl_ilc, input_unit="K")
-        Dl_imp = PowerSpectrumTT.cl_to_Dl(ell, cl_imp, input_unit="K")
         # "True input CMB" reference: processed simulated CMB (HEALPix, K, common 5' beam), i.e. the same
         # map as Pipeline.step_power_spec(unit="K", source="processed", component="cmb", frequency="143",
         # realisation=realisation, lmax=lmax); the processed_cmb file is frequency independent.
         conv = MapAlmConverter(self.file_templates.file_templates)
         out_cmb = conv.to_alm(component="cmb", source="processed", frequency="143",
                               realisation=realisation, lmax=lmax)
-        _, cl_cmb = PowerSpectrumTT.from_healpy_alm(out_cmb["alm"])
+        extra = {}
+        if not masked:
+            alm_ilc = np.asarray(s2fft.forward(np.ascontiguousarray(ilc_mw), L=L))
+            alm_imp = np.asarray(s2fft.forward(np.ascontiguousarray(cmb_mw), L=L))
+            ell, cl_ilc = PowerSpectrumTT.from_mw_alm(alm_ilc)
+            _, cl_imp = PowerSpectrumTT.from_mw_alm(alm_imp)
+            _, cl_cmb = PowerSpectrumTT.from_healpy_alm(out_cmb["alm"])
+        else:
+            # Masked pseudo-spectra: every map is multiplied by the same binary (non-apodised) HEALPix mask and
+            # the pseudo-C_ell is divided by f_sky2 = <mask^2> (the sky-fraction correction, exact for a white spectrum).
+            mask_hp = np.asarray(self.data_handler.mask_hp(apodisation_deg=0), dtype=np.float64)
+            nside = hp.get_nside(mask_hp)
+            f_sky = float(np.mean(mask_hp))
+            f_sky2 = float(np.mean(mask_hp ** 2))
+            hp_ilc = np.asarray(SamplingConverters.mw_map_2_hp_map(ilc_mw, lmax=lmax), dtype=np.float64) * mask_hp
+            hp_imp = np.asarray(SamplingConverters.mw_map_2_hp_map(cmb_mw, lmax=lmax), dtype=np.float64) * mask_hp
+            hp_cmb = hp.alm2map(np.ascontiguousarray(out_cmb["alm"], dtype=np.complex128), nside=nside) * mask_hp
+            ell = np.arange(lmax + 1)
+            cl_ilc = hp.anafast(hp_ilc, lmax=lmax) / f_sky2
+            cl_imp = hp.anafast(hp_imp, lmax=lmax) / f_sky2
+            cl_cmb = hp.anafast(hp_cmb, lmax=lmax) / f_sky2
+            extra = {"f_sky": f_sky, "f_sky2": f_sky2, "cl_ilc": cl_ilc, "cl_improved": cl_imp, "cl_processed_cmb": cl_cmb}
+            print(f"[Inference] Masked spectra: pseudo-C_ell / f_sky2 with f_sky={f_sky:.4f}, f_sky2={f_sky2:.4f}")
+        # all maps are in K -> D_ell in µK^2
+        Dl_ilc = PowerSpectrumTT.cl_to_Dl(ell, cl_ilc, input_unit="K")
+        Dl_imp = PowerSpectrumTT.cl_to_Dl(ell, cl_imp, input_unit="K")
         Dl_cmb = PowerSpectrumTT.cl_to_Dl(ell, cl_cmb, input_unit="K")
         # ratios w.r.t. the processed cmb reference (both D_ell in µK^2, so the ratio is unitless)
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio_ilc = Dl_ilc / Dl_cmb
             ratio_imp = Dl_imp / Dl_cmb
-        spectra_png = stem + "_spectra.png"
+        suffix = "_masked" if masked else ""
+        ml_label = "Masked ML" if masked else "Improved (ML)"
+        spectra_png = stem + f"_spectra{suffix}.png"
         fig, ax = plt.subplots(figsize=(7, 4))
         ax.plot(ell[2:], ratio_ilc[2:], "-", label="ILC / processed cmb")
-        ax.plot(ell[2:], ratio_imp[2:], "-", label="Improved (ML) / processed cmb")
+        ax.plot(ell[2:], ratio_imp[2:], "-", label=f"{ml_label} / processed cmb")
         ax.axhline(1.0, ls=":", color="red")
         ax.set_xlabel(r"$\ell$")
         ax.set_ylabel(r"Ratio of $C_\ell$")
-        ax.set_title("Observed Planck sky")
+        ax.set_title("Observed Planck sky" + (f" (masked pseudo-$C_\\ell$ / $\\langle M^2 \\rangle$, $f_{{sky}}$={extra['f_sky']:.3f})" if masked else ""))
         ax.grid(True, alpha=0.5)
         ax.legend()
         fig.tight_layout()
         plt.savefig(spectra_png, dpi=200)
         plt.close("all")
-        spectra_npz = stem + "_spectra.npz"
-        np.savez(spectra_npz, ell=ell, Dl_ilc=Dl_ilc, Dl_improved=Dl_imp, Dl_processed_cmb=Dl_cmb)
+        spectra_npz = stem + f"_spectra{suffix}.npz"
+        np.savez(spectra_npz, ell=ell, Dl_ilc=Dl_ilc, Dl_improved=Dl_imp, Dl_processed_cmb=Dl_cmb,
+                 ratio_ilc=ratio_ilc, ratio_improved=ratio_imp, **extra)
         print(f"[Inference] Saved spectra to: {spectra_png} and {spectra_npz}")
 
         return {
             "cmb_mw": cmb_mw, "ilc_mw": ilc_mw, "residual_mw": resid_mw,
             "ell": ell, "Dl_ilc": Dl_ilc, "Dl_improved": Dl_imp, "Dl_processed_cmb": Dl_cmb,
-            "save_path": save_path, "maps_png": maps_png, "spectra_png": spectra_png,
+            "ratio_ilc": ratio_ilc, "ratio_improved": ratio_imp, **extra,
+            "save_path": save_path, "maps_png": maps_png, "spectra_png": spectra_png, "spectra_npz": spectra_npz,
         }
 
     def compute_mse(self, comp, realisation, save_result=True, masked=False):
-        """Compute pixel-space MSE for a single realisation."""
+        """Area-weighted pixel-space MSE (MWSS quadrature weights, as in the training loss) for a single realisation."""
         comp = comp.lower()
         if comp not in ("ilc", "nn"):
             raise ValueError("comp must be 'ilc' or 'nn'")
@@ -354,7 +384,11 @@ class Inference:
             raise ValueError(f"Unexpected shape for R: {R.shape}")
 
         if masked:
-            mask = self.data_handler.mask_mwss_beamed()
+            # mask on the MWSS grid as (H, W, 1) float32: bilinear interpolation of the HEALPix mask, values kept in [0, 1]
+            L = self.data_handler.lmax + 1
+            theta, phi = np.meshgrid(s2_samples.thetas(L, "mwss"), s2_samples.phis_equiang(L, "mwss"), indexing="ij")
+            mask = np.clip(hp.get_interp_val(self.data_handler.mask_hp(), theta.ravel(), phi.ravel()).reshape(theta.shape), 0.0, 1.0)
+            mask = mask[..., None].astype(np.float32)
             mask = np.asarray(mask)
             if mask.ndim == 3 and mask.shape[-1] == 1:
                 mask = mask[..., 0]
@@ -369,15 +403,11 @@ class Inference:
             pred_outputs = self._predict_realisation_outputs(realisation)
             diff = R - np.asarray(pred_outputs["pred_mwss"])
 
-        if mask is None:
-            mse = float(np.mean(diff ** 2))
-        else:
-            w = mask
-            num = np.sum(w * diff ** 2)
-            denom = np.sum(w) + 1e-12
-            mse = float(num / denom)
-            
-        return mse
+        # area weights of the MWSS rings (equiangular grid: a plain pixel mean over-counts the poles), times the mask
+        w = np.broadcast_to(np.asarray(quadrature.quad_weights(self.lmax + 1, sampling="mwss"))[:, None], diff.shape)
+        if mask is not None:
+            w = w * mask
+        return float(np.sum(w * diff ** 2) / (np.sum(w) + 1e-12))
 
     def save_test_metrics_table(self, masked=False, save_predictions=True):
         """Save per-realisation metrics for the held-out test split."""
@@ -396,14 +426,36 @@ class Inference:
             checkpoint_tag,
         )
         os.makedirs(out_dir, exist_ok=True)
-        csv_path = os.path.join(out_dir, "test_metrics.csv")
+        csv_path = os.path.join(out_dir, "test_metrics_masked.csv" if masked else "test_metrics.csv")
+
+        mask = mask_mw = None
+        # area weights of the MWSS rings (as in the training loss): a plain pixel mean over-counts the poles
+        area_w = np.broadcast_to(np.asarray(quadrature.quad_weights(self.lmax + 1, sampling="mwss"))[:, None],
+                                 (self.data_handler.H, self.data_handler.W))
+        if masked:
+            # masks loaded once for all realisations: bilinear interpolation of the HEALPix mask onto the MWSS grid
+            # (H, W, 1) float32 and the MW grid (L, 2L-1), values kept in [0, 1]
+            L = self.data_handler.lmax + 1
+            mask_hp = self.data_handler.mask_hp()
+            theta, phi = np.meshgrid(s2_samples.thetas(L, "mwss"), s2_samples.phis_equiang(L, "mwss"), indexing="ij")
+            mask = np.clip(hp.get_interp_val(mask_hp, theta.ravel(), phi.ravel()).reshape(theta.shape), 0.0, 1.0)
+            mask = np.asarray(mask[..., None].astype(np.float32))[..., 0]
+            theta, phi = np.meshgrid(s2_samples.thetas(L, "mw"), s2_samples.phis_equiang(L, "mw"), indexing="ij")
+            mask_mw = np.clip(hp.get_interp_val(mask_hp, theta.ravel(), phi.ravel()).reshape(theta.shape), 0.0, 1.0)
 
         def _moments(x):
-            x = np.asarray(x, dtype=np.float64).ravel()
-            x = x[np.isfinite(x)]
-            std = float(np.std(x))
-            skewness = float(skew(x, bias=False))
-            kurt_excess = float(kurtosis(x, fisher=True, bias=False))
+            """Area-weighted skewness and excess kurtosis over the MWSS grid (weights = ring area x mask, as for the MSE)."""
+            x = np.asarray(x, dtype=np.float64)
+            w = np.array(area_w * mask if mask is not None else area_w, dtype=np.float64)
+            finite = np.isfinite(x)
+            w[~finite] = 0.0
+            x = np.where(finite, x, 0.0)
+            w_sum = np.sum(w) + 1e-24
+            mean = np.sum(w * x) / w_sum
+            d = x - mean
+            var = np.sum(w * d ** 2) / w_sum
+            skewness = float(np.sum(w * d ** 3) / w_sum / (var ** 1.5 + 1e-24))
+            kurt_excess = float(np.sum(w * d ** 4) / w_sum / (var ** 2 + 1e-24) - 3.0)
             return skewness, kurt_excess
 
         rows = []
@@ -425,25 +477,16 @@ class Inference:
                 ilc_mwss = outputs["ilc_mwss"]
                 residual = outputs["residual"]
                 pred_mwss = outputs["pred_mwss"]
-                if masked:
-                    mask = np.asarray(self.data_handler.mask_mwss_beamed())
-                    if mask.ndim == 3 and mask.shape[-1] == 1:
-                        mask = mask[..., 0]
-                    mse_ilc = float(np.sum(mask * (residual ** 2)) / (np.sum(mask) + 1e-12))
-                    mse_ml = float(np.sum(mask * ((residual - pred_mwss) ** 2)) / (np.sum(mask) + 1e-12))
-                else:
-                    mse_ilc = float(np.mean(residual ** 2))
-                    mse_ml = float(np.mean((residual - pred_mwss) ** 2))
+                w = area_w * mask if masked else area_w
+                mse_ilc = float(np.sum(w * residual ** 2) / np.sum(w))
+                mse_ml = float(np.sum(w * (residual - pred_mwss) ** 2) / np.sum(w))
                 skew_ilc, kurtosis_ilc = _moments(ilc_mwss)
                 skew_ml, kurtosis_ml = _moments(pred_mwss)
                 if save_predictions:
                     cmb_mw = outputs["cmb_mw"]
+                    self._save_cmb_prediction(cmb_mw, realisation)  # full-sky map, read by the evaluation spectra
                     if masked:
-                        mask_mw = self.data_handler.mask_mw_beamed()
-                        cmb_mw = cmb_mw * mask_mw
-                        self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw)
-                    else:
-                        self._save_cmb_prediction(cmb_mw, realisation)
+                        self._save_masked_cmb_prediction(cmb_mw * mask_mw, realisation, mask_mw)
                 writer.writerow([
                     realisation,
                     mse_ilc,
@@ -466,8 +509,9 @@ class Inference:
         print(f"[Inference] Saved test metrics table to: {csv_path}")
         return rows
 
-    def save_test_scatter_plots(self, rows):
+    def save_test_scatter_plots(self, rows, masked=False):
         """Save MSE and skewness scatter plots for the held-out test split."""
+        suffix = "_masked" if masked else ""
         if self.model is None:
             self.load_model()
         checkpoint_tag = (
@@ -539,7 +583,7 @@ class Inference:
             "MSE comparison",
             "ILC MSE [μK^2]",
             "ML MSE [μK^2]",
-            "mse_scatter.png",
+            f"mse_scatter{suffix}.png",
             origin_zero=True,
             figsize=(7, 4),
             diag_label="y=x",
@@ -550,7 +594,7 @@ class Inference:
             "Test Skewness Scatter",
             "Skewness before ML (ILC)",
             "Skewness after ML",
-            "skewness_scatter.png",
+            f"skewness_scatter{suffix}.png",
             origin_zero=True,
             double_max=True,
         )
@@ -788,7 +832,7 @@ def main():
     if args.real:
         realisation = 0 if args.realisation is None else args.realisation
         print(f"\n2. Predicting the observed Planck sky (ilc_synth realisation index {realisation}):")
-        inference.predict_and_visualise_real_sky(realisation=realisation)
+        inference.predict_and_visualise_real_sky(realisation=realisation, masked=args.masked)
         print("Prediction successful.")
     elif args.realisation is None:
         print("\n2. Predicting the test split:")
@@ -809,7 +853,7 @@ def main():
     if args.metrics_table:
         print("\nWriting test metrics table...")
         rows = inference.save_test_metrics_table(masked=args.masked)
-        inference.save_test_scatter_plots(rows)
+        inference.save_test_scatter_plots(rows, masked=args.masked)
 
 
 if __name__ == "__main__":
