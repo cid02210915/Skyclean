@@ -206,7 +206,7 @@ class Inference:
             mask_mw = np.clip(hp.get_interp_val(self.data_handler.mask_hp(), theta.ravel(), phi.ravel()).reshape(theta.shape), 0.0, 1.0)
             cmb_mw = cmb_mw * mask_mw
             if save_result:
-                self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw)
+                self._save_masked_cmb_prediction(cmb_mw, realisation, mask_mw, component=component)
 
         #print(f"CMB prediction completed for realisation {realisation}.")
         #print(f"Prediction shape: {cmb_mw.shape}")
@@ -651,9 +651,11 @@ class Inference:
             print(f"Warning: Failed to save CMB prediction: {str(e)}")
             return None
 
-    def _save_masked_cmb_prediction(self, cmb_prediction, realisation, mask):
-        """Save masked CMB prediction"""
+    def _save_masked_cmb_prediction(self, cmb_prediction, realisation, mask, component=None):
+        """Save masked CMB prediction; `component` tags the input product ("real" for the observed sky) as in
+        _save_cmb_prediction, so a masked real-sky map is not named like a simulation."""
         try:
+            component = component or self.component
             chs = "_".join(str(n) for n in self.chs)
             model_config = f"lmax{self.lmax}_lam{self.lam}_freq{'_'.join(self.frequencies)}_chs{chs}"
             if self.filter_type != "axisymmetric":
@@ -673,7 +675,7 @@ class Inference:
                 self.run_id,
                 "ilc_improved_maps",
                 checkpoint_tag,
-                f"masked_ilc_improved_r{int(realisation):04d}_{model_config}{checkpoint_suffix}.npy",
+                f"masked_ilc_improved_from-{component}_r{int(realisation):04d}_{model_config}{checkpoint_suffix}.npy",
             )
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             np.save(save_path, cmb_prediction)
