@@ -289,36 +289,51 @@ class Train:
             return False
 
     def load_model_for_training(self, model, optimizer) -> int:
-        """Load the latest checkpoint (flax 0.10.6 compatible)"""
+        """Load the newest checkpoint (flax 0.10.6 compatible).
+
+        Candidates are the per-epoch checkpoint_latest.msgpack left by an interrupted run and the
+        latest completed checkpoint_<epoch> directory; whichever holds the higher epoch wins.
+        """
+        # Build the template from the joint split because the serialized optimizer
+        # state shape differs from splitting the optimizer in isolation.
+        _, empty_state = nnx.split((model, optimizer))
+        pure_state = nnx.to_pure_dict(empty_state)
+        template = {
+            "model": pure_state[0],
+            "opt": pure_state[1],
+            "epoch": 0
+        }
+
+        candidates = []  # (path, epoch expected from the directory name or None)
+        root_latest = Path(self.model_dir) / "checkpoint_latest.msgpack"
+        if root_latest.is_file():
+            candidates.append((root_latest, None))
         try:
-            latest_dir, latest_file, latest_epoch = resolve_checkpoint_target(self.model_dir)
+            _, dir_file, dir_epoch = resolve_checkpoint_target(self.model_dir)
+            candidates.append((dir_file, dir_epoch))
         except FileNotFoundError:
+            pass
+        if not candidates:
             raise FileNotFoundError(f"[Checkpoint] Resume requested but no checkpoint could be resolved under: {self.model_dir}")
 
-        print(f"[Checkpoint] Loading from {latest_file}")
-        try:
-            # Build the template from the joint split because the serialized optimizer
-            # state shape differs from splitting the optimizer in isolation.
-            _, empty_state = nnx.split((model, optimizer))
-            pure_state = nnx.to_pure_dict(empty_state)
-            template = {
-                "model": pure_state[0],
-                "opt": pure_state[1],
-                "epoch": 0
-            }
-
-            # 2. 用flax原生反序列化加载
-            with open(latest_file, "rb") as f:
-                bytes_data = f.read()
-
-            restored = serialization.from_bytes(template, bytes_data)
-
-            restored_epoch = restored["epoch"]
-            if int(restored_epoch) != int(latest_epoch):
+        best = None  # (epoch, path, restored)
+        for path, expected_epoch in candidates:
+            try:
+                with open(path, "rb") as f:
+                    restored = serialization.from_bytes(template, f.read())
+            except Exception as e:
+                raise RuntimeError(f"[Checkpoint] Failed to load resume checkpoint from {path}") from e
+            restored_epoch = int(restored["epoch"])
+            if expected_epoch is not None and restored_epoch != int(expected_epoch):
                 raise ValueError(
-                    f"[Checkpoint] Loaded epoch {restored_epoch} does not match latest detected epoch {latest_epoch} "
-                    f"from {latest_file}")
+                    f"[Checkpoint] Loaded epoch {restored_epoch} does not match latest detected epoch {expected_epoch} "
+                    f"from {path}")
+            if best is None or restored_epoch > best[0]:
+                best = (restored_epoch, path, restored)
+        restored_epoch, latest_file, restored = best
+        print(f"[Checkpoint] Loading from {latest_file}")
 
+        try:
             # Restore each piece into the joint split layout saved in the checkpoint.
             nnx.replace_by_pure_dict(empty_state[0], restored["model"])
             nnx.replace_by_pure_dict(empty_state[1], restored["opt"])
@@ -488,7 +503,7 @@ class Train:
 
     @staticmethod
     def harm_loss_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L: int = 1024):
-        """Harmonic domain loss function (fixed vmap layers)."""
+        """Harmonic domain loss function (MWSS sampling, batched over axis 0)."""
         mask = jnp.asarray(mask_mwss)
 
         if mask.ndim == 2:
@@ -503,9 +518,9 @@ class Train:
         pred_maps = pred_residuals[..., 0]
         target_maps = residuals[..., 0]
 
-        forward = functools.partial(s2fft.forward, L=L, method="jax_cuda")
-        forward_t = jax.vmap(forward, in_axes=0, out_axes=0)
-        forward_b = jax.vmap(forward_t, in_axes=0, out_axes=0)
+        # Maps are MWSS sampled (L+1, 2L); vmap once over the batch axis.
+        forward = functools.partial(s2fft.forward, L=L, sampling="mwss", method="jax_cuda")
+        forward_b = jax.vmap(forward, in_axes=0, out_axes=0)
 
         pred_spec = forward_b(pred_maps)
         target_spec = forward_b(target_maps)
@@ -514,7 +529,7 @@ class Train:
 
     @staticmethod
     def harm_acc_fn_from_pred(pred_residuals, residuals, norm_quad_weights, mask_mwss, L):
-        """Harmonic domain accuracy function (fixed vmap layers)."""
+        """Harmonic domain accuracy function (MWSS sampling, batched over axis 0)."""
         delta_ilc = residuals
         pred_delta_ilc = pred_residuals
         mask = jnp.asarray(mask_mwss)
@@ -531,9 +546,9 @@ class Train:
         delta_ilc_maps = delta_ilc[..., 0]
         pred_delta_ilc_maps = pred_delta_ilc[..., 0]
 
-        forward = functools.partial(s2fft.forward, L=L, method="jax_cuda")
-        forward_t = jax.vmap(forward, in_axes=0, out_axes=0)
-        forward_batch = jax.vmap(forward_t, in_axes=0, out_axes=0)
+        # Maps are MWSS sampled (L+1, 2L); vmap once over the batch axis.
+        forward = functools.partial(s2fft.forward, L=L, sampling="mwss", method="jax_cuda")
+        forward_batch = jax.vmap(forward, in_axes=0, out_axes=0)
 
         alm_ilc = forward_batch(delta_ilc_maps)
         alm_pred = forward_batch(pred_delta_ilc_maps)
@@ -639,7 +654,14 @@ class Train:
             start_epoch = loaded_epoch + 1
             loaded_history = self._load_training_log()
             if loaded_history:
-                metrics_history = loaded_history
+                # Align the log with the loaded checkpoint: drop entries from epochs beyond it
+                # (e.g. an interrupted run) and pad with NaN if the log is shorter.
+                for key in metrics_history:
+                    values = [float(v) for v in loaded_history[key][:loaded_epoch]]
+                    if len(values) != len(loaded_history[key]):
+                        print(f"[Train] Truncated {key} history from {len(loaded_history[key])} to {loaded_epoch} entries")
+                    values += [float("nan")] * (loaded_epoch - len(values))
+                    metrics_history[key] = values
                 print(f"[Train] Resumed metrics history from epoch {loaded_epoch}")
             if loaded_epoch >= self.epochs:
                 print(
@@ -692,6 +714,8 @@ class Train:
             for metric, value in train_metrics.items():
                 metrics_history[f"train_{metric}"].append(self._to_host_scalar(value))
             metrics.reset()
+            # The jitted `state` carries the metric totals; re-split so the reset takes effect there too.
+            _, state = nnx.split((model, optimizer, metrics))
 
             # Evaluation phase
             do_eval = (epoch % self.eval_every == 0)
@@ -712,6 +736,7 @@ class Train:
                 for metric, value in eval_metrics.items():
                     metrics_history[f"eval_{metric}"].append(self._to_host_scalar(value))
                 metrics.reset()
+                _, state = nnx.split((model, optimizer, metrics))
 
                 current_eval_loss = metrics_history["eval_loss"][-1]
                 if current_eval_loss < best_eval_loss - self.early_stopping_min_delta:
