@@ -14,7 +14,7 @@ from .ilc import ProduceSILC
 from .power_spec import MapAlmConverter, PowerSpectrumTT, PowerSpectrumCrossTT
 from .mixing_matrix_constraint import SpectralVector
 from .custom_s2wav_bandlimits import j_max_silc
-from .utils import ilc_mode_tag
+from .utils import ilc_mode, normalise_deproject
 
 
 class Pipeline:
@@ -35,7 +35,7 @@ class Pipeline:
         save_ilc_intermediates: bool = True,
         overwrite: bool = False,
         directory: str = "data/",
-        constraint: bool = False,
+        deproject: list | None = None,
         F = None,
         reference_vectors = None,
         nsamp: float = 1200, 
@@ -72,7 +72,8 @@ class Pipeline:
         self.save_ilc_intermediates = save_ilc_intermediates
         self.overwrite = overwrite
         self.directory = directory
-        self.constraint = constraint
+        # components deprojected by the constrained ILC (cILC), e.g. ["tsz"]; None/[] -> plain ILC
+        self.deproject = normalise_deproject(deproject)
         self.F = F
         self.reference_vectors = reference_vectors
         self.F_source = "theory"
@@ -253,74 +254,66 @@ class Pipeline:
             J = int(j_max_silc(L, lam=self.lam)) + 1   # wavelet bands (excludes scaling)
             scales = list(range(J))       # use only wavelet bands for ILC
     
-        # Constraint inputs (build F/ref on demand; default empirical)
-        do_constraint = getattr(self, "constraint", False)
-        if getattr(self, "pcilc", False) and do_constraint:
-            raise ValueError(
-            "pcilc=True and constraint=True cannot both be enabled. "
-            "Set constraint=False for pcILC."
-        )
-        F = getattr(self, "F", None)
-        reference_vectors = getattr(self, "reference_vectors", None)
+        # Constraint set: cILC preserves extract_comp and nulls every component in self.deproject.
+        deproject = self.deproject
+        if self.pcilc and deproject:
+            raise ValueError("pcilc=True and deproject=[...] cannot both be enabled. Drop --deproject for pcILC.")
+        is_real_sky = ("real" in self.components) or (comp_in == "real")
+        if deproject and not is_real_sky:
+            # simulated maps: a deprojected component must actually be in the CFN mixture
+            present = [str(c).lower() for c in self.components]
+            missing = [c for c in deproject if c not in present]
+            if missing:
+                raise ValueError(
+                    f"--deproject {missing} but these components are not in --components {self.components}: "
+                    "the simulated maps contain no such signal to null."
+                )
 
-        if reference_vectors is None:
+        if self.reference_vectors is None:
+            # SED vectors needed by every mode (plain ILC on tSZ, pcILC); built once
             _, _, ref_vecs, _ = SpectralVector.build_F_theory(
                 frequencies=freqs,
                 components_order=["cmb", "tsz"],
             )
             self.reference_vectors = ref_vecs
-            reference_vectors = ref_vecs
-            
-        if do_constraint and (F is None or reference_vectors is None):
-            source = getattr(self, "F_source", "theory")
-            kwargs = dict(getattr(self, "F_kwargs", {}))
-            freq_arg = kwargs.pop("frequencies", freqs)
-
-            # keep only relevant keys for the chosen source
-            if source == "theory":
-                # build_F_theory(beta_s, nu0, frequencies, components_order)
-                kwargs = {k: v for k, v in kwargs.items() if k in ("beta_s", "nu0")}
-            else:  # empirical
-                # build_F_empirical(base_dir, file_templates, frequencies, realization, mask_path, components_order)
-                if "realisation" in kwargs and "realization" not in kwargs:
-                    kwargs["realization"] = kwargs.pop("realisation")
-
-                # both are required positionally, so fall back to this pipeline's own paths
-                kwargs.setdefault("base_dir", self.directory)
-                kwargs.setdefault(
-                    "file_templates",
-                    FileTemplates(self.directory, topology=self.topology).file_templates,
-                )
-                kwargs.setdefault("realization", self.start_realisation)
-
-                kwargs = {k: v for k, v in kwargs.items()
-                          if k in ("base_dir", "file_templates", "realization", "mask_path",
-                                   "components_order", "override_vectors")}
-
-            components_order = kwargs.pop("components_order", None)
-            if components_order is None:
-                components_order = [c.lower() for c in self.components if c.lower() in ("cmb","tsz")]
-            
-            # build F with explicit column order 
-            F_new, F_cols, ref_vecs, _ = SpectralVector.get_F(
-                source=source,
-                frequencies=freq_arg,
-                components_order=components_order,
-                **kwargs
-            )
-
-            self.F = F_new
-            self.reference_vectors = ref_vecs
-            F = self.F
-            reference_vectors = self.reference_vectors
-        
-        # Realisations, freqs
-        realisations = list(range(self.start_realisation, self.start_realisation + self.realisations))
-        freqs = list(self.frequencies)
 
         # Run ILC for requested targets
         for extract_comp in self.ilc_components:
-            print(f"--- ILC target='{extract_comp}'  input='{comp_in}'  lmax={self.lmax}  scales={scales} ---")
+            F = self.F
+            reference_vectors = self.reference_vectors
+            if deproject:
+                normalise_deproject(deproject, extract_comp)  # raises if the target itself is deprojected
+                if F is None:
+                    # build F with columns [extract_comp] + deproject (f = (1, 0, ...) follows this order)
+                    source = getattr(self, "F_source", "theory")
+                    kwargs = dict(getattr(self, "F_kwargs", {}))
+                    freq_arg = kwargs.pop("frequencies", freqs)
+                    kwargs.pop("components_order", None)
+                    if source == "theory":
+                        # build_F_theory(beta_s, nu0, frequencies, components_order)
+                        kwargs = {k: v for k, v in kwargs.items() if k in ("beta_s", "nu0")}
+                    else:  # empirical
+                        # build_F_empirical(base_dir, file_templates, frequencies, realization, mask_path, components_order)
+                        if "realisation" in kwargs and "realization" not in kwargs:
+                            kwargs["realization"] = kwargs.pop("realisation")
+                        kwargs.setdefault("base_dir", self.directory)
+                        kwargs.setdefault(
+                            "file_templates",
+                            FileTemplates(self.directory, topology=self.topology).file_templates,
+                        )
+                        kwargs.setdefault("realization", self.start_realisation)
+                        kwargs = {k: v for k, v in kwargs.items()
+                                  if k in ("base_dir", "file_templates", "realization", "mask_path", "override_vectors")}
+                    F, F_cols, reference_vectors, _ = SpectralVector.get_F(
+                        source=source,
+                        frequencies=freq_arg,
+                        components_order=[str(extract_comp).lower()] + list(deproject),
+                        **kwargs
+                    )
+                    if F_cols != [str(extract_comp).lower()] + list(deproject):
+                        raise ValueError(f"Spectral response unavailable for {[str(extract_comp).lower()] + list(deproject)}; built columns {F_cols}.")
+                # a user-supplied F must follow the same column order, with reference_vectors keyed in that order
+            print(f"--- ILC target='{extract_comp}'  deproject={deproject}  input='{comp_in}'  lmax={self.lmax}  scales={scales} ---")
             _ = ProduceSILC.ILC_wav_coeff_maps_MP(
                 file_template=file_template,
                 frequencies=freqs,
@@ -331,7 +324,7 @@ class Pipeline:
                 lam=self.lam, 
                 N_directions=self.N_directions,
                 comp=comp_in,
-                constraint=do_constraint,
+                deproject=deproject,
                 F=F,
                 extract_comp=extract_comp,
                 reference_vectors=reference_vectors,
@@ -361,7 +354,7 @@ class Pipeline:
         field: int = 0,
         nsamp: float | int | None = None,
         overwrite: bool | None = None,
-        constraint: bool | None = None,   
+        deproject: list | None = None,
         mode: str | None = None,    
     ):
         """
@@ -371,8 +364,8 @@ class Pipeline:
         # resolve overwrite
         overwrite = self.overwrite if overwrite is None else overwrite
 
-        # resolve constraint for THIS call (so it reads con_ vs uncon_)
-        constraint_ = getattr(self, "constraint", False) if constraint is None else bool(constraint)
+        # resolve the deprojected set for THIS call (selects the ilc_ / cilc-dp-* files)
+        deproject_ = self.deproject if deproject is None else normalise_deproject(deproject)
 
         # defaults from pipeline
         r      = self.start_realisation if realisation is None else int(realisation)
@@ -410,13 +403,13 @@ class Pipeline:
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
                 realisation=r, lmax=lmax_, lam=lam_, N_directions=N_directions_,
-                nsamp=nsamp_, constraint=constraint_, mode=mode,
+                nsamp=nsamp_, deproject=deproject_, mode=mode,
             )
             src = "ilc_synth"
             if mode is not None:
                 label = f"{mode}-synth ({tgt})"
             else:
-                label = f"{'cILC' if constraint_ else 'ILC'}-synth ({tgt})"
+                label = f"{'cILC' if deproject_ else 'ILC'}-synth ({tgt})"
 
         elif source == "processed":
             if component is not None:
@@ -457,7 +450,7 @@ class Pipeline:
             if mode is not None:
                 save_mode = mode
             else:
-                save_mode = "cilc" if constraint_ else "ilc"
+                save_mode = ilc_mode(deproject=deproject_)
         
             freq_tag = "_".join(freqs)
         
@@ -533,7 +526,7 @@ class Pipeline:
         lam: str | float | int | None = None,
         N_directions: int | None = None,
         nsamp: int | float | None = None,
-        constraint: bool | None = None,
+        deproject: list | None = None,
         field: int = 0,
         plot_r: bool = False,
         overwrite: bool | None = None,
@@ -549,7 +542,7 @@ class Pipeline:
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         N_directions_ = self.N_directions if N_directions is None else int(N_directions)
         nsamp_ = getattr(self, "nsamp", 1200) if nsamp is None else int(nsamp)
-        constraint_ = getattr(self, "constraint", False) if constraint is None else bool(constraint)
+        deproject_ = self.deproject if deproject is None else normalise_deproject(deproject)
         fX    = self.frequencies if frequencies_X is None else list(frequencies_X)
         fY    = self.frequencies if frequencies_Y is None else list(frequencies_Y)
         overwrite = self.overwrite if overwrite is None else overwrite
@@ -583,12 +576,12 @@ class Pipeline:
                     component=comp_in, source="ilc_synth",
                     extract_comp=tgt, frequencies=frequencies,
                     realisation=r_use, lmax=lmax_, lam=lam_, N_directions=N_directions_,
-                    nsamp=nsamp_, constraint=constraint_,  mode=mode_use
+                    nsamp=nsamp_, deproject=deproject_,  mode=mode_use
                 )
                 if mode_use is not None:
                     label = f"{mode_use}-synth ({tgt})"
                 else:
-                    label = f"{'cILC' if constraint_ else 'ILC'}-synth ({tgt})"
+                    label = f"{'cILC' if deproject_ else 'ILC'}-synth ({tgt})"
                 fmt = "mw" if out["format"] == "mw" else "hp"
 
             elif src == "processed":
@@ -730,9 +723,7 @@ class Pipeline:
         ell = ell_proc
 
         # 3) save combined spectra
-        mode = ilc_mode_tag(constraint=getattr(self, "constraint", False),
-                            pcilc=getattr(self, "pcilc", False),
-                            pcilc_eps=getattr(self, "pcilc_eps", None))
+        mode = ilc_mode(deproject=self.deproject, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
 
         out_dir = os.path.join(self.directory, "power_spectra")
         os.makedirs(out_dir, exist_ok=True)
@@ -875,22 +866,25 @@ def main():
     parser.add_argument('--topology', type=str, choices=['Toy', 'E1'], default=None,
                         help="Topology CMB realisation set to use. Omit for the standard (non-topology) CMB maps.")
 
-    # Constrained ILC options (pipeline already supports these)
+    # Constrained ILC (cILC): preserve the extracted component and null the listed ones
     parser.add_argument(
-        '--constraint',
-        action='store_true',
-        help="Enable constrained ILC using a spectral mixing matrix F."
+        '--deproject',
+        nargs='+',
+        default=None,
+        metavar='COMP',
+        help="Components to deproject with a constrained ILC (cILC), e.g. --deproject tsz. "
+             "Omit for the plain ILC. Output files are tagged cilc-dp-<comp>."
     )
     parser.add_argument(
         '--nsamp',
         type=int,
         default=1200,
-        help="Number of Monte Carlo samples (nsamp) for constrained ILC."
+        help="Number of Monte Carlo samples (nsamp); part of the ILC output filenames."
     )
 
     # pcILC options
     parser.add_argument('--pcilc', action='store_true',
-                        help="Enable pcILC (partially constrained ILC). Mutually exclusive with --constraint.")
+                        help="Enable pcILC (partially constrained ILC). Mutually exclusive with --deproject.")
     parser.add_argument('--pcilc-component', type=str, default='tsz',
                         help="Component deprojected by pcILC.")
     parser.add_argument('--pcilc-eps', type=float, default=None,
@@ -930,7 +924,7 @@ def main():
         save_ilc_intermediates=args.save_ilc_intermediates,
         overwrite=args.overwrite,
         directory=args.directory,
-        constraint=args.constraint,
+        deproject=args.deproject,
         nsamp=args.nsamp,
         topology=args.topology,
         pcilc=args.pcilc,
@@ -963,11 +957,28 @@ if __name__ == "__main__": # Run main() only when the file is executed as a scri
 # 3. CFNE_CIRC using circular point-source injection
 # python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne_circ --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 3.0 --ps-brightness-scale 5.0 --ps-injection-mode circular_ps --overwrite --steps process wavelets ilc
 #
-# 4. Constrained ILC (F is built from theory, with the ('cmb','tsz') subset of --components as columns)
-# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --constraint --nsamp 1200 --steps ilc
+# 4. Constrained ILC deprojecting tSZ (F is built from theory with columns [cmb, tsz]; outputs tagged cilc-dp-tsz)
+# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --deproject tsz --nsamp 1200 --steps ilc
 #
-# 5. pcILC deprojecting tSZ (mutually exclusive with --constraint)
+# 5. pcILC deprojecting tSZ (mutually exclusive with --deproject)
 # python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --pcilc --pcilc-component tsz --pcilc-pick minvar --steps ilc
 #
 # 6. Topology CMB realisations
 # python -m skyclean.silc.pipeline --components cmb noise --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 --realisations 1 --start-realisation 0 --lmax 511 --topology E1 --steps process wavelets ilc
+
+'''
+python3 -m skyclean.silc.pipeline \
+  --components all \
+  --wavelet-components cfn \
+  --ilc-components cmb \
+  --frequencies 030 044 070 100 143 217 353 545 857 \
+  --realisations 20 \
+  --start-realisation 0 \
+  --lmax 511 \
+  --N-directions 4 \
+  --lam 2.0 \
+  --nsamp 1200 \
+  --directory /Scratch/cindy/testing/Skyclean/skyclean/data/ \
+  --overwrite \
+  --steps process wavelets ilc
+'''

@@ -829,12 +829,13 @@ class SILCTools():
         extract_comp,
         *,
         N_directions: int = 1,
-        constraint=False,
+        deproject=None,
         F=None,
         f=None,
         reference_vectors=None,
         lam: float | None = None,
         nsamp: float | None = None,
+        frequencies: list | None = None,
         overwrite: bool = False,
         # ---- pcILC (inequality / boundary) ----
         pcilc: bool = False,
@@ -845,8 +846,8 @@ class SILCTools():
     ):
         """
         Computes weight vectors from a covariance matrix R using:
-          - standard ILC (constraint=False),
-          - hard constrained ILC / cILC (constraint=True),
+          - standard ILC (deproject empty),
+          - hard constrained ILC / cILC (preserve extract_comp: w^T a = 1; null each component in deproject, e.g. ["tsz"]: w^T a = 0),
           - pcILC (pcilc=True): |w^T b| <= eps enforced by boundary solutions.
 
         Args:
@@ -857,10 +858,11 @@ class SILCTools():
             comp: component tag for filenames (e.g. 'cfn')
             L_max: L_max = lmax + 1
             extract_comp: target component name string (e.g. 'cmb' or 'tsz')
-            constraint: if True, use cILC with (F,f)
-            F: (Nf,Nc) spectral response matrix for constraints
+            deproject: components deprojected by the cILC (see utils.normalise_deproject); None/[] for the plain ILC
+            F: (Nf,Nc) spectral response matrix for constraints, columns [extract_comp] + deproject
             f: (Nc,) constraint target vector
             reference_vectors: dict with named SED vectors (e.g. {"tsz": ...})
+            frequencies: band-set list, part of the weight filename
             lam, nsamp, overwrite: bookkeeping / naming
 
             pcilc: if True, use pcILC (paper inequality formulation)
@@ -875,8 +877,12 @@ class SILCTools():
         # -----------------------------
         # Basic checks / shapes
         # -----------------------------
+        deproject = normalise_deproject(deproject, extract_comp)
+        constraint = bool(deproject)
         if pcilc and constraint:
-            raise ValueError("Choose either constraint=True (cILC) OR pcilc=True (pcILC), not both.")
+            raise ValueError("Choose either deproject=[...] (cILC) OR pcilc=True (pcILC), not both.")
+        if frequencies is None:
+            raise ValueError("frequencies (band-set list) is required to name the weight file.")
         ''' 
         print("\n=== compute_weights_generalised ===")
         print("scale =", scale)
@@ -962,17 +968,19 @@ class SILCTools():
         # ---------------------------------------
         if constraint:
             if F is None:
-                raise ValueError("F must be provided when constraint=True")
+                raise ValueError("F must be provided when deproject is non-empty")
             F = np.asarray(F, dtype=float)
             Nf_F, N_comp = F.shape
             if Nf_F != N_freq:
                 raise ValueError(f"F has {Nf_F} rows but R has {N_freq} channels")
+            if N_comp != 1 + len(deproject):
+                raise ValueError(f"F has {N_comp} columns but [extract_comp] + deproject = {[extract_comp] + deproject} has {1 + len(deproject)}")
 
             if f is None and extract_comp is not None:
                 f = ILCConstraints.find_f_from_extract_comp(F, extract_comp, reference_vectors)
 
             if f is None:
-                raise ValueError("Constraint vector f must be provided (or inferable) when constraint=True")
+                raise ValueError("Constraint vector f must be provided (or inferable) when deproject is non-empty")
             f = np.asarray(f, dtype=float).reshape((-1,))
             if f.shape != (N_comp,):
                 raise ValueError(f"Constraint vector f must have shape ({N_comp},), got {f.shape}")
@@ -986,28 +994,25 @@ class SILCTools():
                 identity_vector = np.ones(N_freq, dtype=float)
             elif key == "tsz":
                 if reference_vectors is None or "tsz" not in reference_vectors:
-                    raise ValueError("constraint=False + extract_comp='tsz' needs reference_vectors['tsz'] (tSZ SED).")
+                    raise ValueError("plain ILC with extract_comp='tsz' needs reference_vectors['tsz'] (tSZ SED).")
                 identity_vector = np.asarray(reference_vectors["tsz"], dtype=float).reshape((-1,))
                 if identity_vector.shape != (N_freq,):
                     raise ValueError(f"reference_vectors['tsz'] must have shape ({N_freq},), got {identity_vector.shape}")
             else:
-                raise ValueError(f"constraint=False only supports extract_comp='cmb' or 'tsz' for now (got '{extract_comp}').")
+                raise ValueError(f"plain ILC only supports extract_comp='cmb' or 'tsz' for now (got '{extract_comp}').")
 
         # ---------------------------------------
-        # Naming / saving
+        # Naming / saving: {type} is "weight_vector" for the plain ILC, otherwise the mode tag
         # ---------------------------------------
-        if pcilc:
-            name = f"pcilc_{extract_comp}_eps{eps_str}"
-        elif constraint:
-            name = f"cilc_{extract_comp}"
-        else:
-            name = "weight_vector"
+        mode = ilc_mode(deproject=deproject, pcilc=pcilc, pcilc_eps=pcilc_eps)
+        name = "weight_vector" if mode == "ilc" else mode
 
         fmt = dict(
             component=comp,
             comp=comp,
             type=name,
             extract_comp=extract_comp,
+            frequencies="_".join(str(f_) for f_ in frequencies),
             scale=int(scale),
             realisation=int(realisation),
             lmax=int(L_max - 1),
@@ -1144,7 +1149,7 @@ class SILCTools():
                     if i == 0 and j == 0:
                         print("---- local cILC check ----")
                         print("scale =", scale, "realisation =", realisation, "i =", i, "j =", j)
-                        print("Rij (cilc) =\n", Rij)
+                        print("Rij (deproject) =\n", Rij)
                         print("F =\n", F)
                         print("f =", f)
                         print("w_cilc[:5] =", w[:5])
@@ -1217,7 +1222,7 @@ class SILCTools():
     def trim_to_original(MW_Doubled_Map: np.ndarray, scale: int, realisation: int, method: str, *,
                          path_template: str, component: str, extract_comp: str, lmax: int,
                          lam: float | None = None, nsamp: float | None = None, N_directions: int = 1,
-                         overwrite: bool = False, mode: str = "ilc"):
+                         overwrite: bool = False, mode: str = "ilc", frequencies: str | None = None):
 
         MW_Doubled_Map = np.asarray(MW_Doubled_Map)
 
@@ -1316,6 +1321,7 @@ class SILCTools():
                 mode=mode,
                 component=component,
                 extract_comp=extract_comp,
+                frequencies=frequencies,
                 scale=scale,
                 realisation=int(realisation),
                 lmax=int(lmax),
@@ -1421,7 +1427,7 @@ class SILCTools():
     @staticmethod
     def synthesize_ILC_maps_generalised(
         trimmed_maps, realisation, file_templates, lmax, N_directions,lam, component=None, 
-        extract_comp=None, visualise=False, constraint=None, frequencies=None, F=None, f=None, 
+        extract_comp=None, visualise=False, deproject=None, frequencies=None, F=None, f=None, 
         reference_vectors=None, nsamp=None, overwrite: bool = False, mode: str = "ilc",
     ):
         #print("synthesize_ILC_maps_generalised", flush=True)
@@ -1480,7 +1486,7 @@ class SILCTools():
             try:
                 if str(mode).startswith("pcilc"):
                     prefix = f"pcILC ε={str(mode).replace('pcilc_epsa', '')}"
-                elif str(mode) == "cilc":
+                elif str(mode).startswith("cilc"):
                     prefix = "cILC"
                 else:
                     prefix = "ILC"
@@ -1551,7 +1557,7 @@ class ProduceSILC():
 
 
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, lam,
-                              N_directions, comp, constraint=False, F=None, extract_comp=None,
+                              N_directions, comp, deproject=None, F=None, extract_comp=None,
                              reference_vectors=None, nsamp=None, overwrite: bool = False, 
                              pcilc: bool = False, pcilc_component: str = "tsz", 
                              pcilc_eps: float | None = None, pcilc_pick: str = "minvar",):
@@ -1564,8 +1570,13 @@ class ProduceSILC():
         print(f"[DEBUG] passed L_max={L_max} -> L={int(L_max)} lmax={int(L_max)-1}")
         print(f"[DEBUG] wavelet_js_custom(L)={SILCTools.wavelet_js_custom(int(L_max))}")
 
-        # --- determine output mode for naming ---
-        mode = ilc_mode_tag(constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps)
+        # --- constraint set and output mode for naming ---
+        if isinstance(extract_comp, (list, tuple, np.ndarray)):
+            raise ValueError("Pass a single extract_comp (e.g. 'cmb'); the deprojected components go in deproject.")
+        _, extract_comp = normalize_targets(extract_comp)
+        deproject = normalise_deproject(deproject, extract_comp)
+        constraint = bool(deproject)
+        mode = ilc_mode(deproject=deproject, pcilc=pcilc, pcilc_eps=pcilc_eps)
  
         def _check_against_F(W, F, f, tol=1e-6):
             W = np.asarray(W)
@@ -1587,18 +1598,12 @@ class ProduceSILC():
             "create_ilc_maps": [],
             "trim": [],
         }
-        # --- Prepare constraint vector / tags ---
+        # --- Prepare constraint vector: preserve extract_comp (1), null every deproject component (0) ---
         if constraint:
-            if F is None or extract_comp is None:
-                raise ValueError("Must provide F and extract_comp if constraint=True")
-            target_names, extract_comp = normalize_targets(extract_comp)
-            if len(target_names) == 0:
-                raise ValueError("Provide at least one target component name when constraint=True")
-            f = ILCConstraints.find_f_from_extract_comp(F, target_names, reference_vectors)
+            if F is None:
+                raise ValueError(f"Must provide F (columns {[extract_comp] + deproject}) when deproject={deproject}")
+            f = ILCConstraints.find_f_from_extract_comp(F, [extract_comp], reference_vectors)
         else:
-            if isinstance(extract_comp, (list, tuple, np.ndarray)):
-                raise ValueError("For unconstrained ILC, pass a single extract_comp (e.g., 'cmb').")
-            _, extract_comp = normalize_targets(extract_comp)
             f = None  # not used in unconstrained mode
         # ---- derive Ndeproj automatically ----
         if constraint:
@@ -1718,12 +1723,13 @@ class ProduceSILC():
                     comp=comp,
                     L_max=L_max,
                     extract_comp=extract_comp,
-                    constraint=constraint,
+                    deproject=deproject,
                     F=F,
                     f=f,
                     reference_vectors=reference_vectors,
                     lam=str(lam),
                     nsamp=nsamp,
+                    frequencies=frequencies,
                     N_directions=int(N_directions),
                     overwrite=overwrite,
                     pcilc=pcilc,
@@ -1740,18 +1746,13 @@ class ProduceSILC():
             weight_vector_load = []
             W_for_final_check = None
 
-            if pcilc:
-                eps_str = f"{float(pcilc_eps):.6g}"
-                name = f"pcilc_{extract_comp}_eps{eps_str}"
-            elif constraint:
-                name = f"cilc_{extract_comp}"
-            else:
-                name = "weight_vector"
+            name = "weight_vector" if mode == "ilc" else mode
 
             for scale in scales:
                 weight_vector_path = output_templates['weight_vector_matrices'].format(
                     component=comp,
                     extract_comp=extract_comp,
+                    frequencies=F_str,
                     type=name,
                     scale=scale,
                     realisation=int(realisation),
@@ -1778,7 +1779,7 @@ class ProduceSILC():
                     doubled_MW_wav_c_j,
                     realisation=int(realisation),
                     component=comp,
-                    constraint=constraint,
+                    deproject=deproject,
                     extract_comp=extract_comp
                 )
                 doubled_maps.append(map_)
@@ -1786,6 +1787,7 @@ class ProduceSILC():
                     mode=mode,
                     component=comp,
                     extract_comp=extract_comp,
+                    frequencies=F_str,
                     scale=scale,
                     realisation=int(realisation),
                     lmax=lmax,
@@ -1809,6 +1811,7 @@ class ProduceSILC():
                     mode=mode,
                     component=comp,
                     extract_comp=extract_comp,
+                    frequencies=F_str,
                     scale=int(sc),
                     realisation=int(realisation),
                     lmax=int(lmax),
@@ -1847,6 +1850,7 @@ class ProduceSILC():
                         N_directions=int(N_directions),
                         overwrite=overwrite, 
                         mode=mode,
+                        frequencies=F_str,
                     )
 
                 # Ensure saved on disk (trim_to_original already saved when path_template provided,
@@ -1873,7 +1877,7 @@ class ProduceSILC():
              extract_comp=extract_comp,
              frequencies=frequencies,
              visualise=True,
-             constraint=constraint,
+             deproject=deproject,
              F=F, 
              f=f, 
              reference_vectors=reference_vectors,

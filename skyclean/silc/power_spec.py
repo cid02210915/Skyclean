@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 from typing import Optional, Union, Iterable, Dict, Any
 
-from .utils import ilc_mode_candidates
+from .utils import ilc_mode
 
 class MapAlmConverter:
     def __init__(self, file_templates: Dict[str, str]):
@@ -29,7 +29,7 @@ class MapAlmConverter:
         lam: Optional[Union[int, float, str]] = None,
         N_directions: int = 1,
         nsamp: float | None = None, 
-        constraint: bool | None = None, 
+        deproject: list | None = None, 
         mode: Optional[str] = None,
     ) -> Dict[str, Any]:
 
@@ -40,12 +40,12 @@ class MapAlmConverter:
             component=component, source=source,
             frequency=frequency, realisation=realisation, lmax=lmax,
             extract_comp=extract_comp, frequencies=frequencies, lam=lam, 
-            N_directions=N_directions, nsamp=nsamp, constraint=constraint, mode=mode,
+            N_directions=N_directions, nsamp=nsamp, deproject=deproject, mode=mode,
         )
 
         print(
         f"[DEBUG to_alm] source={source} component={component} extract_comp={extract_comp} "
-        f"constraint={constraint} lmax={lmax} lam={lam} nsamp={nsamp} "
+        f"deproject={deproject} lmax={lmax} lam={lam} nsamp={nsamp} "
         f"freq={frequency} freqs={frequencies}\n"
         f"              -> path={path}\n"
         f"              -> exists={os.path.exists(path)}"
@@ -95,7 +95,7 @@ class MapAlmConverter:
         lam: Optional[Union[int, float, str]],
         N_directions: int = 1,
         nsamp: Optional[Union[int, float]] = None,  
-        constraint: Optional[bool] = None,
+        deproject: list | None = None,
         mode: Optional[str] = None,
     ) -> str:
         
@@ -147,31 +147,9 @@ class MapAlmConverter:
                 nsamp = 1200  
             nsamp_str = str(int(nsamp))
 
-            # explicit mode takes priority (e.g. "pcilc_eps0.2")
-            if mode is not None:
-                mode_candidates = [str(mode)]
-            else:
-                mode_candidates = ilc_mode_candidates(constraint=bool(constraint))
-        
-            for mode_try in mode_candidates:
-                kw = dict(
-                    mode=mode_try,
-                    extract_comp=extract_comp,
-                    component=component,
-                    frequencies=freq_str,
-                    realisation=int(realisation),
-                    lmax=int(lmax),
-                    N_directions=int(N_directions),
-                    lam=lam_str,
-                    nsamp=nsamp_str,
-                )
-                candidate = fmt.format(**kw)
-                if os.path.exists(candidate):
-                    return candidate
-        
-            # if nothing exists, return the first candidate for debugging
+            # explicit mode takes priority (e.g. "pcilc_eps0.2"); otherwise derived from the deprojected set
             kw = dict(
-                mode=mode_candidates[0],
+                mode=str(mode) if mode is not None else ilc_mode(deproject=deproject),
                 extract_comp=extract_comp,
                 component=component,
                 frequencies=freq_str,

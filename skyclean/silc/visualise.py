@@ -13,7 +13,7 @@ from ..ml.inference import Inference
 
 class Visualise(): 
     def __init__(self, inference: Inference, component: str, extract_comp: str, frequencies: list, realisation: int, lmax: int, lam_list: float = [2.0], directory: str = "data/",
-                 rn: int = 30, N_directions: int = 1, constraint: bool = False, batch_size: int = 32, epochs: int = 120, 
+                 rn: int = 30, N_directions: int = 1, deproject: list | None = None, batch_size: int = 32, epochs: int = 120, 
                  pcilc: bool = False, pcilc_eps: float | None = None,
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, nsamp: int = 1200, 
                  ):
@@ -41,15 +41,16 @@ class Visualise():
         self.momentum = momentum
         self.chs = chs
         self.nsamp = nsamp
-        self.constraint = constraint
+        self.deproject = normalise_deproject(deproject, extract_comp)  # components deprojected by the cILC; [] for the plain ILC
         self.pcilc = pcilc
         self.pcilc_eps = pcilc_eps
+        self.ml = ml_tag(getattr(inference, "masked", False))  # "ml-masked" when the model was trained masked
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
         self.output_directories = files.output_directories
 
-        self.data_handler = CMBFreeILC(extract_comp=extract_comp, component=component, frequencies=frequencies, realisations=rn, lmax=lmax, N_directions=N_directions, lam=lam_list[0], nsamp=nsamp, constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps, batch_size=batch_size, split=[0.8, 0.2], directory=directory)
+        self.data_handler = CMBFreeILC(extract_comp=extract_comp, component=component, frequencies=frequencies, realisations=rn, lmax=lmax, N_directions=N_directions, lam=lam_list[0], nsamp=nsamp, deproject=deproject, pcilc=pcilc, pcilc_eps=pcilc_eps, batch_size=batch_size, split=[0.8, 0.2], directory=directory)
 
 
     def visualise_maps(self, comps: list):
@@ -122,7 +123,7 @@ class Visualise():
 
         lam   = self.lam_list[0] if lam is None else lam
         nsamp = self.nsamp if nsamp is None else nsamp
-        mode  = ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps) if mode is None else mode
+        mode  = ilc_mode(deproject=self.deproject, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps) if mode is None else mode
 
         realisation = self.realisation
         lmax        = self.lmax
@@ -139,6 +140,7 @@ class Visualise():
             if comp == 'ilc':
                 return self.file_templates['trimmed_maps'].format(
                     mode=mode, component=self.component, extract_comp=self.extract_comp,
+                    frequencies="_".join(str(x) for x in frequencies),
                     scale=scale, realisation=realisation, lmax=lmax,
                     N_directions=self.N_directions, lam=lam, nsamp=nsamp,
                 )
@@ -264,7 +266,7 @@ class Visualise():
         
         Parameters:
             map_path (str): File path to the MW map.
-            component (str): Component name (e.g., 'ilc_synth', 'ilc_improved', etc.).
+            component (str): Component name (e.g., 'ilc_synth', 'ilc_ml', etc.).
             lam (float): Lambda value for the processing.
         
         Returns:
@@ -274,14 +276,15 @@ class Visualise():
         spectrum_template_key = f"{component}_spectrum"
         
         lmax = self.lmax
+        mode = ilc_mode(deproject=self.deproject, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
 
         # Check if the specific spectrum template exists, otherwise use a default path
         if spectrum_template_key in self.file_templates:
-            if component == 'ilc_improved':
+            if component == 'ilc_ml':
                 chs = "_".join(str(n) for n in self.chs)
-                mode = ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
                 spectrum_path = self.file_templates[spectrum_template_key].format(
                                         mode=mode,
+                                        ml=self.ml,
                                         extract_comp=self.extract_comp,
                                         component=self.component,
                                         realisation=self.realisation, 
@@ -305,16 +308,13 @@ class Visualise():
                     lam=lam,
                 )
         else:
-            if component == 'ilc_improved':
+            # Fallback: cache next to the map, named after the ILC mode and input product it was computed from
+            map_dir = os.path.dirname(map_path)
+            tag = f"{mode}_{component}_power_spectrum_from-{self.component}_r{self.realisation:04d}_lmax{lmax}_N{self.N_directions}_lam{lam}_nsamp{self.nsamp}"
+            if component == 'ilc_ml':
                 chs = "_".join(str(n) for n in self.chs)
-                map_dir = os.path.dirname(map_path)
-                spectrum_filename = f"{component}_power_spectrum_r{self.realisation:04d}_lmax{lmax}_lam{lam}_rn{self.rn}_batch{self.batch_size}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}.npy"
-                spectrum_path = os.path.join(map_dir, spectrum_filename)
-            else:
-                # Fallback: create path in the same directory as the map
-                map_dir = os.path.dirname(map_path)
-                spectrum_filename = f"{component}_power_spectrum_r{self.realisation:04d}_lmax{lmax}_lam{lam}.npy"
-                spectrum_path = os.path.join(map_dir, spectrum_filename)
+                tag += f"_rn{self.rn}_batch{self.batch_size}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}"
+            spectrum_path = os.path.join(map_dir, tag + ".npy")
             
         # Check if spectrum already exists
         if os.path.exists(spectrum_path):
@@ -351,28 +351,29 @@ class Visualise():
         In MW case, spectrum is saved since computing it is computationally heavy.
         
         Parameters:
-            component (str): Component name ('ilc_synth', 'ilc_improved', 'cmb', etc.)
+            component (str): Component name ('ilc_synth', 'ilc_ml', 'cmb', etc.)
             lam (float): Lambda value for MW components.
             
         Returns:
             cl (np.ndarray): The computed power spectrum.
         """
-        mw_components = ['ilc_synth', 'ilc_improved']
+        mw_components = ['ilc_synth', 'ilc_ml']
 
         frequencies = self.frequencies
         
         if component in mw_components:
             # MW-format component - use the general MW power spectrum function
             map_path = self.file_templates[component].format(
-                mode=ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps),
-                extract_comp='cmb',
-                component='cfn',
+                mode=ilc_mode(deproject=self.deproject, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps),
+                ml=self.ml,
+                extract_comp=self.extract_comp,
+                component=self.component,
                 frequencies="_".join(str(x) for x in frequencies),
                 realisation=self.realisation, 
                 lmax=self.lmax, 
                 N_directions=self.N_directions,
                 lam=lam,
-                nsamp=1200
+                nsamp=self.nsamp
             )
             return self.compute_and_save_mw_power_spec(map_path, component, lam)
         else:
@@ -460,7 +461,7 @@ class Visualise():
                     color = comp_color[comp]
                     
                     # Define MW-format components
-                    mw_components = ['ilc_synth', 'ilc_improved']
+                    mw_components = ['ilc_synth', 'ilc_ml']
                     
                     # Handle MW-format components (ILC types)
                     if comp in mw_components:
@@ -557,7 +558,7 @@ class Visualise():
 
         else:
             lmax = self.lmax
-            mw_components = ['ilc_synth', 'ilc_improved']
+            mw_components = ['ilc_synth', 'ilc_ml']
 
             fig, ax = plt.subplots(figsize=(8, 6))
             ax.set_xlabel(r'$\ell$', fontsize=14)
@@ -657,7 +658,7 @@ class Visualise():
         lr = self.lr
         momentum = self.momentum
         chs = "_".join(str(n) for n in self.chs)
-        mode = ilc_mode_tag(constraint=self.constraint, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
+        mode = ilc_mode(deproject=self.deproject, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
 
         # Normalise comp_a into a list
         if isinstance(comp_a, str):
@@ -665,7 +666,7 @@ class Visualise():
         else:
             comp_list = list(comp_a)
 
-        mw_components = ["ilc_synth", "ilc_improved"]
+        mw_components = ["ilc_synth", "ilc_ml"]
 
         # ---------- prepare mask in HEALPix if requested ----------
         mask_hp = None
@@ -695,9 +696,10 @@ class Visualise():
             """Return C_ell (or pseudo-C_ell if masked=True) for given component."""
             # MW components
             if component in mw_components:
-                if component == "ilc_improved":
+                if component == "ilc_ml":
                     map_path = self.file_templates[component].format(
                         mode=mode,
+                        ml=self.ml,
                         extract_comp=extract_comp,
                         component=comp,
                         frequencies="_".join(str(x) for x in frequencies),
@@ -809,8 +811,9 @@ class Visualise():
         ax.grid(True, which="both", linestyle=":", linewidth=0.5)
         ax.legend(fontsize=14)
         fig.tight_layout()
-        file_name = self.file_templates["ilc_improved_spectrum"].format(
+        file_name = self.file_templates["ilc_ml_spectrum"].format(
                         mode=mode,
+                        ml=self.ml,
                         extract_comp=extract_comp,
                         component=comp,
                         frequencies="_".join(str(x) for x in frequencies),
@@ -855,7 +858,7 @@ class Visualise():
             Example:
                 ('ilc_synth', 'processed_cmb')
                 [('ilc_synth', 'processed_cmb'),
-                 ('ilc_improved', 'processed_cmb')]
+                 ('ilc_ml', 'processed_cmb')]
         use_Dl : bool
             If True, plot D_ell = ell(ell+1) C_ell / (2π).
         logy : bool
@@ -903,7 +906,7 @@ class Visualise():
         chs = "_".join(str(n) for n in self.chs)
         lam = self.lam_list[0]
 
-        mw_components = ["ilc_synth", "ilc_improved"]
+        mw_components = ["ilc_synth", "ilc_ml"]
         colours = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -911,8 +914,9 @@ class Visualise():
         # ---------- helpers: return HEALPix map in µK ----------
         def get_mw_hp_map(component: str):
             """Load MW-format map from disk and convert to HEALPix, in µK."""
-            if component == "ilc_improved":
+            if component == "ilc_ml":
                 map_path = self.file_templates[component].format(
+                    ml=self.ml,
                     rn=rn,
                     batch=batch,
                     epochs=epochs,
@@ -1138,7 +1142,7 @@ class Visualise():
 # lmax = 511
 # lam_list = [2.0]
 # directory = "/Scratch/matthew/data/"
-# map_comps = ["ilc_synth", "ilc_improved", "cmb"]
+# map_comps = ["ilc_synth", "ilc_ml", "cmb"]
 
 # visualiser = Visualise(
 #     frequencies=frequencies,

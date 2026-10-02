@@ -126,45 +126,69 @@ def admissibility(Phi_l0, Psi_j_l0, ells, tol=1e-6):
     return S, bool(ok)
 
 
-def ilc_mode_tag(constraint: bool = False, pcilc: bool = False, pcilc_eps: float | None = None) -> str:
+DEPROJECTABLE_COMPONENTS = ("tsz",)
+
+
+def normalise_deproject(deproject, extract_comp: str | None = None) -> list:
     """
-    Canonical ILC mode tag used in output filenames.
+    Canonical list of components deprojected by the constrained ILC (cILC). The cILC preserves extract_comp
+    (w^T a_extract = 1) and nulls every component in this list (w^T a_comp = 0).
+
+    Parameters:
+        deproject: None or [] for the plain ILC, otherwise a component name or a list of names (e.g. ["tsz"]).
+        extract_comp (str): Component preserved by the ILC; it cannot also be deprojected.
+
+    Returns:
+        list: Lower-case, de-duplicated, sorted component names (empty for the plain ILC).
+    """
+    if deproject is None:
+        return []
+    if isinstance(deproject, str):
+        deproject = [deproject]
+    names = sorted({str(c).strip().lower() for c in deproject if str(c).strip()})
+    unsupported = [c for c in names if c not in DEPROJECTABLE_COMPONENTS]
+    if unsupported:
+        raise ValueError(
+            f"Cannot deproject {unsupported}: only {list(DEPROJECTABLE_COMPONENTS)} have a trusted spectral "
+            "response in mixing_matrix_constraint.build_F_theory."
+        )
+    if extract_comp is not None and str(extract_comp).strip().lower() in names:
+        raise ValueError(f"Cannot deproject the extracted component '{extract_comp}'.")
+    return names
+
+
+def ilc_mode(deproject=None, pcilc: bool = False, pcilc_eps: float | None = None) -> str:
+    """
+    Canonical ILC mode used in output filenames.
 
     This is the single definition of the ``{mode}`` field shared by the SILC
     outputs (ilc_synth, trimmed_maps, ...) and the ML products derived from
-    them (foreground_estimate, ilc_residual, ilc_improved, ...). Keep the SILC
+    them (foreground_estimate, ilc_residual, ilc_ml, ...). Keep the SILC
     writer and every ML reader on this function so the two cannot drift apart.
 
     Parameters:
-        constraint (bool): True for constrained ILC (cILC).
+        deproject: Components deprojected by the constrained ILC (see normalise_deproject); None/[] for the plain ILC.
         pcilc (bool): True for partially-constrained ILC (pcILC).
         pcilc_eps (float): Epsilon tolerance, required when pcilc is True.
 
     Returns:
-        str: "ilc", "cilc", or "pcilc_eps{eps}".
+        str: "ilc", "cilc-dp-<comp>[-<comp>...]" (e.g. "cilc-dp-tsz"), or "pcilc_eps{eps}".
     """
-    if pcilc and constraint:
-        raise ValueError("Choose either constraint=True (cILC) OR pcilc=True (pcILC), not both.")
+    deproject = normalise_deproject(deproject)
+    if pcilc and deproject:
+        raise ValueError("Choose either deproject=[...] (cILC) OR pcilc=True (pcILC), not both.")
     if pcilc:
         if pcilc_eps is None:
             raise ValueError("pcilc=True requires pcilc_eps (epsilon).")
         return f"pcilc_eps{float(pcilc_eps):.6g}"
-    if constraint:
-        return "cilc"
+    if deproject:
+        return "cilc-dp-" + "-".join(deproject)
     return "ilc"
 
 
-def ilc_mode_candidates(constraint: bool = False, pcilc: bool = False, pcilc_eps: float | None = None) -> list:
+def ml_tag(masked: bool = False) -> str:
     """
-    Mode tags to try when *reading* an existing file, most current first.
-
-    Filenames written before the ilc/cilc/pcilc naming used "uncon"/"con".
-    Writers should always use ilc_mode_tag(); only readers need this fallback.
-
-    Returns:
-        list: Candidate ``{mode}`` values, in the order they should be tried.
+    ML stage tag placed after the ILC mode in the ML-cleaned map names ({mode}_{ml}_...):
+    "ml", or "ml-masked" when the model was trained with the masked loss.
     """
-    tag = ilc_mode_tag(constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps)
-    if pcilc:
-        return [tag]  # pcILC postdates the legacy naming, so it has no alias
-    return [tag, "con" if constraint else "uncon"]
+    return "ml-masked" if masked else "ml"

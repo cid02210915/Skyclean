@@ -92,8 +92,8 @@ class FileTemplates():
             "ml_maps": os.path.join(directory, "ML/maps"),
             "ml_models": os.path.join(directory, "ML/models"),
             "cmb_prediction": os.path.join(directory, "ML/cmb_prediction"),
-            "ilc_improved_maps": os.path.join(directory, "SILC/ilc_improved_maps"),
-            "ilc_improved_spec": os.path.join(directory, "SILC/ilc_improved_spec"),
+            "ilc_ml_maps": os.path.join(directory, "SILC/ilc_ml_maps"),
+            "ilc_ml_spec": os.path.join(directory, "SILC/ilc_ml_spec"),
             # ML maps (randomly generated) for monitoring the pipeline memory usage
             "ml_test_maps": os.path.join(directory, "ML/test_maps"),
         }
@@ -245,28 +245,29 @@ class FileTemplates():
             "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
-        # Weights per scale; {type} is "weight_vector" (or "cilc_cmb" for constrained case)
+        # Weights per scale; {type} is "weight_vector" for the plain ILC, otherwise the ilc_mode tag
+        # ("cilc-dp-tsz", "pcilc_eps..."). {frequencies} is the band-set tag (e.g. 030_044_070).
         "weight_vector_matrices": os.path.join(
             self.output_directories["weight_vector_data"],
-            "{component}_{type}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{component}_{type}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
         "ilc_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "{mode}_ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Legacy alias (same path)
         "ilc_doubled_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "{mode}_ilc_doubled_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
         ),
         
         # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
         "trimmed_maps": os.path.join(
             self.output_directories["ilc_trimmed_maps"],
-            "{mode}_ilc_trimmed_{component}_{extract_comp}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_trimmed_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
         # Final synthesized map — records target (extract_comp), source (component), and band-set
@@ -275,9 +276,10 @@ class FileTemplates():
             "{mode}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
         ),
 
-        'ilc_improved': os.path.join(
-            self.output_directories["ilc_improved_maps"], 
-            "{mode}_{extract_comp}_from-{component}_improved_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+        # ML-cleaned map; {ml} is "ml" or "ml-masked" (model trained with the masked loss), see utils.ml_tag
+        'ilc_ml': os.path.join(
+            self.output_directories["ilc_ml_maps"], 
+            "{mode}_{ml}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
 
 
@@ -299,9 +301,9 @@ class FileTemplates():
         ),
 
         # Improved ILC power spectrum after ML
-        'ilc_improved_spectrum': os.path.join(
-            self.output_directories["ilc_improved_spec"], 
-            "{mode}_{extract_comp}_from-{component}_improved_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+        'ilc_ml_spectrum': os.path.join(
+            self.output_directories["ilc_ml_spec"], 
+            "{mode}_{ml}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
 
 
@@ -315,7 +317,7 @@ class FileTemplates():
         # ML test maps (randomly generated) for memory check
         "test_foreground_estimate": os.path.join(self.output_directories["ml_test_maps"], "test_foreground_estimate_r{realisation:04d}_lmax{lmax}_N{N_directions}.npy"),
         "test_ilc_residual":       os.path.join(self.output_directories["ml_test_maps"], "test_ilc_residual_r{realisation:04d}_lmax{lmax}_N{N_directions}.npy"),
-        "test_ilc_improved_map": os.path.join(self.output_directories["ml_test_maps"], "test_ilc_improved_map_r{realisation:04d}_lmax{lmax}_N{N_directions}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
+        "test_ilc_ml_map": os.path.join(self.output_directories["ml_test_maps"], "test_ilc_ml_map_r{realisation:04d}_lmax{lmax}_N{N_directions}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"),
 
         # ---------------- mask for ML ----------------
         # "mask": os.path.join(directory, "HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits"),  # Planck 2015 Galactic-plane masks
