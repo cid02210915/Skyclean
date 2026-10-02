@@ -36,32 +36,57 @@ ell_peak = np.array([2, 5, 10, 19, 38, 77, 153, 307, 614, 1227, 2454, 3600], dty
 
 class SILCTools():
     '''Tools for Scale-discretised, directional wavelet ILC (SILC).'''
-
     @staticmethod
     def Single_Map_doubleworker(mw_map: np.ndarray, method: str):
+        """
+        Double the spatial band-limit of an MW-sampled map.
 
-        def double_one_map(m):
+        For 2D S^2 maps, use an ordinary spherical harmonic transform.
+
+        For 3D wavelet coefficient cubes with shape
+        (2N-1, L, 2L-1), use a Wigner transform. This applies to both
+        N=1 (axisymmetric limit) and N>1 (directional wavelets).
+
+        Only the spatial band-limit is doubled:
+        L -> H = 2L - 1,
+        while N is unchanged.
+
+        The 3D branch preserves complex wavelet coefficients.
+        """
+
+        mw_map = np.asarray(mw_map)
+
+        # ============================================================
+        # Genuine 2D S^2 map
+        # ============================================================
+        if mw_map.ndim == 2:
+
+            L = mw_map.shape[0]
+            H = 2 * L - 1
+
             alm = s2fft.forward(
-                m,
-                L=m.shape[0],
+                mw_map,
+                L=L,
                 method=method,
                 spmd=False,
                 reality=True,
             )
 
-            L = alm.shape[0]
-            H = 2 * L - 1
-            W = 2 * H - 1
+            padded = np.zeros(
+                (H, 2 * H - 1),
+                dtype=np.complex128,
+            )
 
-            padded = np.zeros((H, W), dtype=np.complex128)
+            old_mid = L - 1
+            new_mid = H - 1
+            start = new_mid - old_mid
 
-            mid_in = alm.shape[1] // 2
-            mid_out = W // 2
-            start = mid_out - mid_in
+            padded[
+                :L,
+                start:start + (2 * L - 1)
+            ] = alm
 
-            padded[:L, start:start + alm.shape[1]] = alm
-
-            x2 = np.real(
+            return np.real(
                 s2fft.inverse(
                     padded,
                     L=H,
@@ -71,22 +96,88 @@ class SILCTools():
                 )
             )
 
-            return x2
-
-        mw_map = np.asarray(mw_map)
-
-        if mw_map.ndim == 2:
-            return double_one_map(mw_map)
-
+        # ============================================================
+        # Wavelet coefficient cube
+        #
+        # N = 1  : axisymmetric limit
+        # N > 1  : directional wavelet
+        #
+        # shape = (2N-1, L, 2L-1)
+        # ============================================================
         if mw_map.ndim == 3:
-            doubled_dirs = [
-                double_one_map(mw_map[d])
-                for d in range(mw_map.shape[0])
-            ]
-            return np.stack(doubled_dirs, axis=0)
+
+            D, L, W = mw_map.shape
+
+            if W != 2 * L - 1:
+                raise ValueError(
+                    f"Expected wavelet cube shape "
+                    f"(D, L, 2L-1), got {mw_map.shape}"
+                )
+
+            N = (D + 1) // 2
+
+            if D != 2 * N - 1:
+                raise ValueError(
+                    f"Invalid directional dimension D={D}"
+                )
+
+            # doubled spatial band-limit
+            H = 2 * L - 1
+
+            # --------------------------------------------------------
+            # SO(3) -> Wigner coefficients
+            # --------------------------------------------------------
+            flmn = np.asarray(
+                s2fft.wigner.forward(
+                    mw_map,
+                    L=L,
+                    N=N,
+                    sampling="mw",
+                    method=method,
+                    reality=False,
+                )
+            )
+
+            # --------------------------------------------------------
+            # Keep N unchanged.
+            # Enlarge only the spatial harmonic band-limit:
+            #
+            # (2N-1, L, 2L-1)
+            #       ->
+            # (2N-1, H, 2H-1)
+            # --------------------------------------------------------
+            padded = np.zeros(
+                (2 * N - 1, H, 2 * H - 1),
+                dtype=np.complex128,
+            )
+
+            old_mid = L - 1
+            new_mid = H - 1
+            start = new_mid - old_mid
+
+            padded[
+                :,
+                :L,
+                start:start + (2 * L - 1)
+            ] = flmn
+
+            # --------------------------------------------------------
+            # Wigner coefficients -> doubled SO(3) wavelet cube
+            # --------------------------------------------------------
+            return np.asarray(
+                s2fft.wigner.inverse(
+                    padded,
+                    L=H,
+                    N=N,
+                    sampling="mw",
+                    method=method,
+                    reality=False,
+                )
+            )
 
         raise ValueError(
-            f"Single_Map_doubleworker expects 2D or 3D input, got shape {mw_map.shape}"
+            f"Single_Map_doubleworker expects 2D or 3D input, "
+            f"got shape {mw_map.shape}"
         )
 
     @staticmethod
@@ -1237,30 +1328,31 @@ class SILCTools():
             start_col = outer_mid - (inner_h // 2)
             end_col = start_col + inner_h
 
-            trimmed_dirs = []
+            N = (D + 1) // 2
 
-            for d in range(D):
-                alm_doubled = s2fft.forward(
-                    MW_Doubled_Map[d],
-                    L=L2,
-                    method=method,
-                    spmd=False,
-                    reality=True,
-                )
+            flmn_doubled = s2fft.wigner.forward(
+                MW_Doubled_Map,
+                L=L2,
+                N=N,
+                sampling="mw",
+                method=method,
+                reality=False,
+            )
 
-                trimmed_alm = alm_doubled[:inner_v, start_col:end_col]
+            trimmed_flmn = flmn_doubled[
+                :,
+                :inner_v,
+                start_col:end_col,
+            ]
 
-                pix = s2fft.inverse(
-                    trimmed_alm,
-                    L=inner_v,
-                    method=method,
-                    spmd=False,
-                    reality=True,
-                )
-
-                trimmed_dirs.append(pix)
-
-            mw_map_original = np.stack(trimmed_dirs, axis=0)
+            mw_map_original = s2fft.wigner.inverse(
+                trimmed_flmn,
+                L=inner_v,
+                N=N,
+                sampling="mw",
+                method=method,
+                reality=False,
+            )
             '''
             print(
                 f"[trim] scale={scale} input={MW_Doubled_Map.shape} "
