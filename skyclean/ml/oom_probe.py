@@ -353,8 +353,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-realisations", type=int, default=0,
                         help="Start probing from this value (>= min-realisations).")
     parser.add_argument("--max-realisations", type=int, default=4096)
-    parser.add_argument("--mode", type=str, default="train",
-                        choices=["train", "evaluate", "train+evaluate"])
+    parser.add_argument("--mode", type=str, default="prepare+train",
+                        choices=["prepare", "train", "evaluate", "prepare+train",
+                                 "train+evaluate", "prepare+train+evaluate"],
+                        help="pipeline_ml.py --mode. 'train' alone requires inputs prepared beforehand.")
     parser.add_argument("--frequencies", nargs="+", default=[],
                         help="Frequency list passed to pipeline_ml.py.")
     parser.add_argument("--epochs", type=int, default=1)
@@ -424,7 +426,7 @@ python -m skyclean.ml.oom_probe \
   --batch-sizes 1 \
   --chs-set 1,16,32,32,64 \
   --log-dir skyclean/data/ML/oom_logs \
-  --mode train \
+  --mode prepare+train \
   --frequencies 030 044 070 100 143 217 353 545 857 \
   --lam 2.0 \
   --learning-rate 1e-3 \

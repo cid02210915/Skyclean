@@ -30,7 +30,7 @@ from skyclean.ml.train import Train, resolve_checkpoint_target
 from skyclean.ml.inference import Inference
 from skyclean.ml.data import CMBFreeILC
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
-from skyclean.silc.utils import ilc_mode_tag
+from skyclean.silc.utils import ilc_mode, ml_tag
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
 from skyclean.silc import HPTools
 import healpy as hp
@@ -113,7 +113,9 @@ def parse_args():
     parser.add_argument("--lam", type=float, default=2.0)
     parser.add_argument("--nsamp", type=int, default=1200)
 
-    parser.add_argument("--constraint", action="store_true", help="Enable constraint")
+    parser.add_argument("--deproject", nargs="+", default=None, metavar="COMP",
+                        help="Use the constrained-ILC (cILC) SILC outputs that deproject these components, e.g. "
+                             "--deproject tsz (files tagged cilc-dp-tsz). Omit for the plain ILC outputs.")
     parser.add_argument("--pcilc", action="store_true",
                         help="Use partially-constrained ILC (pcILC) inputs")
     parser.add_argument("--pcilc-eps", type=float, default=None,
@@ -155,8 +157,12 @@ def parse_args():
     parser.add_argument("--resume-training", action="store_true")
     parser.add_argument("--loss-tag", type=str, default=None)
     parser.add_argument("--masked", action="store_true",
-                        help="Masked ML: restrict the training loss/accuracy and the evaluation metrics to the Planck "
-                             "2018 common CMB intensity mask (fsky~0.78); the evaluation spectra are then pseudo-C_ell ")
+                        help="Masked ML: the training loss/accuracy are restricted to the Planck 2018 common CMB "
+                             "intensity mask (fsky~0.78). Pass it again at evaluate/apply for a run trained masked: "
+                             "the cleaned maps and spectra are then tagged ml-masked (and evaluation files _masked).")
+    parser.add_argument("--masked-spectra", action="store_true",
+                        help="Evaluate/apply: compute the spectra inside the Planck mask (pseudo-C_ell / <M^2>); "
+                             "the spectra files get a _pseudo suffix. Independent of --masked.")
 
     # ----- inference controls -----
     parser.add_argument("--model-dir", type=str, default="",
@@ -224,7 +230,7 @@ def step_prepare_data(args) -> None:
         N_directions=args.N_directions,
         lam=args.lam,
         nsamp=args.nsamp,
-        constraint=args.constraint,
+        deproject=args.deproject,
         pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         batch_size=args.batch_size,
@@ -253,7 +259,7 @@ def step_train(args) -> str:
         N_directions=args.N_directions,
         lam=args.lam,
         nsamp=args.nsamp,
-        constraint=args.constraint,
+        deproject=args.deproject,
         pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         batch_size=args.batch_size,
@@ -289,7 +295,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
     Compute TT power spectra for:
       - processed_cmb (HEALPix)
       - ilc_synth (MW)
-      - ilc_improved (MW)
+      - ilc_ml (MW)
     Also compute cross power spectra for:
       - ilc vs processed_cmb (MW x HEALPix)
       - ml vs processed_cmb (MW x HEALPix)
@@ -300,7 +306,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
         {
           "processed_cmb": {"ell", "cl", "path"},
           "ilc_synth":     {"ell", "cl", "path"},
-          "ilc_improved":  {"ell", "cl", "path"},
+          "ilc_ml":        {"ell", "cl", "path"},
           "ilc-cmb":       {"ell", "cl", "path"},
           "ml-cmb":        {"ell", "cl", "path"},
         }
@@ -315,7 +321,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
     ft = files.file_templates
     conv = MapAlmConverter(ft)
 
-    mode = ilc_mode_tag(constraint=args.constraint, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
+    mode = ilc_mode(deproject=args.deproject, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
@@ -362,7 +368,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
         N_directions=args.N_directions,
         lam=lam_str,
         nsamp=nsamp,
-        constraint=args.constraint,
+        deproject=args.deproject,
         mode=mode,
     )
     print(f"[Spectrum] loading ilc_synth map from: {out_synth['path']}")
@@ -374,9 +380,10 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
     }
 
 
-    # 3) auto-spectra: ilc_improved (MW) -> alm -> C_ell
-    improved_filename = os.path.basename(ft["ilc_improved"].format(
+    # 3) auto-spectra: ilc_ml (MW) -> alm -> C_ell
+    ilc_ml_filename = os.path.basename(ft["ilc_ml"].format(
         mode=mode,
+        ml=ml_tag(args.masked),
         extract_comp=args.extract_comp,
         component=args.component,
         frequencies=freq_tag,
@@ -394,17 +401,17 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
     ))
     if args.checkpoint_epoch is None:
         raise ValueError("[spectrum] checkpoint_epoch is required for checkpoint-layered ML prediction paths.")
-    improved_map_path = os.path.join(
+    ilc_ml_map_path = os.path.join(
         files.output_directories["cmb_prediction"],
         args.run_id,
-        "ilc_improved_maps",
+        "ilc_ml_maps",
         f"checkpoint_{int(args.checkpoint_epoch)}",
-        improved_filename.replace(".npy", f"_ckpt{int(args.checkpoint_epoch)}.npy"),
+        ilc_ml_filename.replace(".npy", f"_ckpt{int(args.checkpoint_epoch)}.npy"),
     )
-    print(f"[Spectrum] loading ilc_improved map from: {improved_map_path}")
-    if not os.path.exists(improved_map_path):
+    print(f"[Spectrum] loading ilc_ml map from: {ilc_ml_map_path}")
+    if not os.path.exists(ilc_ml_map_path):
         if ckpt_dir is None:
-            raise FileNotFoundError(f"[Spectrum] improved map not found: {improved_map_path}. ")
+            raise FileNotFoundError(f"[Spectrum] ILC + ML map not found: {ilc_ml_map_path}. ")
 
         print("[Spectrum] ML map missing. Generating it via existing inference pipeline...")
         inference = Inference(
@@ -416,7 +423,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
             N_directions=args.N_directions,
             lam=args.lam,
             nsamp=args.nsamp,
-            constraint=args.constraint,
+            deproject=args.deproject,
             pcilc=args.pcilc,
             pcilc_eps=args.pcilc_eps,
             chs=args.chs,
@@ -430,27 +437,28 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
             learning_rate=args.learning_rate,
             momentum=args.momentum,
             run_id=args.run_id,
+            masked=args.masked,
         )
         model = inference.load_model(force_load=True)
         if model is None:
             raise RuntimeError(f"[spectrum] failed to load model from checkpoint: {ckpt_dir}")
         inference.predict_cmb(realisation=realisation)
 
-        if not os.path.exists(improved_map_path):
+        if not os.path.exists(ilc_ml_map_path):
             raise FileNotFoundError(
-                "[spectrum] improved map still missing after inference generation: "
-                f"{improved_map_path}"
+                "[spectrum] ILC + ML map still missing after inference generation: "
+                f"{ilc_ml_map_path}"
             )
 
-    improved_map = np.load(improved_map_path)
+    ilc_ml_map = np.load(ilc_ml_map_path)
     L = lmax + 1
-    arr = np.asarray(np.real(np.squeeze(improved_map)), dtype=np.float64, order="C")
+    arr = np.asarray(np.real(np.squeeze(ilc_ml_map)), dtype=np.float64, order="C")
     alm_mw = s2fft.forward(arr, L=L)
-    ell_improved, cl_improved = PowerSpectrumTT.from_mw_alm(np.asarray(alm_mw))
-    results["ilc_improved"] = {
-        "ell": ell_improved,
-        "cl": cl_improved,
-        "path": improved_map_path,
+    ell_ilc_ml, cl_ilc_ml = PowerSpectrumTT.from_mw_alm(np.asarray(alm_mw))
+    results["ilc_ml"] = {
+        "ell": ell_ilc_ml,
+        "cl": cl_ilc_ml,
+        "path": ilc_ml_map_path,
     }
 
     # 4) cross-spectra: ilc vs processed_cmb (MW x HEALPix) -> C_ell
@@ -476,7 +484,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
     results["ml-cmb"] = {
         "ell": ell_cross_ml,
         "cl": cl_cross_ml,
-        "path": improved_map_path,
+        "path": ilc_ml_map_path,
     }
 
     if mask_hp is not None:
@@ -494,12 +502,12 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
         maps = {
             "processed_cmb": masked_hp_map(out_proc["alm"], "healpy"),
             "ilc_synth": masked_hp_map(out_synth["alm"], "mw"),
-            "ilc_improved": masked_hp_map(alm_mw, "mw"),
+            "ilc_ml": masked_hp_map(alm_mw, "mw"),
         }
-        for key in ("processed_cmb", "ilc_synth", "ilc_improved"):
+        for key in ("processed_cmb", "ilc_synth", "ilc_ml"):
             results[key]["cl"] = hp.anafast(maps[key], lmax=lmax) / f_sky2
         results["ilc-cmb"]["cl"] = hp.anafast(maps["ilc_synth"], map2=maps["processed_cmb"], lmax=lmax) / f_sky2
-        results["ml-cmb"]["cl"] = hp.anafast(maps["ilc_improved"], map2=maps["processed_cmb"], lmax=lmax) / f_sky2
+        results["ml-cmb"]["cl"] = hp.anafast(maps["ilc_ml"], map2=maps["processed_cmb"], lmax=lmax) / f_sky2
 
     return results
 
@@ -527,7 +535,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         N_directions=args.N_directions,
         lam=args.lam,
         nsamp=args.nsamp,
-        constraint=args.constraint,
+        deproject=args.deproject,
         pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         chs=args.chs,
@@ -541,6 +549,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         learning_rate=args.learning_rate,
         momentum=args.momentum,
         run_id=args.run_id,
+        masked=args.masked,
     )
     model = inference.load_model(force_load=True)
     if not model:
@@ -548,7 +557,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
     test_ids = inference.data_handler.get_split_indices()["test"]
     print(f"[Evaluate] Predicting CMB for {len(test_ids)} test realisations...")
-    mode = ilc_mode_tag(constraint=args.constraint, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
+    mode = ilc_mode(deproject=args.deproject, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
@@ -557,10 +566,11 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     save_dir = os.path.join(
         inference.file_templates.output_directories["cmb_prediction"],
         args.run_id,
-        "ilc_improved_maps",
+        "ilc_ml_maps",
         f"checkpoint_{checkpoint_epoch}",
     )
-    suffix = "_masked" if args.masked else ""
+    # evaluation file suffix: _masked = model trained masked, _pseudo = spectra inside the mask
+    suffix = ("_masked" if args.masked else "") + ("_pseudo" if args.masked_spectra else "")
     out_dir = os.path.join(
         inference.file_templates.output_directories["cmb_prediction"],
         args.run_id,
@@ -568,12 +578,13 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         f"checkpoint_{checkpoint_epoch}",
     )
     os.makedirs(out_dir, exist_ok=True)
-    metrics_csv = os.path.join(out_dir, f"test_metrics{suffix}.csv")
+    # metrics_csv = os.path.join(out_dir, f"test_metrics{suffix}.csv")  # test-metrics table disabled (see below)
 
     missing_prediction = False
     for realisation in test_ids:
-        filename = os.path.basename(inference.file_templates.file_templates["ilc_improved"].format(
+        filename = os.path.basename(inference.file_templates.file_templates["ilc_ml"].format(
             mode=mode,
+            ml=ml_tag(args.masked),
             extract_comp=args.extract_comp,
             component=args.component,
             frequencies=freq_tag,
@@ -595,13 +606,15 @@ def step_evaluate(args, ckpt_dir: str | None = None):
             missing_prediction = True
             break
 
-    if missing_prediction or not os.path.exists(metrics_csv):
-        metrics_rows = inference.save_test_metrics_table(masked=args.masked, save_predictions=True)
-        inference.save_test_scatter_plots(metrics_rows, masked=args.masked)
+    if missing_prediction:
+        # test-metrics table and scatter plots disabled: only the cleaned maps and power spectra are needed
+        # metrics_rows = inference.save_test_metrics_table(masked_spectra=args.masked_spectra, save_predictions=True)
+        # inference.save_test_scatter_plots(metrics_rows, masked_spectra=args.masked_spectra)
+        inference.predict_test_set(save_result=True)  # saves the cleaned maps only
     else:
-        print("[evaluate] Existing CMB prediction files and metrics table found for all test realisations; skipping prediction generation.")
+        print("[Evaluate] Cleaned maps found for all test realisations; skipping prediction.")
 
-    mask_hp = inference.data_handler.mask_hp() if args.masked else None
+    mask_hp = inference.data_handler.mask_hp() if args.masked_spectra else None
     ratio_ilc_all = []
     ratio_ml_all = []
 
@@ -616,7 +629,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
             ell=np.asarray(spec["processed_cmb"]["ell"], dtype=float),
             processed_cmb_cl=np.asarray(spec["processed_cmb"]["cl"], dtype=float),
             ilc_synth_cl=np.asarray(spec["ilc_synth"]["cl"], dtype=float),
-            ilc_improved_cl=np.asarray(spec["ilc_improved"]["cl"], dtype=float),
+            ilc_ml_cl=np.asarray(spec["ilc_ml"]["cl"], dtype=float),
             ilc_cmb_cl=np.asarray(spec["ilc-cmb"]["cl"], dtype=float),
             ml_cmb_cl=np.asarray(spec["ml-cmb"]["cl"], dtype=float),
         )
@@ -625,10 +638,10 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         ell = np.asarray(spec["processed_cmb"]["ell"], dtype=float)
         cl_processed = np.asarray(spec["processed_cmb"]["cl"], dtype=float)
         cl_ilc_synth = np.asarray(spec["ilc_synth"]["cl"], dtype=float)
-        cl_ilc_improved = np.asarray(spec["ilc_improved"]["cl"], dtype=float)
+        cl_ilc_ml = np.asarray(spec["ilc_ml"]["cl"], dtype=float)
 
         ratio_ilc = cl_ilc_synth / cl_processed
-        ratio_ml = cl_ilc_improved / cl_processed
+        ratio_ml = cl_ilc_ml / cl_processed
         ratio_ilc_all.append(ratio_ilc)
         ratio_ml_all.append(ratio_ml)
 
@@ -665,7 +678,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         color="blue",
         alpha=0.1,
     )
-    ax.plot(ell, ratio_ml_mean, label="ML Improved / Observed", color="red")
+    ax.plot(ell, ratio_ml_mean, label="ILC + ML" + (" (masked training)" if args.masked else "") + " / Observed", color="red")
     ax.fill_between(
         ell,
         ratio_ml_mean - ratio_ml_std,
@@ -679,7 +692,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     ax.set_xlabel(r"$\ell$", fontsize=14)
     ax.set_ylabel(r"$C_\ell^{\mathrm{ratio}}$", fontsize=14)
     ax.set_title(f"Power Spectrum Ratio with Uncertainty ({args.run_id})"
-                 + (" — masked pseudo-$C_\\ell$" if args.masked else ""), fontsize=15)
+                 + (" — masked pseudo-$C_\\ell$" if args.masked_spectra else ""), fontsize=15)
     ax.grid(True, which="both", linestyle=":", linewidth=0.5)
     ax.legend(fontsize=14)
     fig.tight_layout()
@@ -693,10 +706,11 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 def step_apply(args, ckpt_dir: str | None = None) -> str:
     """
     Apply the trained model to the observed Planck sky (Inference.predict_and_visualise_real_sky): saves the
-    cleaned CMB map (MW .npy + HEALPix .fits), the ILC / improved / difference map figure and the D_ell ratio figure of the
-    ILC and improved maps over the processed simulated CMB (true input CMB reference) under <directory>/ML/cmb_prediction/<run_id>/ilc_improved_maps/checkpoint_<epoch>/.
-    With --masked the spectra are pseudo-C_ell of the masked maps divided by f_sky2 = <mask^2>, saved with a _masked suffix
-    (the ratios ILC / processed cmb and masked ML / processed cmb are stored in the npz as ratio_ilc, ratio_improved).
+    cleaned CMB map (MW .npy), the ILC / ILC + ML / difference map figure and the D_ell ratio figure of the
+    ILC and ILC + ML maps over the processed simulated CMB (true input CMB reference) under <directory>/ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/.
+    With --masked (model trained masked) every output is tagged ml-masked instead of ml.
+    With --masked-spectra the spectra are pseudo-C_ell of the masked maps divided by f_sky2 = <mask^2>, saved with a _pseudo suffix
+    (the ratios ILC / processed cmb and masked ML / processed cmb are stored in the npz as ratio_ilc, ratio_ilc_ml).
     Needs the SILC pipeline run with --components real --wavelet-components real (same lmax/N/lam/nsamp).
     Returns the .npy path.
     """
@@ -709,7 +723,7 @@ def step_apply(args, ckpt_dir: str | None = None) -> str:
         N_directions=args.N_directions,
         lam=args.lam,
         nsamp=args.nsamp,
-        constraint=args.constraint,
+        deproject=args.deproject,
         pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         chs=args.chs,
@@ -723,6 +737,7 @@ def step_apply(args, ckpt_dir: str | None = None) -> str:
         learning_rate=args.learning_rate,
         momentum=args.momentum,
         run_id=args.run_id,
+        masked=args.masked,
     )
     model = inference.load_model(force_load=True)
     if not model:
@@ -731,7 +746,7 @@ def step_apply(args, ckpt_dir: str | None = None) -> str:
     # The observed sky has no realisations; SILC still tags its from-real outputs with r0000
     # (its --start-realisation, assumed 0), so that index is used to locate the ilc_synth file.
     print("[Apply] Predicting the observed Planck sky...")
-    real = inference.predict_and_visualise_real_sky(realisation=0, masked=args.masked)
+    real = inference.predict_and_visualise_real_sky(realisation=0, masked_spectra=args.masked_spectra)
     print(f"[Apply] Outputs saved under: {os.path.dirname(real['save_path'])}")
     return real["save_path"]
 
@@ -806,6 +821,10 @@ if __name__ == "__main__":
 #   train    = training step (GPU): reuses prepared maps/stats if they exist, otherwise generates them first
 #   evaluate = predict and score the held-out test split
 #   apply    = apply the trained model to the observed Planck sky (SILC run with --components real --wavelet-components real)
+# --deproject tsz reads the cILC SILC outputs (tagged cilc-dp-tsz) instead of the plain ILC ones (tagged ilc); the ML
+#   maps, statistics and predictions carry the same tag, so ILC and cILC products never overwrite each other.
+# Cached ML maps older than their SILC inputs (after a SILC --overwrite) are regenerated automatically; statistics of an
+#   existing run that became stale raise an error on resume/evaluate/apply (train a new --run-id instead).
 # CPU-only preparation (e.g. while the GPU is busy): JAX_PLATFORMS=cpu python3 -m skyclean.ml.pipeline_ml --mode prepare ...
 
 python3 -m skyclean.ml.pipeline_ml \
@@ -831,7 +850,8 @@ python3 -m skyclean.ml.pipeline_ml \
   --run-id CFN_lmax511_N4_r20
 
   --resume-training \
-  --masked            # masked ML: loss/metrics restricted to the Planck 2018 common mask; evaluate outputs get a _masked suffix
+  --masked            # masked ML: training loss restricted to the Planck 2018 common mask; outputs tagged ml-masked
+  --masked-spectra    # evaluate/apply: spectra inside the mask (pseudo-C_ell); spectra files get a _pseudo suffix
 
 # Apply a trained run to the real Planck sky:
 python3 -m skyclean.ml.pipeline_ml \
@@ -852,10 +872,13 @@ python3 -m skyclean.ml.pipeline_ml \
   --momentum 0.90 \
   --directory /Scratch/cindy/testing/Skyclean/skyclean/data/
 
+  --masked            # the run was trained masked
+  --masked-spectra    # spectra inside the mask
+
 # --checkpoint-epoch = optional; default: latest checkpoint in the run folder
 # The SILC real run is assumed to use --start-realisation 0 (its outputs are tagged r0000).
-# Outputs: <directory>/ML/cmb_prediction/<run-id>/ilc_improved_maps/checkpoint_<epoch>/
-#   ilc_cmb_from-real_improved_..._ckpt<epoch>.npy   cleaned CMB map (MW sampling)
-#   ..._ckpt<epoch>_maps.png                         ILC / improved / difference mollviews
-#   ..._ckpt<epoch>_spectra.png / .npz               ratio of TT D_ell: ILC / processed cmb, improved / processed cmb (npz also has the spectra)
+# Outputs: <directory>/ML/cmb_prediction/<run-id>/ilc_ml_maps/checkpoint_<epoch>/
+#   <mode>_ml[-masked]_cmb_from-real_f..._ckpt<epoch>.npy   cleaned CMB map (MW sampling)
+#   ..._ckpt<epoch>_maps.png                                ILC / ILC + ML / difference mollviews
+#   ..._ckpt<epoch>_spectra[_pseudo].png / .npz             ratio of TT D_ell: ILC / processed cmb, ILC + ML / processed cmb (npz also has the spectra)
 '''

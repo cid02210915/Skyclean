@@ -154,7 +154,7 @@ def resolve_filter_type(filter_type: str | None, N_directions: int = 1) -> str:
 
 class Train:
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int,
-                 lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, nsamp: int = 1200, constraint: bool = False,
+                 lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, nsamp: int = 1200, deproject: list | None = None,
                  pcilc: bool = False, pcilc_eps: float | None = None,
                  batch_size: int = 32, split: list = [0.8, 0.1, 0.1], epochs: int = 120,
                  learning_rate: float = 1e-3, momentum: float = 0.9, chs: list = None, rngs: nnx.Rngs = nnx.Rngs(0),
@@ -187,7 +187,7 @@ class Train:
         self.prefetch = prefetch
         self.run_id = (run_id or datetime.now().strftime("%Y%m%d_%H%M%S")).strip()
         self.filter_type = resolve_filter_type(filter_type, N_directions)
-        self.constraint = constraint
+        self.deproject = deproject  # components deprojected by the cILC inputs, e.g. ["tsz"]; None for the plain ILC
         self.pcilc = pcilc
         self.pcilc_eps = pcilc_eps
         self.early_stopping_patience = early_stopping_patience # how many epochs to wait for improvement before stopping
@@ -211,10 +211,11 @@ class Train:
 
         self.dataset = CMBFreeILC(extract_comp=extract_comp, component=component, frequencies=frequencies,
                                   realisations=realisations, lmax=lmax, N_directions=N_directions, lam=lam,
-                                  nsamp=nsamp, constraint=constraint, pcilc=pcilc, pcilc_eps=pcilc_eps,
+                                  nsamp=nsamp, deproject=deproject, pcilc=pcilc, pcilc_eps=pcilc_eps,
                                   batch_size=batch_size, split=split, directory=directory,
                                   random=random_generator, prefetch=prefetch,
-                                  produce_residuals=False, run_id=self.run_id)
+                                  produce_residuals=False, run_id=self.run_id,
+                                  frozen_stats=resume_training)  # a resumed run must keep the statistics its checkpoint saw
 
         files = FileTemplates(directory)
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
@@ -948,7 +949,9 @@ def main():
     parser.add_argument('--N-directions', type=int, default=1, help='Number of wavelet directions')
     parser.add_argument('--lam', type=float, default=2.0, help='Wavelet dilation parameter')
     parser.add_argument('--nsamp', type=int, default=1200, help='Number of Monte Carlo samples used by the ILC inputs')
-    parser.add_argument('--constraint', action='store_true', help='Load constrained-ILC inputs instead of unconstrained')
+    parser.add_argument('--deproject', nargs='+', default=None, metavar='COMP',
+                        help='Use the constrained-ILC inputs that deproject these components (e.g. --deproject tsz, '
+                             'files tagged cilc-dp-tsz). Omit for the plain ILC inputs')
     parser.add_argument('--pcilc', action='store_true',
                         help='Load partially-constrained ILC (pcILC) inputs')
     parser.add_argument('--pcilc-eps', type=float, default=None,
@@ -1003,7 +1006,7 @@ def main():
         N_directions=args.N_directions,
         lam=args.lam,
         nsamp=args.nsamp,
-        constraint=args.constraint,
+        deproject=args.deproject,
         pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         epochs=args.epochs,
