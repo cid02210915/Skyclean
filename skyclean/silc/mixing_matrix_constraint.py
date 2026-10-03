@@ -78,7 +78,7 @@ class SpectralVector:
         k = 1.380649e-23
         Tcmb = 2.726  # CMB temperature
         x = h * nu / (k * Tcmb)
-        g_nu = (x**2 * np.exp(x)) / (np.exp(x) - 1.0)**2  # dB_nu/dT at T_CMB
+        g_nu = (nu**3 * np.exp(x) * x / (np.exp(x) - 1.0)**2) # dB_nu/dT at T_CMB
 
         # ---- CIB modified blackbody SED in K_CMB ----
         x_cib = h * nu / (k * T_cib)
@@ -106,8 +106,8 @@ class SpectralVector:
         # (optional, to match Fig. 5 caption) normalise so |tSZ|=1 at 143 GHz
         if "143" in frequencies:
             idx_143 = frequencies.index("143")
-            tsz = tsz / np.abs(tsz[idx_143])
-        
+            tsz = tsz / np.abs(tsz[idx_143]) 
+            
         # RAW spectral response vectors (all in K_CMB)
         vecs = {
             "cmb":  np.ones_like(nu),
