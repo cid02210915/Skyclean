@@ -147,7 +147,7 @@ class MapAlmConverter:
                 nsamp = 1200  
             nsamp_str = str(int(nsamp))
 
-            # explicit mode takes priority (e.g. "pcilc_eps0.2"); otherwise derived from the deprojected set
+            # explicit mode takes priority (e.g. "pcilc-dp-tsz-eps0.2"); otherwise derived from the deprojected set
             kw = dict(
                 mode=str(mode) if mode is not None else ilc_mode(deproject=deproject),
                 extract_comp=extract_comp,

@@ -126,13 +126,14 @@ def admissibility(Phi_l0, Psi_j_l0, ells, tol=1e-6):
     return S, bool(ok)
 
 
-DEPROJECTABLE_COMPONENTS = ("tsz",)
+DEPROJECTABLE_COMPONENTS = ("tsz", "cib")
 
 
 def normalise_deproject(deproject, extract_comp: str | None = None) -> list:
     """
-    Canonical list of components deprojected by the constrained ILC (cILC). The cILC preserves extract_comp
-    (w^T a_extract = 1) and nulls every component in this list (w^T a_comp = 0).
+    Canonical list of components deprojected by the constrained ILC. The cILC preserves extract_comp
+    (w^T a_extract = 1) and nulls every component in this list (w^T a_comp = 0); the pcILC (pcilc_eps given)
+    preserves extract_comp and bounds the single listed component, |w^T b| <= eps.
 
     Parameters:
         deproject: None or [] for the plain ILC, otherwise a component name or a list of names (e.g. ["tsz"]).
@@ -157,7 +158,7 @@ def normalise_deproject(deproject, extract_comp: str | None = None) -> list:
     return names
 
 
-def ilc_mode(deproject=None, pcilc: bool = False, pcilc_eps: float | None = None) -> str:
+def ilc_mode(deproject=None, pcilc_eps: float | None = None) -> str:
     """
     Canonical ILC mode used in output filenames.
 
@@ -168,19 +169,25 @@ def ilc_mode(deproject=None, pcilc: bool = False, pcilc_eps: float | None = None
 
     Parameters:
         deproject: Components deprojected by the constrained ILC (see normalise_deproject); None/[] for the plain ILC.
-        pcilc (bool): True for partially-constrained ILC (pcILC).
-        pcilc_eps (float): Epsilon tolerance, required when pcilc is True.
+        pcilc_eps (float): pcILC tolerance |w^T b| <= eps on the single deprojected component; None for the cILC
+            (exact null). Must be > 0: eps = 0 is the cILC.
 
     Returns:
-        str: "ilc", "cilc-dp-<comp>[-<comp>...]" (e.g. "cilc-dp-tsz"), or "pcilc_eps{eps}".
+        str: "ilc", "cilc-dp-<comp>[-<comp>...]" (e.g. "cilc-dp-cib-tsz") or "pcilc-dp-<comp>-eps<eps>"
+            (e.g. "pcilc-dp-tsz-eps0.1").
     """
     deproject = normalise_deproject(deproject)
-    if pcilc and deproject:
-        raise ValueError("Choose either deproject=[...] (cILC) OR pcilc=True (pcILC), not both.")
-    if pcilc:
-        if pcilc_eps is None:
-            raise ValueError("pcilc=True requires pcilc_eps (epsilon).")
-        return f"pcilc_eps{float(pcilc_eps):.6g}"
+    if pcilc_eps is not None:
+        eps = float(pcilc_eps)
+        if not deproject:
+            raise ValueError("pcilc_eps (pcILC) needs the component to partially deproject, e.g. --deproject tsz.")
+        if len(deproject) != 1:
+            raise ValueError(f"The pcILC bounds a single component; got deproject={deproject}.")
+        if eps < 0.0:
+            raise ValueError(f"pcilc_eps must be > 0, got {eps}.")
+        if eps == 0.0:
+            raise ValueError("pcilc_eps=0 is the cILC: drop --pcilc-eps to null the component exactly.")
+        return f"pcilc-dp-{deproject[0]}-eps{eps:.6g}"
     if deproject:
         return "cilc-dp-" + "-".join(deproject)
     return "ilc"

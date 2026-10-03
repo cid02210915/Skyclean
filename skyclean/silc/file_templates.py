@@ -246,7 +246,7 @@ class FileTemplates():
         ),
 
         # Weights per scale; {type} is "weight_vector" for the plain ILC, otherwise the ilc_mode tag
-        # ("cilc-dp-tsz", "pcilc_eps..."). {frequencies} is the band-set tag (e.g. 030_044_070).
+        # ("cilc-dp-tsz", "pcilc-dp-tsz-eps0.1"). {frequencies} is the band-set tag (e.g. 030_044_070).
         "weight_vector_matrices": os.path.join(
             self.output_directories["weight_vector_data"],
             "{component}_{type}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"

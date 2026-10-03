@@ -37,7 +37,20 @@ class SILCTools():
     '''Tools for Scale-discretised, directional wavelet ILC (SILC).'''
 
     @staticmethod
+    def _wigner_method(method: str) -> str:
+        """s2fft.wigner has no 'jax_cuda' backend (only numpy / jax / jax_ssht); plain 'jax' still runs on the GPU."""
+        return "jax" if method == "jax_cuda" else method
+
+    @staticmethod
     def Single_Map_doubleworker(mw_map: np.ndarray, method: str):
+        """
+        Double the spatial band-limit L -> H = 2L-1 of an MW-sampled map.
+
+        2D (L, 2L-1): scalar spherical harmonic transform.
+        3D (2N-1, L, 2L-1): wavelet coefficient cube on SO(3). Each direction slice is a sum of
+        spin-n functions, not a spin-0 map, so the cube is zero-padded in Wigner space
+        (N unchanged) rather than slice by slice. N=1 reduces to the scalar case.
+        """
 
         def double_one_map(m):
             alm = s2fft.forward(
@@ -78,11 +91,49 @@ class SILCTools():
             return double_one_map(mw_map)
 
         if mw_map.ndim == 3:
-            doubled_dirs = [
-                double_one_map(mw_map[d])
-                for d in range(mw_map.shape[0])
-            ]
-            return np.stack(doubled_dirs, axis=0)
+            D, L, W = mw_map.shape
+            if W != 2 * L - 1:
+                raise ValueError(
+                    f"Expected wavelet cube shape (D, L, 2L-1), got {mw_map.shape}"
+                )
+            N = (D + 1) // 2
+            if D != 2 * N - 1:
+                raise ValueError(f"Invalid directional dimension D={D}, expected 2N-1")
+
+            H = 2 * L - 1
+            # s2wav.analysis(reality=True) yields real cubes; exploit the conjugate symmetry
+            # when it holds and keep the output real, otherwise stay fully complex.
+            reality = not np.iscomplexobj(mw_map)
+            wmethod = SILCTools._wigner_method(method)
+
+            # SO(3) -> Wigner coefficients flmn, shape (2N-1, L, 2L-1), indexed [n, ell, m]
+            flmn = np.asarray(
+                s2fft.wigner.forward(
+                    mw_map,
+                    L=L,
+                    N=N,
+                    sampling="mw",
+                    method=wmethod,
+                    reality=reality,
+                )
+            )
+
+            # zero-pad ell and m only; N (directional band-limit) is unchanged
+            padded = np.zeros((2 * N - 1, H, 2 * H - 1), dtype=np.complex128)
+            start = (H - 1) - (L - 1)
+            padded[:, :L, start:start + (2 * L - 1)] = flmn
+
+            doubled = np.asarray(
+                s2fft.wigner.inverse(
+                    padded,
+                    L=H,
+                    N=N,
+                    sampling="mw",
+                    method=wmethod,
+                    reality=reality,
+                )
+            )
+            return np.real(doubled) if reality else doubled
 
         raise ValueError(
             f"Single_Map_doubleworker expects 2D or 3D input, got shape {mw_map.shape}"
@@ -837,18 +888,14 @@ class SILCTools():
         nsamp: float | None = None,
         frequencies: list | None = None,
         overwrite: bool = False,
-        # ---- pcILC (inequality / boundary) ----
-        pcilc: bool = False,
-        pcilc_component: str | None = None,      # name to auto-lookup in reference_vectors if pcilc_b is None
-        pcilc_b=None,                             # explicit b-vector (Nf,)
-        pcilc_eps: float | None = None,          # epsilon
-        pcilc_pick: str = "minvar",              # "minvar" or "sign"
+        pcilc_eps: float | None = None,          # pcILC tolerance |w^T b| <= eps; None for the cILC
     ):
         """
         Computes weight vectors from a covariance matrix R using:
           - standard ILC (deproject empty),
           - hard constrained ILC / cILC (preserve extract_comp: w^T a = 1; null each component in deproject, e.g. ["tsz"]: w^T a = 0),
-          - pcILC (pcilc=True): |w^T b| <= eps enforced by boundary solutions.
+          - pcILC (pcilc_eps given): preserve extract_comp (w^T a = 1) and bound the single deproject component,
+            |w^T b| <= eps, enforced by boundary solutions.
 
         Args:
             R: (Nf,Nf) or (H,W,Nf,Nf)
@@ -865,11 +912,8 @@ class SILCTools():
             frequencies: band-set list, part of the weight filename
             lam, nsamp, overwrite: bookkeeping / naming
 
-            pcilc: if True, use pcILC (paper inequality formulation)
-            pcilc_component: name of b-vector to auto lookup in reference_vectors (e.g. "tsz")
-            pcilc_b: explicit b-vector, overrides auto lookup
-            pcilc_eps: epsilon tolerance
-            pcilc_pick: choose boundary solution ("minvar" or "sign")
+            pcilc_eps: pcILC tolerance (> 0) on the single deproject component; None for the cILC. The pcILC reads
+                a = F[:, 0] (extract_comp) and b = F[:, 1] (deproject component).
         """
         import os
         import numpy as np
@@ -878,9 +922,9 @@ class SILCTools():
         # Basic checks / shapes
         # -----------------------------
         deproject = normalise_deproject(deproject, extract_comp)
-        constraint = bool(deproject)
-        if pcilc and constraint:
-            raise ValueError("Choose either deproject=[...] (cILC) OR pcilc=True (pcILC), not both.")
+        mode = ilc_mode(deproject=deproject, pcilc_eps=pcilc_eps)  # validates the deproject / pcilc_eps combination
+        pcilc = pcilc_eps is not None
+        constraint = bool(deproject) and not pcilc  # cILC: exact nulls
         if frequencies is None:
             raise ValueError("frequencies (band-set list) is required to name the weight file.")
         ''' 
@@ -925,48 +969,9 @@ class SILCTools():
         identity_vector = np.ones(N_freq, dtype=float)
 
         # ---------------------------------------
-        # pcILC configuration (a,b,eps)
-        # Here we implement CMB-preserving pcILC:
-        #   w^T a = 1 with a = ones (K_CMB convention)
-        #   |w^T b| <= eps
+        # F (columns [extract_comp] + deproject): needed by the cILC and the pcILC
         # ---------------------------------------
-        eps_str = "None"
-        if pcilc:
-            if pcilc_eps is None:
-                raise ValueError("pcilc=True requires pcilc_eps (epsilon).")
-            eps = float(pcilc_eps)
-            if eps < 0.0:
-                raise ValueError("pcilc_eps must be >= 0.")
-            eps_str = f"{eps:.6g}"
-
-            # preserve CMB by default in pcILC
-            if reference_vectors is None or "cmb" not in reference_vectors:
-                raise ValueError("pcilc=True needs reference_vectors['cmb'] to preserve CMB.")
-            a_vec = np.asarray(reference_vectors["cmb"], dtype=float).reshape((-1,))
-            if a_vec.shape != (N_freq,):
-                raise ValueError(f"reference_vectors['cmb'] must have shape ({N_freq},), got {a_vec.shape}")
-
-            # preserve tSZ by default in pcILC
-            if reference_vectors is None or "tsz" not in reference_vectors:
-                raise ValueError("pcilc=True needs reference_vectors['tsz'] to preserve tSZ.")
-            a_vec = np.asarray(reference_vectors["tsz"], dtype=float).reshape((-1,))
-            if a_vec.shape != (N_freq,):
-                raise ValueError(f"reference_vectors['tsz'] must have shape ({N_freq},), got {a_vec.shape}")
-            
-            # partially constrain CMB by default in pcILC
-            b_vec = np.ones(N_freq, dtype=float)
-
-            #print ('pcilc b_vec',b_vec)
-            if b_vec.shape != (N_freq,):
-                raise ValueError(f"pcilc_b must have shape ({N_freq},), got {b_vec.shape}")
-
-            if pcilc_pick not in ("minvar", "sign"):
-                raise ValueError("pcilc_pick must be 'minvar' or 'sign'.")
-
-        # ---------------------------------------
-        # cILC configuration (F,f)
-        # ---------------------------------------
-        if constraint:
+        if deproject:
             if F is None:
                 raise ValueError("F must be provided when deproject is non-empty")
             F = np.asarray(F, dtype=float)
@@ -976,6 +981,22 @@ class SILCTools():
             if N_comp != 1 + len(deproject):
                 raise ValueError(f"F has {N_comp} columns but [extract_comp] + deproject = {[extract_comp] + deproject} has {1 + len(deproject)}")
 
+        # ---------------------------------------
+        # pcILC configuration (a, b, eps):
+        #   w^T a = 1 with a = SED of extract_comp (F[:, 0])
+        #   |w^T b| <= eps with b = SED of the deprojected component (F[:, 1])
+        # ---------------------------------------
+        eps_str = "None"
+        if pcilc:
+            eps = float(pcilc_eps)
+            eps_str = f"{eps:.6g}"
+            a_vec = F[:, 0].copy()
+            b_vec = F[:, 1].copy()
+
+        # ---------------------------------------
+        # cILC configuration (F,f)
+        # ---------------------------------------
+        if constraint:
             if f is None and extract_comp is not None:
                 f = ILCConstraints.find_f_from_extract_comp(F, extract_comp, reference_vectors)
 
@@ -1004,7 +1025,6 @@ class SILCTools():
         # ---------------------------------------
         # Naming / saving: {type} is "weight_vector" for the plain ILC, otherwise the mode tag
         # ---------------------------------------
-        mode = ilc_mode(deproject=deproject, pcilc=pcilc, pcilc_eps=pcilc_eps)
         name = "weight_vector" if mode == "ilc" else mode
 
         fmt = dict(
@@ -1092,12 +1112,10 @@ class SILCTools():
                         w_plus  = (Rinva * (Kb - eps * Kab) + Rinvb * ( eps * Ka - Kab)) / Delta
                         w_minus = (Rinva * (Kb + eps * Kab) + Rinvb * (-eps * Ka - Kab)) / Delta
 
-                        if pcilc_pick == "minvar":
-                            var_plus  = float(np.dot(w_plus,  np.dot(Rij, w_plus)))
-                            var_minus = float(np.dot(w_minus, np.dot(Rij, w_minus)))
-                            w = w_plus if var_plus <= var_minus else w_minus
-                        else:
-                            w = w_plus if resp > 0.0 else w_minus
+                        # minimum-variance edge (the one on the side of the unconstrained response resp)
+                        var_plus  = float(np.dot(w_plus,  np.dot(Rij, w_plus)))
+                        var_minus = float(np.dot(w_minus, np.dot(Rij, w_minus)))
+                        w = w_plus if var_plus <= var_minus else w_minus
                         '''
                         if pcilc and abs(eps) < tol and i == 0 and j == 0:
                             F_eq = np.column_stack([a_vec, b_vec])
@@ -1241,30 +1259,39 @@ class SILCTools():
             start_col = outer_mid - (inner_h // 2)
             end_col = start_col + inner_h
 
-            trimmed_dirs = []
+            # Inverse of Single_Map_doubleworker's 3D branch: the cube lives on SO(3), so
+            # truncate ell and m in Wigner space (N unchanged) rather than per direction slice.
+            N = (D + 1) // 2
+            if D != 2 * N - 1:
+                raise ValueError(f"[DEBUG] Invalid directional dimension D={D}, expected 2N-1")
+            reality = not np.iscomplexobj(MW_Doubled_Map)
+            wmethod = SILCTools._wigner_method(method)
 
-            for d in range(D):
-                alm_doubled = s2fft.forward(
-                    MW_Doubled_Map[d],
+            flmn_doubled = np.asarray(
+                s2fft.wigner.forward(
+                    MW_Doubled_Map,
                     L=L2,
-                    method=method,
-                    spmd=False,
-                    reality=True,
+                    N=N,
+                    sampling="mw",
+                    method=wmethod,
+                    reality=reality,
                 )
+            )
 
-                trimmed_alm = alm_doubled[:inner_v, start_col:end_col]
+            trimmed_flmn = flmn_doubled[:, :inner_v, start_col:end_col]
 
-                pix = s2fft.inverse(
-                    trimmed_alm,
+            mw_map_original = np.asarray(
+                s2fft.wigner.inverse(
+                    trimmed_flmn,
                     L=inner_v,
-                    method=method,
-                    spmd=False,
-                    reality=True,
+                    N=N,
+                    sampling="mw",
+                    method=wmethod,
+                    reality=reality,
                 )
-
-                trimmed_dirs.append(pix)
-
-            mw_map_original = np.stack(trimmed_dirs, axis=0)
+            )
+            if reality:
+                mw_map_original = np.real(mw_map_original)
             '''
             print(
                 f"[trim] scale={scale} input={MW_Doubled_Map.shape} "
@@ -1485,9 +1512,9 @@ class SILCTools():
         if visualise:
             try:
                 if str(mode).startswith("pcilc"):
-                    prefix = f"pcILC ε={str(mode).replace('pcilc_epsa', '')}"
+                    prefix = f"pcILC {str(mode)[len('pcilc-'):]}"
                 elif str(mode).startswith("cilc"):
-                    prefix = "cILC"
+                    prefix = f"cILC {str(mode)[len('cilc-'):]}"
                 else:
                     prefix = "ILC"
         
@@ -1559,8 +1586,7 @@ class ProduceSILC():
     def ILC_wav_coeff_maps_MP(file_template, frequencies, scales, realisations, output_templates, L_max, lam,
                               N_directions, comp, deproject=None, F=None, extract_comp=None,
                              reference_vectors=None, nsamp=None, overwrite: bool = False, 
-                             pcilc: bool = False, pcilc_component: str = "tsz", 
-                             pcilc_eps: float | None = None, pcilc_pick: str = "minvar",):
+                             pcilc_eps: float | None = None,):
     
         L = int(L_max)
         js = SILCTools.wavelet_js_custom(L)
@@ -1575,8 +1601,8 @@ class ProduceSILC():
             raise ValueError("Pass a single extract_comp (e.g. 'cmb'); the deprojected components go in deproject.")
         _, extract_comp = normalize_targets(extract_comp)
         deproject = normalise_deproject(deproject, extract_comp)
-        constraint = bool(deproject)
-        mode = ilc_mode(deproject=deproject, pcilc=pcilc, pcilc_eps=pcilc_eps)
+        mode = ilc_mode(deproject=deproject, pcilc_eps=pcilc_eps)
+        constraint = bool(deproject) and pcilc_eps is None  # cILC (exact nulls); the pcILC also needs F
  
         def _check_against_F(W, F, f, tol=1e-6):
             W = np.asarray(W)
@@ -1598,10 +1624,10 @@ class ProduceSILC():
             "create_ilc_maps": [],
             "trim": [],
         }
-        # --- Prepare constraint vector: preserve extract_comp (1), null every deproject component (0) ---
+        # --- F (columns [extract_comp] + deproject) for the cILC and pcILC; cILC target f: preserve (1), null (0) ---
+        if deproject and F is None:
+            raise ValueError(f"Must provide F (columns {[extract_comp] + deproject}) when deproject={deproject}")
         if constraint:
-            if F is None:
-                raise ValueError(f"Must provide F (columns {[extract_comp] + deproject}) when deproject={deproject}")
             f = ILCConstraints.find_f_from_extract_comp(F, [extract_comp], reference_vectors)
         else:
             f = None  # not used in unconstrained mode
@@ -1732,10 +1758,7 @@ class ProduceSILC():
                     frequencies=frequencies,
                     N_directions=int(N_directions),
                     overwrite=overwrite,
-                    pcilc=pcilc,
-                    pcilc_component=pcilc_component,
                     pcilc_eps=pcilc_eps,
-                    pcilc_pick=pcilc_pick,
                 )
 
             dt = time.perf_counter() - t0

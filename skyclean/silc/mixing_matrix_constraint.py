@@ -78,7 +78,12 @@ class SpectralVector:
         k = 1.380649e-23
         Tcmb = 2.726  # CMB temperature
         x = h * nu / (k * Tcmb)
-        g_nu = (x**2 * np.exp(x)) / (np.exp(x) - 1.0)**2  # dB_nu/dT at T_CMB
+        # dB_nu/dT at T_CMB (up to constants): divides an INTENSITY SED to give K_CMB.
+        # Used for the modified blackbodies (CIB, dust); their 353 GHz normalisation cancels the constants.
+        g_nu = (nu**3 * np.exp(x) * x / (np.exp(x) - 1.0)**2)
+        # dT_CMB/dT_RJ: converts a BRIGHTNESS-temperature (K_RJ) SED to K_CMB.
+        # Used for synchrotron, whose index beta_s is defined in K_RJ.
+        rj2cmb = (np.exp(x) - 1.0)**2 / (x**2 * np.exp(x))
 
         # ---- CIB modified blackbody SED in K_CMB ----
         x_cib = h * nu / (k * T_cib)
@@ -112,7 +117,7 @@ class SpectralVector:
         vecs = {
             "cmb":  np.ones_like(nu),
             "tsz":  tsz,
-            "sync": (nu / float(nu0)) ** float(beta_s) / g_nu,
+            "sync": (nu / float(nu0)) ** float(beta_s) * rj2cmb,   # 1 K_RJ at nu0, expressed in K_CMB
             "cib":  cib,
             "dust": dust,
         }

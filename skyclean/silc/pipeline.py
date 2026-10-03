@@ -35,7 +35,6 @@ class Pipeline:
         save_ilc_intermediates: bool = True,
         overwrite: bool = False,
         directory: str = "data/",
-        deproject: list | None = None,
         F = None,
         reference_vectors = None,
         nsamp: float = 1200, 
@@ -51,12 +50,11 @@ class Pipeline:
         random_seed: int = 1,
         ps_radius_range: tuple[float, float] = (1.0, 1.0),
         ps_brightness_scale: float = 1.0,
-        pcilc: bool = False,
-        pcilc_component: str = "tsz",
+        # cILC, pcILC
+        deproject: list | None = None,
         pcilc_eps: float | None = None,
-        pcilc_pick: str = "minvar",
+        # topology
         topology: str | None = None,
-        #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
         self.wavelet_components = wavelet_components
@@ -94,10 +92,9 @@ class Pipeline:
 
         
 
-        self.pcilc = bool(pcilc)
-        self.pcilc_component = str(pcilc_component).lower()
-        self.pcilc_eps = pcilc_eps
-        self.pcilc_pick = str(pcilc_pick)
+        # pcILC tolerance |w^T b| <= eps on the single deprojected component; None -> cILC (exact null)
+        self.pcilc_eps = None if pcilc_eps is None else float(pcilc_eps)
+        ilc_mode(deproject=self.deproject, pcilc_eps=self.pcilc_eps)  # validate the combination up front
 
         self.topology = topology
 
@@ -254,10 +251,9 @@ class Pipeline:
             J = int(j_max_silc(L, lam=self.lam)) + 1   # wavelet bands (excludes scaling)
             scales = list(range(J))       # use only wavelet bands for ILC
     
-        # Constraint set: cILC preserves extract_comp and nulls every component in self.deproject.
+        # Constraint set: preserve extract_comp; the cILC nulls every component in self.deproject, the pcILC
+        # (self.pcilc_eps given) bounds the single one, |w^T b| <= eps.
         deproject = self.deproject
-        if self.pcilc and deproject:
-            raise ValueError("pcilc=True and deproject=[...] cannot both be enabled. Drop --deproject for pcILC.")
         is_real_sky = ("real" in self.components) or (comp_in == "real")
         if deproject and not is_real_sky:
             # simulated maps: a deprojected component must actually be in the CFN mixture
@@ -330,10 +326,7 @@ class Pipeline:
                 reference_vectors=reference_vectors,
                 nsamp=self.nsamp, 
                 overwrite=self.overwrite,
-                pcilc=self.pcilc,
-                pcilc_component=self.pcilc_component,
                 pcilc_eps=self.pcilc_eps,
-                pcilc_pick=self.pcilc_pick,
             )
 
 
@@ -355,6 +348,7 @@ class Pipeline:
         nsamp: float | int | None = None,
         overwrite: bool | None = None,
         deproject: list | None = None,
+        pcilc_eps: float | None = None,
         mode: str | None = None,    
     ):
         """
@@ -364,8 +358,13 @@ class Pipeline:
         # resolve overwrite
         overwrite = self.overwrite if overwrite is None else overwrite
 
-        # resolve the deprojected set for THIS call (selects the ilc_ / cilc-dp-* files)
-        deproject_ = self.deproject if deproject is None else normalise_deproject(deproject)
+        # resolve the ILC mode for THIS call (selects the ilc_ / cilc-dp-* / pcilc-dp-* files); deproject=None
+        # uses the pipeline's own deproject and pcilc_eps
+        if deproject is None:
+            deproject_, pcilc_eps_ = self.deproject, self.pcilc_eps
+        else:
+            deproject_, pcilc_eps_ = normalise_deproject(deproject), pcilc_eps
+        mode_ = mode if mode is not None else ilc_mode(deproject=deproject_, pcilc_eps=pcilc_eps_)
 
         # defaults from pipeline
         r      = self.start_realisation if realisation is None else int(realisation)
@@ -403,11 +402,11 @@ class Pipeline:
                 component=comp_in, source="ilc_synth",
                 extract_comp=tgt, frequencies=freqs,
                 realisation=r, lmax=lmax_, lam=lam_, N_directions=N_directions_,
-                nsamp=nsamp_, deproject=deproject_, mode=mode,
+                nsamp=nsamp_, deproject=deproject_, mode=mode_,
             )
             src = "ilc_synth"
-            if mode is not None:
-                label = f"{mode}-synth ({tgt})"
+            if mode is not None or pcilc_eps_ is not None:
+                label = f"{mode_}-synth ({tgt})"
             else:
                 label = f"{'cILC' if deproject_ else 'ILC'}-synth ({tgt})"
 
@@ -447,10 +446,7 @@ class Pipeline:
 
         # ---------- save spectrum arrays to .npy for ILC_synth ----------
         if source == "ilc_synth" and "ilc_spectrum" in ft:
-            if mode is not None:
-                save_mode = mode
-            else:
-                save_mode = ilc_mode(deproject=deproject_)
+            save_mode = mode_
         
             freq_tag = "_".join(freqs)
         
@@ -527,6 +523,7 @@ class Pipeline:
         N_directions: int | None = None,
         nsamp: int | float | None = None,
         deproject: list | None = None,
+        pcilc_eps: float | None = None,
         field: int = 0,
         plot_r: bool = False,
         overwrite: bool | None = None,
@@ -542,7 +539,11 @@ class Pipeline:
         lam_  = self.lam_str if lam is None else (lam if isinstance(lam, str) else f"{float(lam):.1f}")
         N_directions_ = self.N_directions if N_directions is None else int(N_directions)
         nsamp_ = getattr(self, "nsamp", 1200) if nsamp is None else int(nsamp)
-        deproject_ = self.deproject if deproject is None else normalise_deproject(deproject)
+        # deproject=None uses the pipeline's own deproject and pcilc_eps (see step_power_spec)
+        if deproject is None:
+            deproject_, pcilc_eps_ = self.deproject, self.pcilc_eps
+        else:
+            deproject_, pcilc_eps_ = normalise_deproject(deproject), pcilc_eps
         fX    = self.frequencies if frequencies_X is None else list(frequencies_X)
         fY    = self.frequencies if frequencies_Y is None else list(frequencies_Y)
         overwrite = self.overwrite if overwrite is None else overwrite
@@ -576,10 +577,11 @@ class Pipeline:
                     component=comp_in, source="ilc_synth",
                     extract_comp=tgt, frequencies=frequencies,
                     realisation=r_use, lmax=lmax_, lam=lam_, N_directions=N_directions_,
-                    nsamp=nsamp_, deproject=deproject_,  mode=mode_use
+                    nsamp=nsamp_, deproject=deproject_,
+                    mode=mode_use if mode_use is not None else ilc_mode(deproject=deproject_, pcilc_eps=pcilc_eps_),
                 )
-                if mode_use is not None:
-                    label = f"{mode_use}-synth ({tgt})"
+                if mode_use is not None or pcilc_eps_ is not None:
+                    label = f"{mode_use or ilc_mode(deproject=deproject_, pcilc_eps=pcilc_eps_)}-synth ({tgt})"
                 else:
                     label = f"{'cILC' if deproject_ else 'ILC'}-synth ({tgt})"
                 fmt = "mw" if out["format"] == "mw" else "hp"
@@ -723,7 +725,7 @@ class Pipeline:
         ell = ell_proc
 
         # 3) save combined spectra
-        mode = ilc_mode(deproject=self.deproject, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
+        mode = ilc_mode(deproject=self.deproject, pcilc_eps=self.pcilc_eps)
 
         out_dir = os.path.join(self.directory, "power_spectra")
         os.makedirs(out_dir, exist_ok=True)
@@ -866,14 +868,15 @@ def main():
     parser.add_argument('--topology', type=str, choices=['Toy', 'E1'], default=None,
                         help="Topology CMB realisation set to use. Omit for the standard (non-topology) CMB maps.")
 
-    # Constrained ILC (cILC): preserve the extracted component and null the listed ones
+    # Constrained ILC: preserve the extracted component (--ilc-components); null (cILC) or bound (pcILC) the listed ones
     parser.add_argument(
         '--deproject',
         nargs='+',
         default=None,
         metavar='COMP',
-        help="Components to deproject with a constrained ILC (cILC), e.g. --deproject tsz. "
-             "Omit for the plain ILC. Output files are tagged cilc-dp-<comp>."
+        help="Components to deproject (tsz, cib), e.g. --deproject tsz cib. Alone: constrained ILC (cILC), exact "
+             "nulls, files tagged cilc-dp-<comps>. With --pcilc-eps: partially constrained ILC (pcILC) on a single "
+             "component, files tagged pcilc-dp-<comp>-eps<eps>. Omit for the plain ILC."
     )
     parser.add_argument(
         '--nsamp',
@@ -882,15 +885,10 @@ def main():
         help="Number of Monte Carlo samples (nsamp); part of the ILC output filenames."
     )
 
-    # pcILC options
-    parser.add_argument('--pcilc', action='store_true',
-                        help="Enable pcILC (partially constrained ILC). Mutually exclusive with --deproject.")
-    parser.add_argument('--pcilc-component', type=str, default='tsz',
-                        help="Component deprojected by pcILC.")
+    # pcILC: turns the --deproject component's exact null into the bound |w^T b| <= eps
     parser.add_argument('--pcilc-eps', type=float, default=None,
-                        help="pcILC deprojection tolerance. Omit for the ILC default.")
-    parser.add_argument('--pcilc-pick', type=str, default='minvar',
-                        help="pcILC weight selection rule (e.g. 'minvar').")
+                        help="pcILC tolerance eps > 0 on the single --deproject component (|w^T b| <= eps, b in the "
+                             "units of its SED). Omit for the cILC (exact null).")
 
     # Which steps to run (now including power spectra)
     parser.add_argument(
@@ -927,10 +925,7 @@ def main():
         deproject=args.deproject,
         nsamp=args.nsamp,
         topology=args.topology,
-        pcilc=args.pcilc,
-        pcilc_component=args.pcilc_component,
         pcilc_eps=args.pcilc_eps,
-        pcilc_pick=args.pcilc_pick,
         ps_component=args.ps_component,
         n_points=args.n_points,
         match_n_points_to_target_density=args.match_n_points_to_target_density,
@@ -957,11 +952,12 @@ if __name__ == "__main__": # Run main() only when the file is executed as a scri
 # 3. CFNE_CIRC using circular point-source injection
 # python -m skyclean.silc.pipeline --components cmb noise tsz extra_feature --wavelet-components cfne_circ --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --ps-component strongirps --n-points 10 --brightness-percentile 75 100 --mode random --random-seed 1 --ps-radius-range 1.0 3.0 --ps-brightness-scale 5.0 --ps-injection-mode circular_ps --overwrite --steps process wavelets ilc
 #
-# 4. Constrained ILC deprojecting tSZ (F is built from theory with columns [cmb, tsz]; outputs tagged cilc-dp-tsz)
+# 4. Constrained ILC deprojecting tSZ (F is built from theory with columns [cmb, tsz]; outputs tagged cilc-dp-tsz;
+#    --deproject tsz cib with cib in --components nulls both, tagged cilc-dp-cib-tsz)
 # python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --deproject tsz --nsamp 1200 --steps ilc
 #
-# 5. pcILC deprojecting tSZ (mutually exclusive with --deproject)
-# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --pcilc --pcilc-component tsz --pcilc-pick minvar --steps ilc
+# 5. pcILC: preserve the CMB, bound the tSZ response to |w^T b| <= 0.1 (outputs tagged pcilc-dp-tsz-eps0.1)
+# python -m skyclean.silc.pipeline --components cmb noise tsz dust sync --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 100 143 217 353 545 857 --realisations 1 --start-realisation 0 --lmax 511 --deproject tsz --pcilc-eps 0.1 --steps ilc
 #
 # 6. Topology CMB realisations
 # python -m skyclean.silc.pipeline --components cmb noise --wavelet-components cfn --ilc-components cmb --frequencies 030 044 070 --realisations 1 --start-realisation 0 --lmax 511 --topology E1 --steps process wavelets ilc
