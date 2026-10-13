@@ -207,7 +207,7 @@ class SILCTools():
         Ndeproj: int = 0,
         N_directions: int = 1,
         direction_index: int | None = None,
-        b_tol: float = 0.02,
+        b_tol: float = 0.04,
     ) -> float:
         """
         Paper Eqs (42)-(44): per-band real-space Gaussian FWHM
@@ -325,7 +325,7 @@ class SILCTools():
         J: int,
         Nfreq: int,
         Ndeproj: int = 0,
-        b_tol: float = 0.02,
+        b_tol: float = 0.04,
         scal_ell_cut: float = 64.0,
         scal_ell_max: int = 64,
     ) -> float:
@@ -459,7 +459,7 @@ class SILCTools():
         scaling: bool = False,
         Nfreq: int | None = None,
         Ndeproj: int = 0,
-        b_tol: float = 0.02,
+        b_tol: float = 0.04,
         # For diagnostics:
         nside_nmodes: int = 2048,
         k_sigma: float = 3.0,
@@ -693,7 +693,7 @@ class SILCTools():
                                     component: str = "cfn", lmax: int, lam: float | None = None,
                                     N_directions: int = 1,
                                     nsamp: float = 1200, overwrite: bool = False,
-                                    Ndeproj: int = 0, b_tol: float = 0.02,):
+                                    Ndeproj: int = 0, b_tol: float = 0.04,):
         
         #print("calculate_covariance_matrix", flush = True)
 
@@ -1641,7 +1641,7 @@ class ProduceSILC():
         Ndeproj = 0
         
         print(f"Derived Ndeproj={Ndeproj}")
-        b_tol = 0.02
+        b_tol = 0.04
             
         synthesized_map = []
         
