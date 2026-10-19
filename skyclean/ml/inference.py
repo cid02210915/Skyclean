@@ -34,7 +34,7 @@ class Inference:
                  directory="data/", seed=0, model_path=None,
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3,
                  momentum: float = 0.9, nsamp: int = 1200, deproject: list | None = None,
-                 pcilc: bool = False, pcilc_eps: float | None = None,
+                 pcilc_eps: float | None = None,
                  run_id: str | None = None, filter_type: str | None = "auto", masked: bool = False):
         """masked: the model was trained with the masked loss (--masked); its outputs are named ml-masked."""
 
@@ -57,7 +57,6 @@ class Inference:
         self.momentum = momentum
         self.nsamp = nsamp
         self.deproject = deproject  # components deprojected by the cILC inputs, e.g. ["tsz"]; None for the plain ILC
-        self.pcilc = pcilc
         self.pcilc_eps = pcilc_eps
         self.masked = masked  # model trained with the masked loss -> outputs tagged ml-masked
         self.run_id = (run_id or "").strip()
@@ -83,7 +82,6 @@ class Inference:
             N_directions=self.N_directions,
             nsamp=self.nsamp,
             deproject=self.deproject,
-            pcilc=self.pcilc,
             pcilc_eps=self.pcilc_eps,
             lam=self.lam,
             batch_size=1,
@@ -598,7 +596,7 @@ class Inference:
         try:
             chs = "_".join(str(n) for n in self.chs)
 
-            mode = ilc_mode(deproject=self.deproject, pcilc=self.pcilc, pcilc_eps=self.pcilc_eps)
+            mode = ilc_mode(deproject=self.deproject, pcilc_eps=self.pcilc_eps)
             frequencies = '_'.join(self.frequencies)
             checkpoint_tag = (
                 f"checkpoint_{self.loaded_checkpoint_epoch}"
@@ -700,12 +698,9 @@ def main():
     parser.add_argument("--nsamp", type=int, default=1200,
                         help="Number of Monte Carlo samples used by the ILC inputs.")
     parser.add_argument("--deproject", nargs="+", default=None, metavar="COMP",
-                        help="Use the constrained-ILC inputs that deproject these components (e.g. --deproject tsz, "
-                             "files tagged cilc-dp-tsz). Omit for the plain ILC inputs. Must match the trained model.")
-    parser.add_argument("--pcilc", action="store_true",
-                        help="Load partially-constrained ILC (pcILC) inputs.")
+                        help="SILC outputs that deproject these components (tsz, cib): cILC files tagged cilc-dp-<comps>, or with --pcilc-eps the pcILC files tagged pcilc-dp-<comp>-eps<eps>. Omit for the plain ILC. Must match the SILC run")
     parser.add_argument("--pcilc-eps", type=float, default=None,
-                        help="pcILC epsilon tolerance. Required with --pcilc; must match the SILC run.")
+                        help="pcILC tolerance on the single --deproject component (files tagged pcilc-dp-<comp>-eps<eps>); must match the SILC run. Omit for the cILC")
     parser.add_argument("--chs", nargs="+", type=int, default=[1, 16, 32, 32, 64],
                         help="Channel configuration. Must match the trained model.")
     parser.add_argument("--filter-type", type=str, default="auto",
@@ -777,7 +772,6 @@ def main():
         lam=args.lam,
         nsamp=args.nsamp,
         deproject=args.deproject,
-        pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         chs=args.chs,
         filter_type=args.filter_type,

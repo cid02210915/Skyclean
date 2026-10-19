@@ -23,7 +23,7 @@ jax.config.update("jax_enable_x64", False)
 class CMBFreeILC(): 
     def __init__(self, extract_comp: str, component: str, frequencies: list, realisations: int, lmax: int = 1024, N_directions: int = 1, lam: float = 2.0, 
                  nsamp: int = 1200, deproject: list | None = None,
-                 pcilc: bool = False, pcilc_eps: float | None = None, 
+                 pcilc_eps: float | None = None, 
                  batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False,
                  prefetch: bool = False, produce_residuals: bool = True, stats_component: str | None = None,
                  run_id: str | None = None, frozen_stats: bool = False):
@@ -71,11 +71,10 @@ class CMBFreeILC():
         self.random = random
         self.prefetch = prefetch
         self.deproject = normalise_deproject(deproject, extract_comp)
-        self.pcilc = pcilc
         self.pcilc_eps = pcilc_eps
         self.frozen_stats = frozen_stats
         # Must match the tag ProduceSILC wrote into the ILC filenames.
-        self.mode = ilc_mode(deproject=self.deproject, pcilc=pcilc, pcilc_eps=pcilc_eps)
+        self.mode = ilc_mode(deproject=self.deproject, pcilc_eps=pcilc_eps)
 
         self.a = 1E-5
 
