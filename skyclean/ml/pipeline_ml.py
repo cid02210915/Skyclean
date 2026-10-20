@@ -114,12 +114,9 @@ def parse_args():
     parser.add_argument("--nsamp", type=int, default=1200)
 
     parser.add_argument("--deproject", nargs="+", default=None, metavar="COMP",
-                        help="Use the constrained-ILC (cILC) SILC outputs that deproject these components, e.g. "
-                             "--deproject tsz (files tagged cilc-dp-tsz). Omit for the plain ILC outputs.")
-    parser.add_argument("--pcilc", action="store_true",
-                        help="Use partially-constrained ILC (pcILC) inputs")
+                        help="SILC outputs that deproject these components (tsz, cib): cILC files tagged cilc-dp-<comps>, or with --pcilc-eps the pcILC files tagged pcilc-dp-<comp>-eps<eps>. Omit for the plain ILC. Must match the SILC run")
     parser.add_argument("--pcilc-eps", type=float, default=None,
-                        help="pcILC epsilon tolerance. Required with --pcilc; must match the SILC run")
+                        help="pcILC tolerance on the single --deproject component (files tagged pcilc-dp-<comp>-eps<eps>); must match the SILC run. Omit for the cILC")
 
 
     parser.add_argument("--batch-size", type=int, default=32)
@@ -152,7 +149,7 @@ def parse_args():
         "--run-id",
         type=str,
         default="",
-        help="Run folder under ML/models. If omitted in training, uses timestamp YYYYMMDD_HHMMSS.",
+        help="Run folder under ML/models. Required with 'prepare'; if omitted in training, uses timestamp YYYYMMDD_HHMMSS.",
     )
     parser.add_argument("--resume-training", action="store_true")
     parser.add_argument("--loss-tag", type=str, default=None)
@@ -217,9 +214,9 @@ def parse_args():
 
 def step_prepare_data(args) -> None:
     """
-    Data-preparation step: generate the model input and target.
-    maps for every realisation from the SILC outputs, or random test maps with --random.
-    Existing maps are kept. Runs on CPU; no model or run directory is created.
+    Data-preparation step: generate the model input and target maps for every realisation from the SILC outputs,
+    or random test maps with --random, then fit the train-split normalisation statistics and save them in the run
+    folder ML/models/<run_id>/ (needs --run-id). Existing maps and statistics are kept. Runs on CPU; no model is created.
     """
     dataset = CMBFreeILC(
         extract_comp=args.extract_comp,
@@ -231,7 +228,6 @@ def step_prepare_data(args) -> None:
         lam=args.lam,
         nsamp=args.nsamp,
         deproject=args.deproject,
-        pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         batch_size=args.batch_size,
         split=args.split,
@@ -239,6 +235,7 @@ def step_prepare_data(args) -> None:
         random=args.random,
         prefetch=args.prefetch,
         produce_residuals=False,
+        run_id=args.run_id.strip(),
     )
     dataset.produce_residuals()
     print(f"[Prepare] Input/target maps ready for {args.realisations} realisations.")
@@ -260,7 +257,6 @@ def step_train(args) -> str:
         lam=args.lam,
         nsamp=args.nsamp,
         deproject=args.deproject,
-        pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         batch_size=args.batch_size,
         split=args.split,
@@ -321,7 +317,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
     ft = files.file_templates
     conv = MapAlmConverter(ft)
 
-    mode = ilc_mode(deproject=args.deproject, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
+    mode = ilc_mode(deproject=args.deproject, pcilc_eps=args.pcilc_eps)
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
@@ -424,7 +420,6 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
             lam=args.lam,
             nsamp=args.nsamp,
             deproject=args.deproject,
-            pcilc=args.pcilc,
             pcilc_eps=args.pcilc_eps,
             chs=args.chs,
             filter_type=args.filter_type,
@@ -536,7 +531,6 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         lam=args.lam,
         nsamp=args.nsamp,
         deproject=args.deproject,
-        pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         chs=args.chs,
         filter_type=args.filter_type,
@@ -557,7 +551,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
 
     test_ids = inference.data_handler.get_split_indices()["test"]
     print(f"[Evaluate] Predicting CMB for {len(test_ids)} test realisations...")
-    mode = ilc_mode(deproject=args.deproject, pcilc=args.pcilc, pcilc_eps=args.pcilc_eps)
+    mode = ilc_mode(deproject=args.deproject, pcilc_eps=args.pcilc_eps)
     freq_tag = "_".join(str(x) for x in args.frequencies)
     chs = "_".join(str(n) for n in args.chs)
     lam_str = f"{float(args.lam):.1f}"
@@ -724,7 +718,6 @@ def step_apply(args, ckpt_dir: str | None = None) -> str:
         lam=args.lam,
         nsamp=args.nsamp,
         deproject=args.deproject,
-        pcilc=args.pcilc,
         pcilc_eps=args.pcilc_eps,
         chs=args.chs,
         filter_type=args.filter_type,
@@ -766,6 +759,10 @@ def main():
     if args.resume_training and "train" not in steps:
         raise ValueError(
             "--resume-training is only valid when --mode includes 'train'."
+        )
+    if "prepare" in steps and not args.run_id.strip():
+        raise ValueError(
+            "prepare mode requires --run-id: the normalisation statistics are saved in ML/models/<run_id>/."
         )
     needs_model = [s for s in ("evaluate", "apply") if s in steps]
     if needs_model and "train" not in steps and not args.run_id.strip() and not args.model_dir.strip():
@@ -817,7 +814,8 @@ if __name__ == "__main__":
 ''' example usage
 
 # Steps (join with '+'):
-#   prepare  = data-preparation step: generate model input/target maps from the SILC outputs (CPU)
+#   prepare  = data-preparation step: generate model input/target maps from the SILC outputs and fit the normalisation
+#              statistics into ML/models/<run-id>/ (CPU; needs --run-id)
 #   train    = training step (GPU): reuses prepared maps/stats if they exist, otherwise generates them first
 #   evaluate = predict and score the held-out test split
 #   apply    = apply the trained model to the observed Planck sky (SILC run with --components real --wavelet-components real)
@@ -825,7 +823,7 @@ if __name__ == "__main__":
 #   maps, statistics and predictions carry the same tag, so ILC and cILC products never overwrite each other.
 # Cached ML maps older than their SILC inputs (after a SILC --overwrite) are regenerated automatically; statistics of an
 #   existing run that became stale raise an error on resume/evaluate/apply (train a new --run-id instead).
-# CPU-only preparation (e.g. while the GPU is busy): JAX_PLATFORMS=cpu python3 -m skyclean.ml.pipeline_ml --mode prepare ...
+# CPU-only preparation (e.g. while the GPU is busy): JAX_PLATFORMS=cpu python3 -m skyclean.ml.pipeline_ml --mode prepare --run-id <run-id> ...
 
 python3 -m skyclean.ml.pipeline_ml \
   --mode prepare+train \
