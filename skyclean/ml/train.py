@@ -678,6 +678,7 @@ class Train:
         latest_checkpoint_epoch = None
         latest_checkpoint_saved = False
         final_epoch = start_epoch - 1
+        diverged = False
 
         metrics = nnx.MultiMetric(loss=nnx.metrics.Average("loss"), accuracy=nnx.metrics.Average("accuracy"))
 
@@ -781,6 +782,17 @@ class Train:
             )
             print_gpu_usage(f"After epoch {epoch}")
 
+            # Stop before the checkpoint is overwritten so the last finite epoch survives on disk.
+            if not np.isfinite(metrics_history["train_loss"][-1]):
+                print(
+                    f"[Train] ABORT: non-finite train loss at epoch {epoch}; "
+                    f"keeping the epoch-{final_epoch} checkpoint and stopping."
+                )
+                for values in metrics_history.values():
+                    values.pop()
+                diverged = True
+                break
+
             # Save intermediate log
             self._save_training_log(metrics_history)
             self.save_model(model, optimizer, epoch)
@@ -794,7 +806,17 @@ class Train:
                 )
                 break
 
-        latest_checkpoint_saved = self.save_model(model, optimizer, final_epoch)
+        if diverged:
+            if final_epoch < start_epoch:
+                raise RuntimeError("[Train] Non-finite loss on the first epoch; no finite checkpoint to keep.")
+            # Reload the last finite epoch so the plots and exported checkpoint use good weights.
+            restored_epoch = self.load_model_for_training(model, optimizer)
+            if restored_epoch != final_epoch:
+                raise RuntimeError(
+                    f"[Train] Restored epoch {restored_epoch} does not match last finite epoch {final_epoch}.")
+            latest_checkpoint_saved = True
+        else:
+            latest_checkpoint_saved = self.save_model(model, optimizer, final_epoch)
         latest_checkpoint_epoch = final_epoch if latest_checkpoint_saved else None
 
         if not best_checkpoint_saved:

@@ -193,6 +193,20 @@ def ilc_mode(deproject=None, pcilc_eps: float | None = None) -> str:
     return "ilc"
 
 
+def b_tol(N_directions) -> float:
+    """
+    Covariance-smoothing tolerance b_tol used by the SILC covariance (ilc.py) as a function of the number of
+    wavelet directions: 0.01 * N (N=1 -> 0.01, N=2 -> 0.02, N=4 -> 0.04). Single definition shared by the
+    covariance computation and the output filenames (see b_tol_tag), so the two cannot drift apart.
+    """
+    return round(0.01 * int(N_directions), 6)
+
+
+def b_tol_tag(N_directions) -> str:
+    """Filename field for b_tol, e.g. "btol0.04"; fills {btol} in the b_tol-dependent FileTemplates entries."""
+    return f"btol{b_tol(N_directions):g}"
+
+
 def ml_tag(masked: bool = False) -> str:
     """
     ML stage tag placed after the ILC mode in the ML-cleaned map names ({mode}_{ml}_...):

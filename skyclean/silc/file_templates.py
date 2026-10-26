@@ -1,4 +1,22 @@
-import os 
+import os
+
+from .utils import b_tol_tag
+
+
+class BtolTemplate(str):
+    """
+    Filename template of a product that depends on the covariance tolerance b_tol (covariance, weights, ILC maps,
+    synthesised maps, spectra and the ML products derived from them). Its ``{btol}`` field is filled automatically
+    from the ``N_directions`` keyword of .format() (utils.b_tol_tag, b_tol = 0.01 * N), so call sites need no change;
+    pass btol= explicitly to override. Note: str methods (replace, join, ...) return a plain str without this behaviour.
+    """
+    def format(self, *args, **kwargs):
+        if "btol" not in kwargs:
+            if "N_directions" not in kwargs:
+                raise KeyError(f"this template needs N_directions (or btol=) to fill its b_tol tag: {str(self)}")
+            kwargs["btol"] = b_tol_tag(kwargs["N_directions"])
+        return str.format(self, *args, **kwargs)
+
 
 def pixel_ps_foreground_count(components) -> int:
     """Count foreground components used by pixel_ps, excluding cmb/noise/extra_feature."""
@@ -61,6 +79,9 @@ class FileTemplates():
         "545": "Bl_T_R3.01_fullsky_545x545.fits",
         "857": "Bl_T_R3.01_fullsky_857x857.fits",
     }
+
+    # templates whose files depend on b_tol (everything from the covariance onwards, and the ML products built on them)
+    BTOL_TAGGED = ("covariance_matrices", "weight_vector_matrices", "ilc_maps", "ilc_doubled_maps", "trimmed_maps", "ilc_synth", "ilc_ml", "ilc_spectrum", "ilc_cross_spectrum", "ilc_ml_spectrum", "foreground_estimate", "ilc_residual", "ilc_mwss", "ml_norm_stats")
 
     def __init__(self, directory = "data/", start_realisation: int = 0, topology: str | None = None,):
         self.directory = directory
@@ -242,44 +263,44 @@ class FileTemplates():
         # Covariance matrices per scale over the whole band-set (frequencies join tag, e.g. 30_44_70_...)
         "covariance_matrices": os.path.join(
             self.output_directories["covariance_matrix"],
-            "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "cov_MW_{component}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
         # Weights per scale; {type} is "weight_vector" for the plain ILC, otherwise the ilc_mode tag
         # ("cilc-dp-tsz", "pcilc-dp-tsz-eps0.1"). {frequencies} is the band-set tag (e.g. 030_044_070).
         "weight_vector_matrices": os.path.join(
             self.output_directories["weight_vector_data"],
-            "{component}_{type}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{component}_{type}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
         # Per-scale ILC maps at doubled resolution (function expects key 'ilc_maps')
         "ilc_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "{mode}_ilc_doubled_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
         # Legacy alias (same path)
         "ilc_doubled_maps": os.path.join(
             self.output_directories["ilc_doubled_wavelet_maps"],
-            "{mode}_ilc_doubled_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_doubled_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
         
         # Per-scale maps trimmed back to original resolution (function expects key 'trimmed_maps')
         "trimmed_maps": os.path.join(
             self.output_directories["ilc_trimmed_maps"],
-            "{mode}_ilc_trimmed_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_ilc_trimmed_{component}_{extract_comp}_f{frequencies}_s{scale}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
         # Final synthesized map — records target (extract_comp), source (component), and band-set
         "ilc_synth": os.path.join(
             self.output_directories["ilc_synthesised_maps"],
-            "{mode}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
         # ML-cleaned map; {ml} is "ml" or "ml-masked" (model trained with the masked loss), see utils.ml_tag
         'ilc_ml': os.path.join(
             self.output_directories["ilc_ml_maps"], 
-            "{mode}_{ml}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+            "{mode}_{ml}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
 
 
@@ -291,29 +312,29 @@ class FileTemplates():
             
         "ilc_spectrum": os.path.join(
             self.output_directories["ilc_synthesised_spec"],
-            "{mode}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
         # Optional: cross power spectrum (e.g. ILC vs processed)
         "ilc_cross_spectrum": os.path.join(
             self.output_directories["ilc_synthesised_cross_spec"],
-            "{mode}_{extract_comp}_from-{component}_x-{other}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}.npy"
+            "{mode}_{extract_comp}_from-{component}_x-{other}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
         # Improved ILC power spectrum after ML
         'ilc_ml_spectrum': os.path.join(
             self.output_directories["ilc_ml_spec"], 
-            "{mode}_{ml}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
+            "{mode}_{ml}_{extract_comp}_from-{component}_spectrum_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
         ),
 
 
         # ---------------- ML ----------------
-        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
-        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
-        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}.npy"),
+        "foreground_estimate": os.path.join(self.output_directories["ml_maps"], "foreground_estimate_{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}_{mode}.npy"),
+        "ilc_residual":       os.path.join(self.output_directories["ml_maps"], "ilc_residual_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}_{mode}.npy"),
+        "ilc_mwss":           os.path.join(self.output_directories["ml_maps"], "ilc_mwss_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}_{mode}.npy"),
         # train-split normalisation statistics (signed-log mean/std of F and R), fitted once by CMBFreeILC.find_dataset_mean_std;
         # stored in the model run folder ML/models/<run_id>/ next to the checkpoints they belong to
-        "ml_norm_stats":      os.path.join(self.output_directories["ml_models"], "{run_id}", "norm_stats_{component}_f{frequencies}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{mode}_ntrain{n_train}.npz"),
+        "ml_norm_stats":      os.path.join(self.output_directories["ml_models"], "{run_id}", "norm_stats_{component}_f{frequencies}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}_{mode}_ntrain{n_train}.npz"),
         # ML test maps (randomly generated) for memory check
         "test_foreground_estimate": os.path.join(self.output_directories["ml_test_maps"], "test_foreground_estimate_r{realisation:04d}_lmax{lmax}_N{N_directions}.npy"),
         "test_ilc_residual":       os.path.join(self.output_directories["ml_test_maps"], "test_ilc_residual_r{realisation:04d}_lmax{lmax}_N{N_directions}.npy"),
@@ -324,6 +345,10 @@ class FileTemplates():
         "mask": os.path.join(directory, "COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits"),  # Planck 2018 common CMB intensity mask
 
         }
+
+        # b_tol-dependent products: {btol} is filled from N_directions at .format() time (see BtolTemplate)
+        for key in self.BTOL_TAGGED:
+            self.file_templates[key] = BtolTemplate(self.file_templates[key])
 
     # put beams fit files inside 'HFI_beams' folder inside data directory
     def hfi_beam_path(self, frequency: str) -> str:

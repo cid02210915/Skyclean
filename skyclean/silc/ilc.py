@@ -22,6 +22,7 @@ from .custom_s2wav_bandlimits import *
 from .file_templates import FileTemplates
 from .utils import normalize_targets   
 from .utils import save_array
+from .utils import b_tol as utils_b_tol
 from .mixing_matrix_constraint import ILCConstraints 
 import concurrent.futures
 import time
@@ -870,6 +871,157 @@ class SILCTools():
         return weight_vectors
     
     
+    @staticmethod
+    def _weights_batched(Rs, kind, args, tol):
+        """
+        ILC / cILC / pcILC weights for a stack of covariance matrices, all pixels at once.
+
+        Rs: (..., Nf, Nf). kind: "ilc" (args = (a,)), "cilc" (args = (F, f)) or "pcilc" (args = (a, b, eps)).
+        Returns (w, bad): w (..., Nf) weights, bad (...) bool mask of pixels whose constraint denominator was
+        non-finite or below tol (weights set to 0, as in the pixel loop). Raises np.linalg.LinAlgError if any
+        matrix in the stack is exactly singular (numpy does not report which); the caller then falls back to
+        _weights_pixel_loop for this stack. The equations and their order of evaluation are those of the pixel loop.
+        """
+        Rs = np.asarray(Rs)
+        sp = Rs.shape[:-2]
+        Nf = Rs.shape[-1]
+
+        def solve(v):                       # R^{-1} v for every pixel; v (Nf,) -> (..., Nf), v (Nf, k) -> (..., Nf, k)
+            v = np.asarray(v, dtype=float)
+            if v.ndim == 1:
+                return np.linalg.solve(Rs, np.broadcast_to(v, sp + (Nf,))[..., None])[..., 0]
+            return np.linalg.solve(Rs, np.broadcast_to(v, sp + v.shape))
+
+        w = np.zeros(sp + (Nf,), dtype=float)
+        bad = np.zeros(sp, dtype=bool)
+
+        if kind == "ilc":
+            (a,) = args
+            Ra = solve(a)
+            den = np.einsum("...i,i->...", Ra, a)
+            bad = ~np.isfinite(den) | (np.abs(den) < tol)
+            good = ~bad
+            w[good] = Ra[good] / den[good][:, None]
+            return w, bad
+
+        if kind == "cilc":
+            F, f = args
+            RF = solve(F)                                                   # (..., Nf, Nc)   R^{-1} F
+            M = np.einsum("ic,...id->...cd", F, RF)                         # (..., Nc, Nc)   F^T R^{-1} F
+            t = np.linalg.solve(M, np.broadcast_to(f, sp + (f.shape[0],))[..., None])[..., 0]
+            w = np.einsum("...ic,...c->...i", RF, t)
+            return w, bad
+
+        if kind == "pcilc":
+            a, b, eps = args
+            Ra = solve(a)
+            Ka = np.einsum("...i,i->...", Ra, a)
+            bad = ~np.isfinite(Ka) | (np.abs(Ka) < tol)
+            ok = ~bad
+            w_ilc = np.zeros_like(w)
+            w_ilc[ok] = Ra[ok] / Ka[ok][:, None]
+            resp = np.einsum("...i,i->...", w_ilc, b)                       # w^T b of the unconstrained solution
+            inside = ok & (np.abs(resp) <= eps)
+            w[inside] = w_ilc[inside]
+            edge = ok & ~inside                                             # pixels that need a boundary solution
+            if edge.any():
+                Re, Rae, Kae = Rs[edge], Ra[edge], Ka[edge]
+                Rbe = np.linalg.solve(Re, np.broadcast_to(b, Re.shape[:-1])[..., None])[..., 0]
+                Kb = np.einsum("ni,i->n", Rbe, b)
+                Kab = np.einsum("ni,i->n", Rbe, a)
+                Delta = Kae * Kb - Kab * Kab
+                bad_d = ~np.isfinite(Delta) | (np.abs(Delta) < tol)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    wp = (Rae * (Kb - eps * Kab)[:, None] + Rbe * ( eps * Kae - Kab)[:, None]) / Delta[:, None]
+                    wm = (Rae * (Kb + eps * Kab)[:, None] + Rbe * (-eps * Kae - Kab)[:, None]) / Delta[:, None]
+                    vp = np.einsum("ni,nij,nj->n", wp, Re, wp)
+                    vm = np.einsum("ni,nij,nj->n", wm, Re, wm)
+                we = np.where((vp <= vm)[:, None], wp, wm)              # minimum-variance edge
+                we[bad_d] = 0.0
+                w[edge] = we
+                bad_e = np.zeros(sp, dtype=bool)
+                bad_e[edge] = bad_d
+                bad |= bad_e
+            return w, bad
+
+        raise ValueError(f"unknown kind {kind!r}")
+
+    @staticmethod
+    def _weights_pixel_loop(Rs, kind, args, tol):
+        """
+        Pixel-by-pixel version of _weights_batched (the original implementation); used only when the batched solve
+        meets an exactly singular matrix. Returns (w, singular_matrices_location, singular_matrices,
+        singular_constraints_location, singular_constraints) with locations as index tuples into Rs.shape[:-2].
+        """
+        Rs = np.asarray(Rs)
+        sp = Rs.shape[:-2]
+        Nf = Rs.shape[-1]
+        w_out = np.zeros(sp + (Nf,), dtype=float)
+        sm_loc, sm, sc_loc, sc = [], [], [], []
+        zeros = np.zeros((Nf,), dtype=float)
+
+        for pix in np.ndindex(sp):
+            Rij = Rs[pix]
+
+            if kind == "pcilc":
+                a_vec, b_vec, eps = args
+                try:
+                    Rinva = np.linalg.solve(Rij, a_vec)
+                except np.linalg.LinAlgError:
+                    sm_loc.append(pix); sm.append(Rij); w_out[pix] = zeros; continue
+                den_a = float(np.dot(a_vec, Rinva))
+                if (not np.isfinite(den_a)) or abs(den_a) < tol:
+                    sc_loc.append(pix); sc.append(np.array([[den_a]])); w_out[pix] = zeros; continue
+                w_ilc = (Rinva / den_a).ravel()
+                resp = float(np.dot(w_ilc, b_vec))
+                if abs(resp) <= eps:
+                    w = w_ilc
+                else:
+                    try:
+                        Rinvb = np.linalg.solve(Rij, b_vec)
+                    except np.linalg.LinAlgError:
+                        sm_loc.append(pix); sm.append(Rij); w_out[pix] = zeros; continue
+                    Ka = den_a
+                    Kb = float(np.dot(b_vec, Rinvb))
+                    Kab = float(np.dot(a_vec, Rinvb))
+                    Delta = Ka * Kb - Kab * Kab
+                    if (not np.isfinite(Delta)) or abs(Delta) < tol:
+                        sc_loc.append(pix); sc.append(np.array([[Ka, Kab], [Kab, Kb]])); w_out[pix] = zeros; continue
+                    w_plus  = (Rinva * (Kb - eps * Kab) + Rinvb * ( eps * Ka - Kab)) / Delta
+                    w_minus = (Rinva * (Kb + eps * Kab) + Rinvb * (-eps * Ka - Kab)) / Delta
+                    var_plus  = float(np.dot(w_plus,  np.dot(Rij, w_plus)))
+                    var_minus = float(np.dot(w_minus, np.dot(Rij, w_minus)))
+                    w = w_plus if var_plus <= var_minus else w_minus
+                w_out[pix] = np.asarray(w, dtype=float).ravel()
+                continue
+
+            if kind == "cilc":
+                F, f = args
+                try:
+                    RinvF = np.linalg.solve(Rij, F)
+                except np.linalg.LinAlgError:
+                    sm_loc.append(pix); sm.append(Rij); w_out[pix] = zeros; continue
+                constraint_matrix = np.dot(F.T, RinvF)
+                try:
+                    temp = np.linalg.solve(constraint_matrix, f)
+                except np.linalg.LinAlgError:
+                    sc_loc.append(pix); sc.append(constraint_matrix); w_out[pix] = zeros; continue
+                w_out[pix] = np.dot(RinvF, temp).ravel()
+                continue
+
+            # plain ILC
+            (identity_vector,) = args
+            try:
+                num = np.linalg.solve(Rij, identity_vector)
+            except np.linalg.LinAlgError:
+                sm_loc.append(pix); sm.append(Rij); w_out[pix] = zeros; continue
+            den = float(np.dot(identity_vector, num))
+            if (not np.isfinite(den)) or abs(den) < tol:
+                sc_loc.append(pix); sc.append(np.array([[den]])); w_out[pix] = zeros; continue
+            w_out[pix] = (num / den).ravel()
+
+        return w_out, sm_loc, sm, sc_loc, sc
+
     def compute_weights_generalised(
         R,
         scale,
@@ -957,7 +1109,7 @@ class SILCTools():
 
         N_freq = subdim2
 
-        inverses = np.zeros((*spatial_shape, N_freq, N_freq))
+        inverses = None   # never computed: nothing reads it, and the zero array was 9.5 GB per scale at lmax511 N4
         weight_vectors = np.zeros((*spatial_shape, N_freq), dtype=float)
 
         singular_matrices_location = []
@@ -1053,149 +1205,36 @@ class SILCTools():
         singular_constraints = []
 
         # ---------------------------------------
-        # Main loop
+        # Main computation
         # ---------------------------------------
+        # Same per-pixel equations as before, but solved for all pixels of a leading slice at once with the batched
+        # np.linalg.solve (see _weights_batched). One leading slice (direction, or row) at a time keeps the temporaries
+        # at ~1.5 GB for the lmax511 N4 scales. np.linalg.solve raises on an exactly singular matrix without saying
+        # which pixel, so that slice is redone with the original pixel loop (_weights_pixel_loop), which also records
+        # the singular locations exactly as before.
         tol = 1e-14
 
-        for pix in np.ndindex(spatial_shape):
-                Rij = R_Pix[pix]
+        if pcilc:
+            kind, args = "pcilc", (a_vec, b_vec, eps)
+        elif constraint:
+            kind, args = "cilc", (F, f)
+        else:
+            kind, args = "ilc", (identity_vector,)
 
-                # ---- pcILC branch ----
-                if pcilc:
-                    try:
-                        Rinva = np.linalg.solve(Rij, a_vec)
-                    except np.linalg.LinAlgError:
-                        zeros = np.zeros((N_freq,), dtype=float)
-                        singular_matrices_location.append(pix)
-                        singular_matrices.append(Rij)
-                        weight_vectors[pix] = zeros
-                        continue
-
-                    den_a = float(np.dot(a_vec, Rinva))
-                    if (not np.isfinite(den_a)) or abs(den_a) < tol:
-                        zeros = np.zeros((N_freq,), dtype=float)
-                        singular_constraints_location.append(pix)
-                        singular_constraints.append(np.array([[den_a]]))
-                        weight_vectors[pix] = zeros
-                        continue
-                    
-                    w_ilc = (Rinva / den_a).ravel()
-                    resp = float(np.dot(w_ilc, b_vec))               # w^T b
-                    '''
-                    if pcilc and abs(eps) < tol and i == 0 and j == 0:
-                        print("abs(resp) =", abs(resp), "eps =", eps)
-                    '''
-                    if abs(resp) <= eps:
-                        w = w_ilc
-                    else:
-                        try:
-                            Rinvb = np.linalg.solve(Rij, b_vec)      # R^{-1} b
-                        except np.linalg.LinAlgError:
-                            zeros = np.zeros((N_freq,), dtype=float)
-                            singular_matrices_location.append((pix))
-                            singular_matrices.append(Rij)
-                            weight_vectors[pix] = zeros
-                            continue
-                        
-                        Ka  = den_a
-                        Kb  = float(np.dot(b_vec, Rinvb))
-                        Kab = float(np.dot(a_vec, Rinvb))
-
-                        Delta = Ka * Kb - Kab * Kab
-                        if (not np.isfinite(Delta)) or abs(Delta) < tol:
-                            zeros = np.zeros((N_freq,), dtype=float)
-                            singular_constraints_location.append((pix))
-                            singular_constraints.append(np.array([[Ka, Kab], [Kab, Kb]]))
-                            weight_vectors[pix] = zeros
-                            continue
-                        
-                        w_plus  = (Rinva * (Kb - eps * Kab) + Rinvb * ( eps * Ka - Kab)) / Delta
-                        w_minus = (Rinva * (Kb + eps * Kab) + Rinvb * (-eps * Ka - Kab)) / Delta
-
-                        # minimum-variance edge (the one on the side of the unconstrained response resp)
-                        var_plus  = float(np.dot(w_plus,  np.dot(Rij, w_plus)))
-                        var_minus = float(np.dot(w_minus, np.dot(Rij, w_minus)))
-                        w = w_plus if var_plus <= var_minus else w_minus
-                        '''
-                        if pcilc and abs(eps) < tol and i == 0 and j == 0:
-                            F_eq = np.column_stack([a_vec, b_vec])
-                            f_eq = np.array([1.0, 0.0], dtype=float)
-
-                            RinvF = np.linalg.solve(Rij, F_eq)
-                            M = np.dot(F_eq.T, RinvF) 
-                            temp = np.linalg.solve(M, f_eq)
-                            w_cilc_eq = np.dot(RinvF, temp).ravel() 
-
-                            print("---- local eps=0 check ----")
-                            print("scale =", scale, "realisation =", realisation, "i =", i, "j =", j)
-                            print("Rij (pcilc eps=0) =\n", Rij)
-                            print("max|w_pcilc - w_cilc| =", np.max(np.abs(w - w_cilc_eq)))
-                            print("max|w_plus - w_cilc|  =", np.max(np.abs(w_plus - w_cilc_eq)))
-                            print("max|w_minus - w_cilc| =", np.max(np.abs(w_minus - w_cilc_eq)))
-                            print("w_plus[:5]  =", w_plus[:5])
-                            print("w_minus[:5] =", w_minus[:5])
-                            print("w_cilc[:5]  =", w_cilc_eq[:5])
-                        '''
-                    weight_vectors[pix] = np.asarray(w, dtype=float).ravel()
-                    continue
-                
-                # ---- cILC branch ----
-                if constraint:
-                    #print('cilc')
-                    try:
-                        RinvF = np.linalg.solve(Rij, F)              # (Nf, Nc)
-                    except np.linalg.LinAlgError:
-                        zeros = np.zeros((N_freq,), dtype=float)
-                        singular_matrices_location.append((pix))
-                        singular_matrices.append(Rij)
-                        weight_vectors[pix] = zeros
-                        continue
-                    
-                    constraint_matrix = np.dot(F.T, RinvF)           # (Nc, Nc)
-
-                    try:
-                        temp = np.linalg.solve(constraint_matrix, f) # (Nc,)
-                    except np.linalg.LinAlgError:
-                        zeros = np.zeros((N_freq,), dtype=float)
-                        singular_constraints_location.append((pix))
-                        singular_constraints.append(constraint_matrix)
-                        weight_vectors[pix] = zeros
-                        continue
-                    
-                    w = np.dot(RinvF, temp).ravel()                  # (Nf,)
-                    '''
-                    if i == 0 and j == 0:
-                        print("---- local cILC check ----")
-                        print("scale =", scale, "realisation =", realisation, "i =", i, "j =", j)
-                        print("Rij (deproject) =\n", Rij)
-                        print("F =\n", F)
-                        print("f =", f)
-                        print("w_cilc[:5] =", w[:5])
-                    '''
-                    weight_vectors[pix] = w
-                    continue
-                
-                # ---- standard ILC branch ----
-                try:
-                    #print('ilc')
-                    num = np.linalg.solve(Rij, identity_vector)      # R^{-1} a
-                except np.linalg.LinAlgError:
-                    zeros = np.zeros((N_freq,), dtype=float)
-                    singular_matrices_location.append((pix))
-                    singular_matrices.append(Rij)
-                    weight_vectors[pix] = zeros
-                    continue
-                
-                den = float(np.dot(identity_vector, num))
-                if (not np.isfinite(den)) or abs(den) < tol:
-                    zeros = np.zeros((N_freq,), dtype=float)
-                    singular_constraints_location.append((pix))
-                    singular_constraints.append(np.array([[den]]))
-                    weight_vectors[pix] = zeros
-                    continue
-                
-                w = (num / den).ravel()
-                weight_vectors[pix] = w
+        for lead in range(spatial_shape[0]):
+            Rs = R_Pix[lead]
+            try:
+                w_s, bad_s = SILCTools._weights_batched(Rs, kind, args, tol)
+                weight_vectors[lead] = w_s
+                for idx in np.argwhere(bad_s):
+                    singular_constraints_location.append((lead, *(int(k) for k in idx)))
+            except np.linalg.LinAlgError:
+                w_s, sm_loc, sm, sc_loc, sc = SILCTools._weights_pixel_loop(Rs, kind, args, tol)
+                weight_vectors[lead] = w_s
+                singular_matrices_location += [(lead, *p) for p in sm_loc]
+                singular_matrices += sm
+                singular_constraints_location += [(lead, *p) for p in sc_loc]
+                singular_constraints += sc
 
         if len(singular_matrices_location) > 0:
             print("Discovered", len(singular_matrices_location),
@@ -1641,7 +1680,7 @@ class ProduceSILC():
         Ndeproj = 0
         
         print(f"Derived Ndeproj={Ndeproj}")
-        b_tol = 0.04
+        b_tol = utils_b_tol(N_directions)   # 0.01 * N (N=1 -> 0.01, N=2 -> 0.02, N=4 -> 0.04); also sets the _btol filename tag
             
         synthesized_map = []
         

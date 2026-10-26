@@ -26,7 +26,7 @@ for start_realisation in start_realisation_list:
         save_ilc_intermediates=False,
         overwrite=False, 
         directory="/Scratch/cindy/testing/Skyclean/skyclean/data/" , 
-        constraint=False,
+        deproject=None,
         reference_vectors=None,
         nsamp=1200
         )

@@ -1,3 +1,4 @@
+from skyclean.silc.utils import b_tol_tag
 import healpy as hp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -309,7 +310,7 @@ class Visualise():
         else:
             # Fallback: cache next to the map, named after the ILC mode and input product it was computed from
             map_dir = os.path.dirname(map_path)
-            tag = f"{mode}_{component}_power_spectrum_from-{self.component}_r{self.realisation:04d}_lmax{lmax}_N{self.N_directions}_lam{lam}_nsamp{self.nsamp}"
+            tag = f"{mode}_{component}_power_spectrum_from-{self.component}_r{self.realisation:04d}_lmax{lmax}_N{self.N_directions}_lam{lam}_nsamp{self.nsamp}_{b_tol_tag(self.N_directions)}"
             if component == 'ilc_ml':
                 chs = "_".join(str(n) for n in self.chs)
                 tag += f"_rn{self.rn}_batch{self.batch_size}_epo{self.epochs}_lr{self.lr}_mom{self.momentum}_chs{chs}"
