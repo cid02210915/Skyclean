@@ -807,14 +807,16 @@ class Train:
                 break
 
         if diverged:
-            if final_epoch < start_epoch:
-                raise RuntimeError("[Train] Non-finite loss on the first epoch; no finite checkpoint to keep.")
             # Reload the last finite epoch so the plots and exported checkpoint use good weights.
-            restored_epoch = self.load_model_for_training(model, optimizer)
+            try:
+                restored_epoch = self.load_model_for_training(model, optimizer)
+            except FileNotFoundError as e:
+                raise RuntimeError("[Train] Non-finite loss before any checkpoint was saved; nothing to keep.") from e
             if restored_epoch != final_epoch:
                 raise RuntimeError(
                     f"[Train] Restored epoch {restored_epoch} does not match last finite epoch {final_epoch}.")
-            latest_checkpoint_saved = True
+            # Absent when the abort hit the first epoch after a resume: that epoch's directory already holds its file.
+            latest_checkpoint_saved = (Path(self.model_dir) / "checkpoint_latest.msgpack").is_file()
         else:
             latest_checkpoint_saved = self.save_model(model, optimizer, final_epoch)
         latest_checkpoint_epoch = final_epoch if latest_checkpoint_saved else None
