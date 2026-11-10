@@ -281,17 +281,17 @@ class DownloadData():
         # Download foregrounds, which have only one realisation.
         print("Downloading foreground components...")
         if 'all' in self.components:
-            for component in self.download_templates:
-                if component == "cmb" or component == "noise" or component == "extra_feature" or component == "cib" or component == "mask" or component == "real" or component == "total":
-                    continue
-                else:
-                    for frequency in self.frequencies:
-                        self.download_foreground_component(component, frequency)
+            # the full FFP10 set the plain "cfn" name stands for (utils.FFP10_FOREGROUNDS, cib at 353/545/857 only)
+            for component in FFP10_FOREGROUNDS:
+                for frequency in self.frequencies:
+                    if component == "cib" and frequency not in {"353", "545", "857"}:
+                        continue
+                    self.download_foreground_component(component, frequency)
 
         else:
             for component in self.components:
-                if component == "cmb" or component == "noise" or component == "extra_feature":
-                    continue
+                if component == "cmb" or component == "noise" or component == "extra_feature" or pysm_model(component) is not None:
+                    continue  # PySM maps are generated locally with pysm3, not downloaded
                 else:
                     for frequency in self.frequencies:
 

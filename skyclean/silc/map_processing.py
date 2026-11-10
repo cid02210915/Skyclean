@@ -2,7 +2,9 @@ import os, glob
 import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
-from .file_templates import FileTemplates, pixel_ps_component_name, register_pixel_ps_component_template
+from .file_templates import (FileTemplates, CFN_PRODUCT_KEYS, pixel_ps_component_name, mixture_tagged_component,
+                             register_pixel_ps_component_template, register_mixture_component_template)
+from .utils import FFP10_FOREGROUNDS, foreground_tag, pysm_model
 from .map_tools import *
 from .add_point_source import (CircularPSInjector, PixelPSInjector, PointSource, measure_source_values)
 
@@ -123,6 +125,16 @@ class ProcessMaps():
                     for comp in self.wavelet_components
                 ]
 
+        # The foreground mixture tags every CFN-type product name (cfn -> cfn-a1-d3-f1-s1, cfn-dust-ff-spindust-sync)
+        # so different mixtures never collide; "" for the full FFP10 set, which keeps the plain cfn. Applied after the
+        # pixel_ps rename so cfne_pix_N is tagged too.
+        self.mixture_tag = foreground_tag(components)
+        if self.mixture_tag:
+            bases = list(CFN_PRODUCT_KEYS) + ([self.pixel_ps_output_key] if self.pixel_ps_output_key else [])
+            for base in bases:
+                register_mixture_component_template(self.file_templates, files.output_directories, base + self.mixture_tag)
+            self.wavelet_components = [mixture_tagged_component(comp, components) for comp in self.wavelet_components]
+
 
     def _repair_and_read_map(self, path: str, comp: str, frequency: str, realisation: int):
         """
@@ -131,6 +143,11 @@ class ProcessMaps():
         try:
             return read_map_with_known_order(path, comp=comp, frequency=frequency)
         except (FileNotFoundError, OSError) as exc:
+            if pysm_model(comp) is not None:
+                raise FileNotFoundError(
+                    f"PySM map '{path}' is missing or unreadable ({exc}) and cannot be downloaded: generate it with pysm3 "
+                    f"(model {pysm_model(comp)}, {frequency} GHz, NSIDE 512 / lmax 512, K_CMB) into CMB_realisations/."
+                ) from exc
             print(
                 f"Map read failed for component='{comp}', frequency='{frequency}', "
                 f"realisation={realisation}: {exc}. Attempting one repair."
@@ -240,13 +257,8 @@ class ProcessMaps():
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
 
         if 'all' in self.components:
-            # Load all components in download_templates except those that are not sky components:
-            components = ['cmb']
-            for comp in self.download_templates.keys():
-                if comp == "extra_feature" or comp == "cib" or comp == "mask" or comp == "real" or comp == "total":
-                    continue
-                else:
-                    components.append(comp)
+            # the full FFP10 set the plain "cfn" name stands for (cib is skipped below outside 353/545/857), plus any PySM model
+            components = ["cmb", "noise"] + list(FFP10_FOREGROUNDS) + [c for c in self.components if pysm_model(c) is not None]
             print(f"Loading all components for CFN creation: {components}")
         else: 
             components = self.components
@@ -311,6 +323,8 @@ class ProcessMaps():
 
                     if comp == "cib":
                         hp_map = HPTools.unit_convert_cib(hp_map, frequency)
+                    elif pysm_model(comp) is not None:
+                        pass  # PySM maps are generated in K_CMB at every band: no MJy/sr conversion
                     elif comp != "cmb":
                         hp_map = HPTools.unit_convert(hp_map, frequency)
                 
@@ -448,6 +462,8 @@ class ProcessMaps():
 
                     if comp == "cib":
                         hp_map = HPTools.unit_convert_cib(hp_map, frequency)
+                    elif pysm_model(comp) is not None:
+                        pass  # PySM maps are generated in K_CMB at every band: no MJy/sr conversion
                     elif comp != "cmb":
                         hp_map = HPTools.unit_convert(hp_map, frequency)
                 
@@ -519,7 +535,7 @@ class ProcessMaps():
         m = self._repair_and_read_map(path, comp=comp, frequency=frequency, realisation=realisation)
         if comp == "cib":
             return HPTools.unit_convert_cib(m, frequency)
-        if comp != "cmb":
+        if comp != "cmb" and pysm_model(comp) is None:  # PySM maps are already in K_CMB
             return HPTools.unit_convert(m, frequency)
         return m
     
@@ -599,7 +615,7 @@ class ProcessMaps():
         hp_map = self._repair_and_read_map(in_path, comp=comp, frequency=frequency, realisation=realisation)
         # extra_feature is already prepared in converted units by add_point_source;
         # do not re-apply unit conversion here.
-        if comp not in {"cmb", "extra_feature"}:
+        if comp not in {"cmb", "extra_feature"} and pysm_model(comp) is None:  # PySM maps are already in K_CMB
             hp_map = HPTools.unit_convert(hp_map, frequency)
         
         if comp == "noise":
@@ -705,6 +721,7 @@ class ProcessMaps():
             if 'extra_feature' in self.components and self.ps_injection_mode == "pixel_ps"
             else ("cfne" if 'extra_feature' in self.components else "cfn")
         )
+        output_key = mixture_tagged_component(output_key, self.components)  # cfn -> cfn-a1-d3-f1-s1 unless the full FFP10 set
         for realisation in range(self.realisations):
             i=0
             realisation += self.start_realisation  # Adjust for starting realisation
@@ -776,7 +793,7 @@ class ProcessMaps():
                     # visualise the map to check
                     # hp.mollview(cfn_map, title=f"CFN @ {frequency} GHz with injected feature, realisation {realisation}")
                 else:
-                    cfn_output_path = self.file_templates["cfn"].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
+                    cfn_output_path = self.file_templates[output_key].format(frequency=frequency, realisation=realisation, lmax=desired_lmax)
                     if os.path.exists(cfn_output_path) and self.overwrite == False:
                         print(f"CFN map at {frequency} GHz for realisation {realisation} already exists. Skipping processing.")
                         continue

@@ -19,7 +19,7 @@ from .model import S2_UNET
 from skyclean.silc.utils import ilc_mode, ml_tag
 from .data import CMBFreeILC
 from .train import resolve_checkpoint_target, resolve_filter_type
-from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
+from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template, register_mixture_component_template
 from skyclean.silc import SamplingConverters
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumTT
 import s2fft
@@ -65,6 +65,11 @@ class Inference:
 
         self.file_templates = FileTemplates(directory)
         register_pixel_ps_component_template(
+            self.file_templates.file_templates,
+            self.file_templates.output_directories,
+            self.component,
+        )
+        register_mixture_component_template(
             self.file_templates.file_templates,
             self.file_templates.output_directories,
             self.component,

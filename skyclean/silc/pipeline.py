@@ -9,12 +9,12 @@ from typing import Literal
 
 from .download import DownloadData
 from .map_processing import ProcessMaps
-from .file_templates import FileTemplates, pixel_ps_component_name
+from .file_templates import FileTemplates, pixel_ps_component_name, mixture_tagged_component, register_mixture_component_template
 from .ilc import ProduceSILC  
 from .power_spec import MapAlmConverter, PowerSpectrumTT, PowerSpectrumCrossTT
 from .mixing_matrix_constraint import SpectralVector
 from .custom_s2wav_bandlimits import j_max_silc
-from .utils import ilc_mode, normalise_deproject
+from .utils import foreground_tag, ilc_mode, normalise_deproject
 
 
 class Pipeline:
@@ -95,8 +95,13 @@ class Pipeline:
         # pcILC tolerance |w^T b| <= eps on the single deprojected component; None -> cILC (exact null)
         self.pcilc_eps = None if pcilc_eps is None else float(pcilc_eps)
         ilc_mode(deproject=self.deproject, pcilc_eps=self.pcilc_eps)  # validate the combination up front
+        self.mixture_tag = foreground_tag(components)  # validates component names up front; "" for the full FFP10 set (plain cfn)
 
         self.topology = topology
+
+    def _tagged(self, comp: str) -> str:
+        """CFN-type product name with the foreground tag of self.components (cfn -> cfn-a1-d3-f1-s1); other names unchanged."""
+        return mixture_tagged_component(comp, self.components)
 
     # -------------------------
     # Steps
@@ -238,6 +243,7 @@ class Pipeline:
             and self.ps_injection_mode == "pixel_ps"
         ):
             comp_in = pixel_ps_component_name(self.components)
+        comp_in = self._tagged(comp_in)  # cfn -> cfn-a1-d3-f1-s1 unless the mixture is the full FFP10 set
 
         if getattr(self, "scales", None) is not None:
             scales = list(self.scales)
@@ -375,7 +381,9 @@ class Pipeline:
         N_directions_ = self.N_directions if N_directions is None else int(N_directions)
 
         # --- templates + processed-CFN detection ---
-        ft = FileTemplates(self.directory).file_templates
+        files = FileTemplates(self.directory)
+        ft = files.file_templates
+        cfn_key = self._tagged("cfn")  # cfn, or e.g. cfn-dust-ff-spindust-sync for a partial mixture
         has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
 
         # --- choose source automatically (prefer processed CFN if present) ---
@@ -387,16 +395,17 @@ class Pipeline:
             else:
                 source = "downloaded"
 
-        # --- make a local copy of templates and alias processed_cfn -> cfn if needed ---
+        # --- make a local copy of templates and alias processed_<cfn_key> -> <cfn_key> if needed ---
         ft_local = dict(ft)
-        if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
-            ft_local["processed_cfn"] = ft_local["cfn"]
+        register_mixture_component_template(ft_local, files.output_directories, cfn_key)
+        if (f"processed_{cfn_key}" not in ft_local) and (cfn_key in ft_local):
+            ft_local[f"processed_{cfn_key}"] = ft_local[cfn_key]
 
         conv = MapAlmConverter(ft_local)
 
         # ---- load selected map ----
         if source == "ilc_synth":
-            comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")
+            comp_in = self._tagged(component or (self.wavelet_components[0] if self.wavelet_components else "cfn"))
             tgt     = extract_comp or (self.ilc_components[0] if self.ilc_components else "cmb")
             out = conv.to_alm(
                 component=comp_in, source="ilc_synth",
@@ -412,9 +421,9 @@ class Pipeline:
 
         elif source == "processed":
             if component is not None:
-                comp_use = component
+                comp_use = self._tagged(component)
             else:
-                comp_use = "cfn" if has_processed_cfn else "cmb"
+                comp_use = cfn_key if has_processed_cfn else "cmb"
 
             out = conv.to_alm(
                 component=comp_use, source="processed",
@@ -549,11 +558,14 @@ class Pipeline:
         overwrite = self.overwrite if overwrite is None else overwrite
     
         # templates + processed-CFN detection (mirror)
-        ft = FileTemplates(self.directory).file_templates
+        files = FileTemplates(self.directory)
+        ft = files.file_templates
+        cfn_key = self._tagged("cfn")  # cfn, or e.g. cfn-dust-ff-spindust-sync for a partial mixture
         has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
         ft_local = dict(ft)
-        if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
-            ft_local["processed_cfn"] = ft_local["cfn"]
+        register_mixture_component_template(ft_local, files.output_directories, cfn_key)
+        if (f"processed_{cfn_key}" not in ft_local) and (cfn_key in ft_local):
+            ft_local[f"processed_{cfn_key}"] = ft_local[cfn_key]
         conv = MapAlmConverter(ft_local)
     
         # auto source (mirror)
@@ -571,7 +583,7 @@ class Pipeline:
         def load_one(source, component, extract_comp, frequencies, frequency, r_use, mode_use):
             src = pick_source(source)
             if src == "ilc_synth":
-                comp_in = component or (self.wavelet_components[0] if self.wavelet_components else "cfn")
+                comp_in = self._tagged(component or (self.wavelet_components[0] if self.wavelet_components else "cfn"))
                 tgt     = extract_comp or (self.ilc_components[0] if self.ilc_components else "cmb")
                 out = conv.to_alm(
                     component=comp_in, source="ilc_synth",
@@ -587,7 +599,7 @@ class Pipeline:
                 fmt = "mw" if out["format"] == "mw" else "hp"
 
             elif src == "processed":
-                comp_use = component or ("cfn" if has_processed_cfn else "cmb")
+                comp_use = self._tagged(component) if component else (cfn_key if has_processed_cfn else "cmb")
                 out = conv.to_alm(
                     component=comp_use, source="processed",
                     frequency=frequency, realisation=r_use, lmax=lmax_

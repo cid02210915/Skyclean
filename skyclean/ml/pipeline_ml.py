@@ -29,7 +29,7 @@ tf.config.set_visible_devices([], "GPU")
 from skyclean.ml.train import Train, resolve_checkpoint_target
 from skyclean.ml.inference import Inference
 from skyclean.ml.data import CMBFreeILC
-from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template
+from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template, register_mixture_component_template
 from skyclean.silc.utils import ilc_mode, ml_tag
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumCrossTT, PowerSpectrumTT
 from skyclean.silc import HPTools
@@ -310,6 +310,11 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
 
     files = FileTemplates(args.directory)
     register_pixel_ps_component_template(
+        files.file_templates,
+        files.output_directories,
+        args.component,
+    )
+    register_mixture_component_template(
         files.file_templates,
         files.output_directories,
         args.component,

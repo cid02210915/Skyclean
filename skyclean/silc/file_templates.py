@@ -1,6 +1,6 @@
 import os
 
-from .utils import b_tol_tag
+from .utils import b_tol_tag, FOREGROUND_TOKENS, PYSM_MODELS, foreground_tag
 
 
 class BtolTemplate(str):
@@ -65,6 +65,40 @@ def register_pixel_ps_component_template(file_templates: dict, output_directorie
         output_directories["cfne"],
         f"{prefix}_f{{frequency}}_r{{realisation:04d}}_lmax{{lmax}}.npy",
     )
+    return True
+
+
+# CFN-type products of the process stage whose name is tagged with the foreground mixture (see utils.foreground_tag)
+CFN_PRODUCT_KEYS = ("cfn", "fn", "cfne", "cfne_circ")
+
+
+def mixture_tagged_component(comp, components) -> str:
+    """
+    Append the foreground tag of ``components`` to a CFN-type product name: "cfn" -> "cfn-a1-d3-f1-s1",
+    "cfn-dust-ff-spindust-sync"; unchanged for the full FFP10 set. Names that are not CFN-type products (raw
+    components, "real") or already carry a tag are returned unchanged.
+    """
+    comp = str(comp)
+    if "-" in comp or not (comp in CFN_PRODUCT_KEYS or pixel_ps_filename_prefix_from_component(comp) is not None):
+        return comp
+    return comp + foreground_tag(components)
+
+
+def register_mixture_component_template(file_templates: dict, output_directories: dict, component: str) -> bool:
+    """
+    Register a dynamic template for a mixture-tagged CFN-type component key such as "cfn-a1-d3-f1-s1",
+    "cfn-dust-ff-spindust-sync" or "cfne_pix_3-d1": the base key's template with the tag inserted before
+    _f{frequency}, in the same directory (cfn-d3-s1_f{frequency}_r{realisation:04d}_lmax{lmax}.npy). Lets later
+    stages use --component cfn-a1-d3-f1-s1. Returns False for any other name.
+    """
+    component = str(component)
+    base, sep, tag = component.partition("-")
+    if not sep or any(t not in FOREGROUND_TOKENS for t in tag.split("-")):
+        return False
+    if base not in file_templates and not register_pixel_ps_component_template(file_templates, output_directories, base):
+        return False
+    directory, name = os.path.split(file_templates[base])
+    file_templates[component] = os.path.join(directory, name.replace("_f{frequency}", f"-{tag}_f{{frequency}}", 1))
     return True
 
 
@@ -345,6 +379,16 @@ class FileTemplates():
         "mask": os.path.join(directory, "COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits"),  # Planck 2018 common CMB intensity mask
 
         }
+
+        # PySM foreground models (pre-generated with pysm3 outside the pipeline, one map per model and band, already in
+        # K_CMB, NSIDE 512 / lmax 512): raw "pysm_<model>" maps and their "processed_pysm_<model>" caches
+        for model in PYSM_MODELS:
+            self.file_templates[f"pysm_{model}"] = os.path.join(
+                self.output_directories["cmb_realisations"], f"PySM_{model}_{{frequency}}GHz_nside512_lmax512_I_Kcmb.fits"
+            )
+            self.file_templates[f"processed_pysm_{model}"] = os.path.join(
+                self.output_directories["processed_maps"], f"processed_pysm_{model}_f{{frequency}}_lmax{{lmax}}.npy"
+            )
 
         # b_tol-dependent products: {btol} is filled from N_directions at .format() time (see BtolTemplate)
         for key in self.BTOL_TAGGED:

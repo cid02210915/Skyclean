@@ -158,6 +158,78 @@ def normalise_deproject(deproject, extract_comp: str | None = None) -> list:
     return names
 
 
+PYSM_MODELS = ("a1", "a2", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12",
+               "f1", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7")
+
+
+def pysm_model(comp) -> str | None:
+    """
+    Model code of a PySM foreground component key: "pysm_d1" -> "d1". None for any other component. Raises ValueError
+    for pysm_<model> with a model not in PYSM_MODELS. PySM maps are pre-generated (pysm3) in K_CMB, one per model
+    and band, so they take no unit conversion in the process stage.
+    """
+    comp = str(comp)
+    if not comp.startswith("pysm_"):
+        return None
+    model = comp[len("pysm_"):]
+    if model not in PYSM_MODELS:
+        raise ValueError(f"Unknown PySM model '{model}' in component '{comp}'; choose from {list(PYSM_MODELS)}.")
+    return model
+
+
+# Foreground mixture of the CFN-type products. The plain "cfn" name stands for the full FFP10 set below (the job
+# scripts' --components list minus cmb/noise, also what --components all expands to); any other mixture is tagged with
+# its sorted foreground tokens (see foreground_tag).
+FFP10_FOREGROUNDS = ("sync", "dust", "tsz", "strongirps", "strongradiops", "faintirps", "faintradiops", "clusterirps",
+                     "co", "freefree", "ksz", "spindust", "stronguchii", "cib")
+FFP10_TOKENS = {"freefree": "ff"}   # filename tokens that differ from the component name
+FFP10_FULL_TOKEN = "ffp10"          # stands for the whole FFP10_FOREGROUNDS set in a tag
+NO_FOREGROUND_TOKEN = "none"        # cmb + noise only
+NON_FOREGROUND_COMPONENTS = ("cmb", "noise", "extra_feature", "all", "real", "total", "mask")
+FOREGROUND_TOKENS = PYSM_MODELS + tuple(FFP10_TOKENS.get(c, c) for c in FFP10_FOREGROUNDS) + (FFP10_FULL_TOKEN, NO_FOREGROUND_TOKEN)
+
+
+def foreground_token(comp) -> str | None:
+    """
+    Filename token of a foreground component: the PySM model code (pysm_d3 -> d3) or the FFP10 token (freefree -> ff,
+    dust -> dust). None for cmb, noise, extra_feature, all, real, total and mask. Raises ValueError for any other name,
+    so a typo in --components fails before any map is processed.
+    """
+    comp = str(comp)
+    if comp in NON_FOREGROUND_COMPONENTS:
+        return None
+    model = pysm_model(comp)
+    if model is not None:
+        return model
+    if comp in FFP10_FOREGROUNDS:
+        return FFP10_TOKENS.get(comp, comp)
+    raise ValueError(
+        f"Unknown component '{comp}': expected cmb, noise, extra_feature, all, pysm_<model> or one of {list(FFP10_FOREGROUNDS)}."
+    )
+
+
+def foreground_tag(components) -> str:
+    """
+    Mixture tag appended to the CFN-type product name: the sorted foreground tokens of ``components``, e.g.
+    "-a1-d3-f1-s1" (PySM only), "-dust-ff-spindust-sync" (an FFP10 subset), "-d3-ffp10" (full FFP10 plus a PySM
+    model), "-none" (cmb + noise only). The full FFP10_FOREGROUNDS set ('all' counts as full) collapses to "ffp10" and
+    on its own gives "", so the plain "cfn" of the existing full-FFP10 runs is unchanged. cmb and noise are never
+    listed: the base name (cfn, fn, ...) already says they are there.
+    """
+    comps = [str(c) for c in components]
+    if "all" in comps:
+        comps += list(FFP10_FOREGROUNDS)
+    tokens = {t for t in (foreground_token(c) for c in comps) if t is not None}
+    ffp10 = {c for c in comps if c in FFP10_FOREGROUNDS}
+    if ffp10 == set(FFP10_FOREGROUNDS):
+        tokens = (tokens - {FFP10_TOKENS.get(c, c) for c in ffp10}) | {FFP10_FULL_TOKEN}
+    if tokens == {FFP10_FULL_TOKEN}:
+        return ""
+    if not tokens:
+        tokens = {NO_FOREGROUND_TOKEN}
+    return "".join(f"-{t}" for t in sorted(tokens))
+
+
 def ilc_mode(deproject=None, pcilc_eps: float | None = None) -> str:
     """
     Canonical ILC mode used in output filenames.
