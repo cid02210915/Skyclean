@@ -14,6 +14,9 @@ from s2ai.blocks.core_blocks import (
     DiscoConvUpBlock,
     BotResBlock,
 )
+from skyclean.ml import norms as _norms
+
+_norms.install()  # two-pass SphericalGroupNorm in every s2ai block (nan fix, see norms.py / TRAIN_NAN.md)
 
 
 
