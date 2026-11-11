@@ -35,8 +35,11 @@ class Inference:
                  rn: int = 30, batch_size: int = 32, epochs: int = 120, learning_rate: float = 1e-3,
                  momentum: float = 0.9, nsamp: int = 1200, deproject: list | None = None,
                  pcilc_eps: float | None = None,
-                 run_id: str | None = None, filter_type: str | None = "auto", masked: bool = False):
-        """masked: the model was trained with the masked loss (--masked); its outputs are named ml-masked."""
+                 run_id: str | None = None, filter_type: str | None = "auto", masked: bool = False,
+                 split: list | None = None):
+        """masked: the model was trained with the masked loss (--masked); its outputs are named ml-masked.
+        split: the train/validation/test split the model was trained with (the normalisation statistics file is
+        named after its training-split size); None keeps the data handler's default."""
 
         self.extract_comp = extract_comp
         self.component = component
@@ -93,6 +96,7 @@ class Inference:
             directory=self.directory,
             run_id=self.run_id,
             frozen_stats=True,  # predictions must be de-normalised with the statistics the model was trained on
+            **({} if split is None else {"split": split}),
         )
 
     def load_model(self, force_load=False):
@@ -254,16 +258,23 @@ class Inference:
               f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id, 'ilc_ml_maps')}")
         return outputs
 
-    def predict_and_visualise_real_sky(self, realisation: int = 0, masked_spectra: bool = False) -> dict:
+    def predict_and_visualise_real_sky(self, realisation: int = 0, masked_spectra: bool = False,
+                                       component: str = "real") -> dict:
         """
-        Apply the model to the observed Planck sky, save the cleaned CMB map and its diagnostics.
+        Apply the model to the observed Planck sky (component="real", default) or to one simulated realisation of
+        another foreground mixture (component="cfn-dust-ff-spindust-sync", ...), save the cleaned CMB map and its
+        diagnostics.
 
-        Needs the SILC pipeline run with --components real --wavelet-components real (same lmax/N/lam/nsamp);
-        `realisation` is the SILC --start-realisation index in the from-real ilc_synth filename (default 0).
-        Normalisation statistics come from the simulations the model was trained on (self.component).
+        component="real" needs the SILC pipeline run with --components real --wavelet-components real (same
+        lmax/N/lam/nsamp); `realisation` is then the SILC --start-realisation index in the from-real ilc_synth
+        filename (default 0). Any other component needs its SILC products (ilc_synth map, per-frequency maps) and
+        the processed_cmb of `realisation`; its file template must be registered on self.file_templates and
+        self.data_handler.file_templates (register_mixture_component_template). In both cases the normalisation
+        statistics come from the simulations the model was trained on (self.component).
 
         Saves, next to the prediction under ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/
-        (<stem> = <mode>_ml[-masked]_<extract_comp>_from-real_f..._ckpt<epoch>; ml-masked when the model was trained masked):
+        (<stem> = <mode>_ml[-masked]_<extract_comp>_from-<component>_f..._r<realisation>_..._ckpt<epoch>; ml-masked when
+        the model was trained masked):
           <stem>.npy                  : cleaned CMB map (MW sampling)
           <stem>_maps.png             : mollviews of ILC, ILC + ML and their difference (the predicted
                                         foreground residual, expected to look like dust/tSZ, not CMB)
@@ -281,14 +292,15 @@ class Inference:
         """
         lmax = self.lmax
         L = lmax + 1
-        outputs = self._predict_realisation_outputs(realisation, component="real")
+        label = "observed sky" if component == "real" else f"{component} r{int(realisation):04d}"
+        outputs = self._predict_realisation_outputs(realisation, component=component)
         cmb_mw = np.asarray(outputs["cmb_mw"], dtype=np.float64)
         ilc_mw = np.asarray(SamplingConverters.mwss_map_2_mw_map(outputs["ilc_mwss"], L=L), dtype=np.float64)
         resid_mw = ilc_mw - cmb_mw  # predicted foreground residual removed from the ILC map
 
-        save_path = self._save_cmb_prediction(cmb_mw, realisation, component="real")
+        save_path = self._save_cmb_prediction(cmb_mw, realisation, component=component)
         if save_path is None:
-            raise RuntimeError("[Inference] Failed to save the observed-sky CMB prediction.")
+            raise RuntimeError(f"[Inference] Failed to save the CMB prediction ({label}).")
         stem = os.path.splitext(save_path)[0]
 
         # ---- maps ----
@@ -297,7 +309,7 @@ class Inference:
         for i, (title, m_mw) in enumerate(panels, start=1):
             m_hp = SamplingConverters.mw_map_2_hp_map(m_mw, lmax=lmax) * 1e6
             lim = 300.0 if i < 3 else float(np.percentile(np.abs(m_hp), 99))
-            hp.mollview(m_hp, sub=(1, 3, i), title=f"{title} [observed sky]", unit=r"$\mu$K",
+            hp.mollview(m_hp, sub=(1, 3, i), title=f"{title} [{label}]", unit=r"$\mu$K",
                         min=-lim, max=lim, fig=fig.number)
         maps_png = stem + "_maps.png"
         plt.savefig(maps_png, dpi=150, bbox_inches="tight")
@@ -352,7 +364,8 @@ class Inference:
         ax.set_xlabel(r"$\ell$")
         ax.set_ylim(0, 2)
         ax.set_ylabel(r"Ratio of $C_\ell$")
-        ax.set_title("Observed Planck sky" + (f" (masked pseudo-$C_\\ell$ / $\\langle M^2 \\rangle$, $f_{{sky}}$={extra['f_sky']:.3f})" if masked_spectra else ""))
+        ax.set_title(("Observed Planck sky" if component == "real" else label)
+                     + (f" (masked pseudo-$C_\\ell$ / $\\langle M^2 \\rangle$, $f_{{sky}}$={extra['f_sky']:.3f})" if masked_spectra else ""))
         ax.grid(True, alpha=0.5)
         ax.legend()
         fig.tight_layout()
