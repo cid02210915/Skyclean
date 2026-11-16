@@ -162,7 +162,7 @@ class Train:
                  random_generator: bool = False, eval_every: int = 1, eval_steps: int = -1,
                  prefetch: bool = False, run_id: str | None = None,
                  early_stopping_patience: int = 2, early_stopping_min_delta: float = 1e-3,
-                 filter_type: str | None = "auto"):
+                 filter_type: str | None = "auto", mask_index: int | None = None):
 
         self.component = component
         self.extract_comp = extract_comp
@@ -214,7 +214,8 @@ class Train:
                                   batch_size=batch_size, split=split, directory=directory,
                                   random=random_generator, prefetch=prefetch,
                                   produce_residuals=False, run_id=self.run_id,
-                                  frozen_stats=resume_training)  # a resumed run must keep the statistics its checkpoint saw
+                                  frozen_stats=resume_training,  # a resumed run must keep the statistics its checkpoint saw
+                                  mask_index=mask_index)  # mask of the masked loss: None = Planck 2018 common mask
 
         files = FileTemplates(directory)
         self.model_dir = os.path.abspath(os.path.join(files.output_directories["ml_models"], self.run_id))
@@ -701,7 +702,8 @@ class Train:
             mask_mwss = jnp.asarray(mask_mwss[..., None].astype(np.float32), dtype=jnp.float32)
             if mask_mwss.shape != by0[0].shape:
                 raise ValueError(f"Mask shape {mask_mwss.shape} does not match the target maps {by0[0].shape}.")
-            print(f"[Mask] Training WITH the Planck common mask (shape: {mask_mwss.shape})")
+            mask_name = "the Planck common mask" if self.dataset.mask_index is None else f"mask {int(self.dataset.mask_index):02d}"
+            print(f"[Mask] Training WITH {mask_name} (shape: {mask_mwss.shape})")
 
         print_gpu_usage("Before training loop")
 

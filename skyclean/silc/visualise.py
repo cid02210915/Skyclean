@@ -44,7 +44,7 @@ class Visualise():
         self.nsamp = nsamp
         self.deproject = normalise_deproject(deproject, extract_comp)  # components deprojected by the cILC; [] for the plain ILC
         self.pcilc_eps = pcilc_eps
-        self.ml = ml_tag(getattr(inference, "masked", False))  # "ml-masked" when the model was trained masked
+        self.ml = ml_tag(getattr(inference, "masked", False), getattr(inference, "mask_index", None))  # "ml-masked[-mask<KK>]" when the model was trained masked
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates

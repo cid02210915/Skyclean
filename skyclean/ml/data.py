@@ -2,6 +2,7 @@
 
 import os
 import sys
+import glob
 import numpy as np
 import healpy as hp 
 import matplotlib.pyplot as plt
@@ -26,11 +27,15 @@ class CMBFreeILC():
                  pcilc_eps: float | None = None, 
                  batch_size: int = 32, split: list = [0.8, 0.1, 0.1], directory: str = "data/", random: bool = False,
                  prefetch: bool = False, produce_residuals: bool = True, stats_component: str | None = None,
-                 run_id: str | None = None, frozen_stats: bool = False):
+                 run_id: str | None = None, frozen_stats: bool = False, mask_index: int | None = None):
         """
         Parameters:
             extract_comp (str): Component to be extracted. e.g. "cmb"
-            component (str): Maps with components before going to silc. e.g. "cfn", "cfne", "cfne_circ".
+            component (str): Maps with components before going to silc. e.g. "cfn", "cfne", "cfne_circ", or a mixture
+                tag such as "cfn-a1-d1-f1-s1". A mixed training set is a "+"-joined tag, e.g.
+                "cfn-dust-ff-spindust-sync+cfn-a1-d1-f1-s1": the realisations are divided into equal consecutive blocks,
+                one per part in the order of the tag (realisations=200: r0-99 from the first, r100-199 from the second),
+                and the train/validation/test split is applied inside every block (80/10/10 of each half).
             frequencies (list): List of frequency channels for the maps.
             realisations (int): Number of realisations to process.
             lmax (int): The maximum multipole for the wavelet transform.    
@@ -53,6 +58,8 @@ class CMBFreeILC():
                 from (next to the checkpoints). Required to save or load the statistics.
             frozen_stats (bool): The run's statistics must stay as the model saw them (resume / inference): if they
                 are older than the input/target maps (SILC re-run) an error is raised instead of refitting them.
+            mask_index (int): Mask returned by load_mask_hp / mask_hp: None = Planck 2018 common mask, 1..30 = that
+                mask of <directory>/masks_fsky_078_to_099 (fsky from 0.78 to 0.99).
         """ 
         self.frequencies = frequencies
         self.n_channels_in = len(frequencies)
@@ -73,6 +80,7 @@ class CMBFreeILC():
         self.deproject = normalise_deproject(deproject, extract_comp)
         self.pcilc_eps = pcilc_eps
         self.frozen_stats = frozen_stats
+        self.mask_index = mask_index
         # Must match the tag ProduceSILC wrote into the ILC filenames.
         self.mode = ilc_mode(deproject=self.deproject, pcilc_eps=pcilc_eps)
 
@@ -80,8 +88,10 @@ class CMBFreeILC():
 
         files = FileTemplates(directory)
         self.file_templates = files.file_templates
-        register_pixel_ps_component_template(self.file_templates, files.output_directories, self.component,)
-        register_mixture_component_template(self.file_templates, files.output_directories, self.component)  # e.g. cfn-a1-d3-f1-s1
+        self.components = str(self.component).split("+")  # the parts of a mixed tag "A+B"; [component] otherwise
+        for part in self.components:
+            register_pixel_ps_component_template(self.file_templates, files.output_directories, part)
+            register_mixture_component_template(self.file_templates, files.output_directories, part)  # e.g. cfn-a1-d3-f1-s1
         self.download_templates = files.download_templates
         # data shapes
         self.H = lmax + 2
@@ -90,15 +100,31 @@ class CMBFreeILC():
             self.produce_residuals()  # Create residual maps for all realisations
         #self.signed_log_F_mean, self.signed_log_R_mean, self.signed_log_F_std, self.signed_log_R_std = self.find_dataset_mean_std()
 
+    def component_of(self, realisation: int, component: str | None = None) -> str:
+        """Product read for `realisation`: `component` (default self.component) or, for a mixed tag "A+B", the part
+        whose block of realisations contains it (equal consecutive blocks in the order of the tag; the remainder of an
+        uneven division and any index beyond the last block go to the last part)."""
+        component = component or self.component
+        parts = str(component).split("+")
+        if len(parts) == 1:
+            return component
+        block = max(1, self.realisations // len(parts))
+        return parts[min(int(realisation) // block, len(parts) - 1)]
+
     def _split_indices(self):
-        """Return deterministic train/validation/test indices for the configured split."""
-        idx = np.arange(self.realisations)
-        n_train = int(self.split[0] * self.realisations)
-        n_val = int(self.split[1] * self.realisations)
-        train_idx = idx[:n_train]
-        val_idx = idx[n_train:n_train + n_val]
-        test_idx = idx[n_train + n_val:]
-        return train_idx, val_idx, test_idx
+        """Return deterministic train/validation/test indices for the configured split. For a mixed tag "A+B" the
+        split is applied inside every part's block of realisations, so each split holds the same share of every part."""
+        n_parts = len(self.components)
+        block = self.realisations // n_parts
+        train, val, test = [], [], []
+        for k in range(n_parts):
+            idx = np.arange(k * block, (k + 1) * block if k < n_parts - 1 else self.realisations)
+            n_train = int(self.split[0] * len(idx))
+            n_val = int(self.split[1] * len(idx))
+            train.append(idx[:n_train])
+            val.append(idx[n_train:n_train + n_val])
+            test.append(idx[n_train + n_val:])
+        return np.concatenate(train), np.concatenate(val), np.concatenate(test)
 
     def get_split_indices(self):
         """Expose the configured train/validation/test realisation IDs."""
@@ -154,7 +180,7 @@ class CMBFreeILC():
         H, W, lmax, lam = self.H, self.W, self.lmax, self.lam
         L = lmax + 1
         extract_comp, nsamp, mode = self.extract_comp, self.nsamp, self.mode
-        component = component or self.component
+        component = self.component_of(realisation, component)
         has_truth = component != "real"  # the observed sky has no processed_cmb, so no ILC - CMB residual
         frequencies = '_'.join(self.frequencies)
         paths = self._residual_paths(realisation, component)
@@ -196,7 +222,7 @@ class CMBFreeILC():
     def _ilc_synth_path(self, realisation: int, frequencies: str, lam: float, component: str | None = None) -> str:
         """Path of the SILC ilc_synth map for this configuration and mode tag (may not exist)."""
         return self.file_templates["ilc_synth"].format(
-            extract_comp=self.extract_comp, mode=self.mode, component=component or self.component,
+            extract_comp=self.extract_comp, mode=self.mode, component=self.component_of(realisation, component),
             frequencies=frequencies, realisation=realisation, lmax=self.lmax,
             N_directions=self.N_directions, lam=lam, nsamp=self.nsamp,
         )
@@ -213,13 +239,13 @@ class CMBFreeILC():
 
     def _residual_paths(self, realisation: int, component: str | None = None) -> dict:
         """Paths of the cached model input (foreground_estimate), target (ilc_residual) and ILC map (ilc_mwss)."""
-        kw = dict(component=component or self.component, frequencies='_'.join(self.frequencies), realisation=realisation,
+        kw = dict(component=self.component_of(realisation, component), frequencies='_'.join(self.frequencies), realisation=realisation,
                   lmax=self.lmax, N_directions=self.N_directions, lam=self.lam, nsamp=self.nsamp, mode=self.mode)
         return {key: self.file_templates[key].format(**kw) for key in ("foreground_estimate", "ilc_residual", "ilc_mwss")}
 
     def _residual_inputs(self, realisation: int, component: str | None = None) -> list:
         """Files the cached maps are built from: the ilc_synth map, the input frequency maps and (simulations) processed_cmb."""
-        component = component or self.component
+        component = self.component_of(realisation, component)
         lmax = self.lmax
         input_key = "processed_real" if component == "real" else component
         inputs = [self._ilc_synth_path(realisation, '_'.join(self.frequencies), self.lam, component)]
@@ -230,7 +256,7 @@ class CMBFreeILC():
 
     def _residual_cache_ok(self, realisation: int, component: str | None = None) -> bool:
         """True when the cached maps exist and none of their inputs (SILC re-run, reprocessed maps) is newer."""
-        component = component or self.component
+        component = self.component_of(realisation, component)
         paths = self._residual_paths(realisation, component)
         needed = [paths["foreground_estimate"], paths["ilc_mwss"]] + ([paths["ilc_residual"]] if component != "real" else [])
         if not all(os.path.exists(p) for p in needed):
@@ -557,7 +583,16 @@ class CMBFreeILC():
     # mask), not through a beam + harmonic transform, which rings and gives weights outside [0, 1].
 
     def load_mask_hp(self) -> np.ndarray:
-        """Load the Planck 2018 common CMB intensity mask (binary, NSIDE 2048, Galactic coordinates, fsky~0.78)."""
+        """Load the binary mask (Galactic coordinates): the Planck 2018 common CMB intensity mask (NSIDE 2048,
+        fsky~0.78), or with mask_index = 1..30 that mask of masks_fsky_078_to_099 (NSIDE 256, fsky 0.78 -> 0.99)."""
+        if self.mask_index is not None:
+            pattern = self.file_templates["mask_fsky"].format(index=int(self.mask_index))
+            paths = glob.glob(pattern)
+            if len(paths) != 1:
+                raise FileNotFoundError(f"Expected one mask file for mask index {self.mask_index}, found {len(paths)}: {pattern}")
+            mask = hp.read_map(paths[0], dtype=np.float64)
+            print(f"Mask {int(self.mask_index):02d} loaded from {paths[0]} (fsky={mask.mean():.4f}).")
+            return mask
         mask_path = self.file_templates["mask"]
         if not os.path.exists(mask_path):
             import urllib.request

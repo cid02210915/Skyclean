@@ -279,9 +279,12 @@ def b_tol_tag(N_directions) -> str:
     return f"btol{b_tol(N_directions):g}"
 
 
-def ml_tag(masked: bool = False) -> str:
+def ml_tag(masked: bool = False, mask_index: int | None = None) -> str:
     """
     ML stage tag placed after the ILC mode in the ML-cleaned map names ({mode}_{ml}_...):
-    "ml", or "ml-masked" when the model was trained with the masked loss.
+    "ml", "ml-masked" when the model was trained with the masked loss (Planck 2018 common mask), or
+    "ml-masked-mask<KK>" when it was trained with mask KK of masks_fsky_078_to_099 (--mask-index).
     """
+    if mask_index is not None:
+        return f"ml-masked-mask{int(mask_index):02d}"
     return "ml-masked" if masked else "ml"

@@ -20,7 +20,7 @@ from skyclean.silc.utils import ilc_mode, ml_tag
 from .data import CMBFreeILC
 from .train import resolve_checkpoint_target, resolve_filter_type
 from skyclean.silc.file_templates import FileTemplates, register_pixel_ps_component_template, register_mixture_component_template
-from skyclean.silc import SamplingConverters
+from skyclean.silc import SamplingConverters, HPTools
 from skyclean.silc.power_spec import MapAlmConverter, PowerSpectrumTT
 import s2fft
 from s2fft.sampling import s2_samples
@@ -36,8 +36,10 @@ class Inference:
                  momentum: float = 0.9, nsamp: int = 1200, deproject: list | None = None,
                  pcilc_eps: float | None = None,
                  run_id: str | None = None, filter_type: str | None = "auto", masked: bool = False,
-                 split: list | None = None):
+                 split: list | None = None, mask_index: int | None = None):
         """masked: the model was trained with the masked loss (--masked); its outputs are named ml-masked.
+        mask_index: mask of that loss, None = Planck 2018 common mask, 1..30 = that mask of masks_fsky_078_to_099
+        (implies masked; outputs are named ml-masked-mask<KK>).
         split: the train/validation/test split the model was trained with (the normalisation statistics file is
         named after its training-split size); None keeps the data handler's default."""
 
@@ -61,22 +63,24 @@ class Inference:
         self.nsamp = nsamp
         self.deproject = deproject  # components deprojected by the cILC inputs, e.g. ["tsz"]; None for the plain ILC
         self.pcilc_eps = pcilc_eps
-        self.masked = masked  # model trained with the masked loss -> outputs tagged ml-masked
+        self.mask_index = mask_index
+        self.masked = masked or mask_index is not None  # model trained with the masked loss -> outputs tagged ml-masked
         self.run_id = (run_id or "").strip()
         if not self.run_id:
             raise ValueError("run_id must be provided for inference outputs.")
 
         self.file_templates = FileTemplates(directory)
-        register_pixel_ps_component_template(
-            self.file_templates.file_templates,
-            self.file_templates.output_directories,
-            self.component,
-        )
-        register_mixture_component_template(
-            self.file_templates.file_templates,
-            self.file_templates.output_directories,
-            self.component,
-        )
+        for part in str(self.component).split("+"):  # every part of a mixed training tag "A+B"
+            register_pixel_ps_component_template(
+                self.file_templates.file_templates,
+                self.file_templates.output_directories,
+                part,
+            )
+            register_mixture_component_template(
+                self.file_templates.file_templates,
+                self.file_templates.output_directories,
+                part,
+            )
         self.model = None
         self.config = None
         self.loaded_checkpoint_path = None
@@ -96,6 +100,7 @@ class Inference:
             directory=self.directory,
             run_id=self.run_id,
             frozen_stats=True,  # predictions must be de-normalised with the statistics the model was trained on
+            mask_index=self.mask_index,
             **({} if split is None else {"split": split}),
         )
 
@@ -240,12 +245,16 @@ class Inference:
 
         pred_mwss = np.asarray(R_pred)
         cmb_pred_mwss = ilc_mwss - pred_mwss
-        cmb_mw = SamplingConverters.mwss_map_2_mw_map(cmb_pred_mwss, L=self.lmax + 1)
+        # MWSS -> MW through the harmonic transform (as SamplingConverters.mwss_map_2_mw_map), keeping the alm
+        L = self.lmax + 1
+        cmb_alm = s2fft.forward(cmb_pred_mwss, L=L, sampling="mwss", reality=True)
+        cmb_mw = s2fft.inverse(cmb_alm, L=L, sampling="mw", reality=True)
         return {
             "residual": residual,
             "ilc_mwss": ilc_mwss,
             "pred_mwss": pred_mwss,
             "cmb_mw": cmb_mw,
+            "cmb_alm": np.asarray(cmb_alm),  # MW alm of the ILC + ML map
         }
 
     def predict_test_set(self, save_result=True):
@@ -258,12 +267,11 @@ class Inference:
               f"{os.path.join(self.file_templates.output_directories['cmb_prediction'], self.run_id, 'ilc_ml_maps')}")
         return outputs
 
-    def predict_and_visualise_real_sky(self, realisation: int = 0, masked_spectra: bool = False,
-                                       component: str = "real") -> dict:
+    def predict_and_visualise_real_sky(self, realisation: int = 0, component: str = "real") -> dict:
         """
         Apply the model to the observed Planck sky (component="real", default) or to one simulated realisation of
-        another foreground mixture (component="cfn-dust-ff-spindust-sync", ...), save the cleaned CMB map and its
-        diagnostics.
+        another foreground mixture (component="cfn-dust-ff-spindust-sync", ...), save the cleaned CMB map and
+        return the alm of the maps.
 
         component="real" needs the SILC pipeline run with --components real --wavelet-components real (same
         lmax/N/lam/nsamp); `realisation` is then the SILC --start-realisation index in the from-real ilc_synth
@@ -272,42 +280,53 @@ class Inference:
         self.data_handler.file_templates (register_mixture_component_template). In both cases the normalisation
         statistics come from the simulations the model was trained on (self.component).
 
-        Saves, next to the prediction under ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/
-        (<stem> = <mode>_ml[-masked]_<extract_comp>_from-<component>_f..._r<realisation>_..._ckpt<epoch>; ml-masked when
-        the model was trained masked):
-          <stem>.npy                  : cleaned CMB map (MW sampling)
-          <stem>_maps.png             : mollviews of ILC, ILC + ML and their difference (the predicted
-                                        foreground residual, expected to look like dust/tSZ, not CMB)
-          <stem>_spectra.png          : ratio of TT D_ell, ILC / processed cmb and ILC + ML / processed cmb,
-                                        linear axes; the reference is the processed simulated CMB ("true input
-                                        CMB": processed_cmb, realisation `realisation`, same lmax, the same map as
-                                        Pipeline.step_power_spec(source="processed", component="cmb",
-                                        frequency="143")); all maps are in K with the same common 5' beam
-          <stem>_spectra.npz          : ell, the three D_ell [µK^2] and the two ratios
-        masked_spectra=True: the three maps are multiplied by the Planck common mask in HEALPix and the spectra are the
-        pseudo-C_ell divided by f_sky2 = <mask^2> (the sky-fraction correction, exact for white spectra); the
-        same mask on all three maps makes the ratios mask-independent to first order. The figure and npz then
-        carry a `_pseudo` suffix and the npz also stores f_sky, f_sky2 and the mask-corrected pseudo-C_ell.
-        Returns a dict with the maps, spectra and output paths.
+        Saves under ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/
+        (<stem> = <mode>_<ml>_<extract_comp>_from-<component>_f..._r<realisation>_..._ckpt<epoch>; <ml> = ml,
+        ml-masked or ml-masked-mask<KK>, see utils.ml_tag):
+          <stem>.npy       : cleaned CMB map (MW sampling)
+          <stem>_maps.png  : mollviews of ILC, ILC + ML and their difference (the predicted foreground residual,
+                             expected to look like dust/tSZ, not CMB)
+        Returns a dict with
+          "alm"        : full-sky alm (healpy ordering, complex128, K, lmax) of "ilc", "ilc_ml" and, for a simulated
+                         realisation, "processed_cmb" (the true input CMB: processed_cmb of `realisation`, the same
+                         map as Pipeline.step_power_spec(source="processed", component="cmb", frequency="143"))
+          "alm_pseudo" : masked model only: alm of (map x training mask) for the same maps, what NaMaster's NmtField
+                         computes; hp.alm2cl of it is the pseudo-C_ell. The training mask is the Planck 2018 common
+                         mask or mask <mask_index>, apodised over 2 deg (data_handler.mask_hp)
+          "mask_info"  : masked model only: mask_index (0 = Planck common mask), apodisation_deg, f_sky, f_sky2
+        and "cmb_mw", "save_path", "maps_png". The alm of all realisations are saved by pipeline_ml.apply_to_realisations.
         """
         lmax = self.lmax
         L = lmax + 1
+        nside = HPTools.get_nside_from_lmax(lmax)
+        component = self.data_handler.component_of(realisation, component)  # a mixed tag "A+B" resolves to one part
         label = "observed sky" if component == "real" else f"{component} r{int(realisation):04d}"
         outputs = self._predict_realisation_outputs(realisation, component=component)
         cmb_mw = np.asarray(outputs["cmb_mw"], dtype=np.float64)
-        ilc_mw = np.asarray(SamplingConverters.mwss_map_2_mw_map(outputs["ilc_mwss"], L=L), dtype=np.float64)
-        resid_mw = ilc_mw - cmb_mw  # predicted foreground residual removed from the ILC map
 
         save_path = self._save_cmb_prediction(cmb_mw, realisation, component=component)
         if save_path is None:
             raise RuntimeError(f"[Inference] Failed to save the CMB prediction ({label}).")
         stem = os.path.splitext(save_path)[0]
 
+        # ---- full-sky alm (healpy ordering); all maps are in K with the same common 5' beam ----
+        alm = {
+            "ilc": SamplingConverters.mw_alm_2_hp_alm(
+                np.asarray(s2fft.forward(outputs["ilc_mwss"], L=L, sampling="mwss", reality=True)), lmax),
+            "ilc_ml": SamplingConverters.mw_alm_2_hp_alm(outputs["cmb_alm"], lmax),
+        }
+        if component != "real":  # the observed sky has no true input CMB
+            conv = MapAlmConverter(self.file_templates.file_templates)
+            alm["processed_cmb"] = np.ascontiguousarray(
+                conv.to_alm(component="cmb", source="processed", frequency="143", realisation=realisation, lmax=lmax)["alm"],
+                dtype=np.complex128)  # the processed_cmb file is frequency independent
+
         # ---- maps ----
-        panels = [("ILC", ilc_mw), ("ILC + ML", cmb_mw), ("ILC - (ILC + ML) (predicted residual)", resid_mw)]
+        panels = [("ILC", alm["ilc"]), ("ILC + ML", alm["ilc_ml"]),
+                  ("ILC - (ILC + ML) (predicted residual)", alm["ilc"] - alm["ilc_ml"])]
         fig = plt.figure(figsize=(18, 4.5))
-        for i, (title, m_mw) in enumerate(panels, start=1):
-            m_hp = SamplingConverters.mw_map_2_hp_map(m_mw, lmax=lmax) * 1e6
+        for i, (title, a) in enumerate(panels, start=1):
+            m_hp = hp.alm2map(a, nside=nside) * 1e6
             lim = 300.0 if i < 3 else float(np.percentile(np.abs(m_hp), 99))
             hp.mollview(m_hp, sub=(1, 3, i), title=f"{title} [{label}]", unit=r"$\mu$K",
                         min=-lim, max=lim, fig=fig.number)
@@ -316,72 +335,18 @@ class Inference:
         plt.close(fig)
         print(f"[Inference] Saved maps figure to: {maps_png}")
 
-        # ---- spectra ----
-        # "True input CMB" reference: processed simulated CMB (HEALPix, K, common 5' beam), i.e. the same
-        # map as Pipeline.step_power_spec(unit="K", source="processed", component="cmb", frequency="143",
-        # realisation=realisation, lmax=lmax); the processed_cmb file is frequency independent.
-        conv = MapAlmConverter(self.file_templates.file_templates)
-        out_cmb = conv.to_alm(component="cmb", source="processed", frequency="143",
-                              realisation=realisation, lmax=lmax)
-        extra = {}
-        if not masked_spectra:
-            alm_ilc = np.asarray(s2fft.forward(np.ascontiguousarray(ilc_mw), L=L))
-            alm_ilc_ml = np.asarray(s2fft.forward(np.ascontiguousarray(cmb_mw), L=L))
-            ell, cl_ilc = PowerSpectrumTT.from_mw_alm(alm_ilc)
-            _, cl_ilc_ml = PowerSpectrumTT.from_mw_alm(alm_ilc_ml)
-            _, cl_cmb = PowerSpectrumTT.from_healpy_alm(out_cmb["alm"])
-        else:
-            # Masked pseudo-spectra: every map is multiplied by the same binary (non-apodised) HEALPix mask and
-            # the pseudo-C_ell is divided by f_sky2 = <mask^2> (the sky-fraction correction, exact for a white spectrum).
-            mask_hp = np.asarray(self.data_handler.mask_hp(apodisation_deg=0), dtype=np.float64)
-            nside = hp.get_nside(mask_hp)
-            f_sky = float(np.mean(mask_hp))
-            f_sky2 = float(np.mean(mask_hp ** 2))
-            hp_ilc = np.asarray(SamplingConverters.mw_map_2_hp_map(ilc_mw, lmax=lmax), dtype=np.float64) * mask_hp
-            hp_ilc_ml = np.asarray(SamplingConverters.mw_map_2_hp_map(cmb_mw, lmax=lmax), dtype=np.float64) * mask_hp
-            hp_cmb = hp.alm2map(np.ascontiguousarray(out_cmb["alm"], dtype=np.complex128), nside=nside) * mask_hp
-            ell = np.arange(lmax + 1)
-            cl_ilc = hp.anafast(hp_ilc, lmax=lmax) / f_sky2
-            cl_ilc_ml = hp.anafast(hp_ilc_ml, lmax=lmax) / f_sky2
-            cl_cmb = hp.anafast(hp_cmb, lmax=lmax) / f_sky2
-            extra = {"f_sky": f_sky, "f_sky2": f_sky2, "cl_ilc": cl_ilc, "cl_ilc_ml": cl_ilc_ml, "cl_processed_cmb": cl_cmb}
-            print(f"[Inference] Masked spectra: pseudo-C_ell / f_sky2 with f_sky={f_sky:.4f}, f_sky2={f_sky2:.4f}")
-        # all maps are in K -> D_ell in µK^2
-        Dl_ilc = PowerSpectrumTT.cl_to_Dl(ell, cl_ilc, input_unit="K")
-        Dl_ilc_ml = PowerSpectrumTT.cl_to_Dl(ell, cl_ilc_ml, input_unit="K")
-        Dl_cmb = PowerSpectrumTT.cl_to_Dl(ell, cl_cmb, input_unit="K")
-        # ratios w.r.t. the processed cmb reference (both D_ell in µK^2, so the ratio is unitless)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio_ilc = Dl_ilc / Dl_cmb
-            ratio_ilc_ml = Dl_ilc_ml / Dl_cmb
-        suffix = "_pseudo" if masked_spectra else ""
-        ml_label = "ILC + ML (masked training)" if self.masked else "ILC + ML"
-        spectra_png = stem + f"_spectra{suffix}.png"
-        fig, ax = plt.subplots(figsize=(7, 4))
-        ax.plot(ell[2:], ratio_ilc[2:], "-", label="ILC / true cmb")
-        ax.plot(ell[2:], ratio_ilc_ml[2:], "-", label=f"{ml_label} / true cmb")
-        ax.axhline(1.0, ls=":", color="red")
-        ax.set_xlabel(r"$\ell$")
-        ax.set_ylim(0, 2)
-        ax.set_ylabel(r"Ratio of $C_\ell$")
-        ax.set_title(("Observed Planck sky" if component == "real" else label)
-                     + (f" (masked pseudo-$C_\\ell$ / $\\langle M^2 \\rangle$, $f_{{sky}}$={extra['f_sky']:.3f})" if masked_spectra else ""))
-        ax.grid(True, alpha=0.5)
-        ax.legend()
-        fig.tight_layout()
-        plt.savefig(spectra_png, dpi=200)
-        plt.close("all")
-        spectra_npz = stem + f"_spectra{suffix}.npz"
-        np.savez(spectra_npz, ell=ell, Dl_ilc=Dl_ilc, Dl_ilc_ml=Dl_ilc_ml, Dl_processed_cmb=Dl_cmb,
-                 ratio_ilc=ratio_ilc, ratio_ilc_ml=ratio_ilc_ml, **extra)
-        print(f"[Inference] Saved spectra to: {spectra_png} and {spectra_npz}")
+        # ---- pseudo-alm inside the training mask (masked model only) ----
+        alm_pseudo, mask_info = {}, {}
+        if self.masked:
+            apodisation_deg = 2.0  # as the training loss (Train.execute_training_procedure)
+            mask = np.asarray(self.data_handler.mask_hp(apodisation_deg=apodisation_deg), dtype=np.float64)
+            alm_pseudo = {k: hp.map2alm(hp.alm2map(a, nside=nside) * mask, lmax=lmax, pol=False, iter=3)
+                          for k, a in alm.items()}
+            mask_info = {"mask_index": int(self.mask_index or 0), "apodisation_deg": apodisation_deg,
+                         "f_sky": float(mask.mean()), "f_sky2": float(np.mean(mask ** 2))}
 
-        return {
-            "cmb_mw": cmb_mw, "ilc_mw": ilc_mw, "residual_mw": resid_mw,
-            "ell": ell, "Dl_ilc": Dl_ilc, "Dl_ilc_ml": Dl_ilc_ml, "Dl_processed_cmb": Dl_cmb,
-            "ratio_ilc": ratio_ilc, "ratio_ilc_ml": ratio_ilc_ml, **extra,
-            "save_path": save_path, "maps_png": maps_png, "spectra_png": spectra_png, "spectra_npz": spectra_npz,
-        }
+        return {"cmb_mw": cmb_mw, "alm": alm, "alm_pseudo": alm_pseudo, "mask_info": mask_info,
+                "save_path": save_path, "maps_png": maps_png}
 
     def compute_mse(self, comp, realisation, save_result=True, masked_spectra=False):
         """Area-weighted pixel-space MSE (MWSS quadrature weights, as in the training loss) for a single realisation."""
@@ -630,10 +595,10 @@ class Inference:
             filename = os.path.basename(
                 self.file_templates.file_templates["ilc_ml"].format(
                     mode=mode,
-                    ml=ml_tag(self.masked),
+                    ml=ml_tag(self.masked, self.mask_index),
                     extract_comp=self.extract_comp,
                     frequencies=frequencies,
-                    component=component or self.component,
+                    component=self.data_handler.component_of(realisation, component),  # the part of a mixed tag
                     realisation=realisation,
                     lmax=self.lmax,
                     N_directions=self.N_directions,
@@ -753,13 +718,12 @@ def main():
                         help="Apply the model to the observed Planck sky instead of a simulation. Needs the SILC "
                              "pipeline run with --components real --wavelet-components real (same lmax, N, lam, nsamp). "
                              "--realisation is then the SILC --start-realisation index (default 0). "
-                             "Writes the MW .npy prediction, a HEALPix .fits copy, the map figure and the TT "
-                             "spectra (see Inference.predict_and_visualise_real_sky).")
+                             "Writes the MW .npy prediction and the map figure (see Inference.predict_and_visualise_real_sky; "
+                             "the alm files are written by pipeline_ml).")
     parser.add_argument("--masked", action="store_true",
                         help="The model was trained with the masked loss (masked ML); outputs are tagged ml-masked.")
     parser.add_argument("--masked-spectra", action="store_true",
-                        help="Compute the spectra (and --mse / --metrics-table) inside the Planck mask: pseudo-C_ell / <M^2>.\n"
-                             "Outputs get a _pseudo suffix.")
+                        help="Compute --mse / --metrics-table inside the Planck mask. Outputs get a _pseudo suffix.")
     parser.add_argument("--mse", action="store_true",
                         help="Also report ILC vs NN MSE for the selected realisation.")
     parser.add_argument("--metrics-table", action="store_true",
@@ -814,7 +778,7 @@ def main():
     if args.real:
         realisation = 0 if args.realisation is None else args.realisation
         print(f"\n2. Predicting the observed Planck sky (ilc_synth realisation index {realisation}):")
-        inference.predict_and_visualise_real_sky(realisation=realisation, masked_spectra=args.masked_spectra)
+        inference.predict_and_visualise_real_sky(realisation=realisation)
         print("Prediction successful.")
     elif args.realisation is None:
         print("\n2. Predicting the test split:")

@@ -94,7 +94,7 @@ def parse_args():
         help="Which steps to run, joined with '+', from: "
              "'prepare' (data-preparation step: generate the model input/target maps from the SILC outputs), "
              "'train' (training step; reuses prepared maps if present, otherwise generates them first), "
-             "'evaluate' (predict the held-out test split of --component: cleaned maps, spectra and one combined spectra npz), "
+             "'evaluate' (predict the held-out test split of --component: cleaned maps and the alm npz of the test split), "
              "'apply' (apply the trained model to the observed Planck sky; needs the SILC run with "
              "--components real --wavelet-components real; with --eval-component to the simulated maps of another "
              "foreground mixture instead). "
@@ -104,7 +104,10 @@ def parse_args():
     # ----- match Train signature -----
     parser.add_argument("--extract-comp", type=str, default="cmb")
     parser.add_argument("--component", type=str, default="cfn",
-                        help="Input map product key, e.g. cfn, cfne, cfne_circ, or cfne_pix_N.")
+                        help="Input map product key, e.g. cfn, cfne, cfne_circ, cfne_pix_N, or a foreground-mixture tag such as "
+                             "cfn-a1-d1-f1-s1. A '+'-joined tag (cfn-dust-ff-spindust-sync+cfn-a1-d1-f1-s1) trains on a mixed set: "
+                             "the first half of --realisations from the first mixture, the second half from the second, with "
+                             "--split applied inside each half; evaluate then writes one spectra npz per mixture.")
 
     parser.add_argument("--frequencies", nargs="+", default=["030", "100", "353"])
     parser.add_argument("--realisations", type=int, default=1000)
@@ -156,18 +159,20 @@ def parse_args():
     parser.add_argument("--loss-tag", type=str, default=None)
     parser.add_argument("--masked", action="store_true",
                         help="Masked ML: the training loss/accuracy are restricted to the Planck 2018 common CMB "
-                             "intensity mask (fsky~0.78). Pass it again at evaluate/apply for a run trained masked: "
-                             "the cleaned maps and spectra are then tagged ml-masked (and evaluation files _masked).")
-    parser.add_argument("--masked-spectra", action="store_true",
-                        help="Evaluate/apply: compute the spectra inside the Planck mask (pseudo-C_ell / <M^2>); "
-                             "the spectra files get a _pseudo suffix. Independent of --masked.")
-    parser.add_argument("--eval-component", type=str, default=None, metavar="TAG",
-                        help="apply: apply the trained model to the simulated SILC maps of this foreground mixture "
-                             "(e.g. cfn-dust-ff-spindust-sync, same lmax/N/lam/nsamp/mode) instead of the observed sky, "
-                             "for the realisations --eval-realisations; the normalisation statistics stay those of "
-                             "--component (the training mixture). Per realisation: the cleaned map, a maps figure and the "
-                             "spectra (processed cmb, ILC, ILC + ML; pseudo-C_ell with --masked-spectra), plus one npz "
-                             "with the spectra of all realisations.")
+                             "intensity mask (fsky~0.78; another mask with --mask-index). Pass it again at evaluate/apply "
+                             "for a run trained masked: the outputs are then tagged ml-masked and the pseudo-alm of "
+                             "the maps inside the training mask are saved next to the full-sky alm.")
+    parser.add_argument("--mask-index", type=int, default=None, choices=range(1, 31), metavar="1-30",
+                        help="Masked ML with mask <index> of <directory>/masks_fsky_078_to_099 (1 = fsky 0.78 ... 30 = fsky 0.99) "
+                             "instead of the Planck 2018 common mask; implies --masked. The run id gets the suffix "
+                             "_mask<KK> and the outputs are tagged ml-masked-mask<KK>. Pass it again at evaluate/apply.")
+    parser.add_argument("--eval-component", nargs="+", type=str, default=None, metavar="TAG",
+                        help="apply: apply the trained model to the simulated SILC maps of these foreground mixtures "
+                             "(e.g. cfn-dust-ff-spindust-sync, same lmax/N/lam/nsamp/mode), one after the other, instead of the "
+                             "observed sky, for the realisations --eval-realisations; the normalisation statistics stay those "
+                             "of --component (the training set). Per realisation: the cleaned map and a maps figure, plus "
+                             "per mixture one npz with the full-sky alm of all its realisations (processed cmb, ILC, "
+                             "ILC + ML) and, for a masked run, one with their pseudo-alm inside the training mask.")
     parser.add_argument("--eval-realisations", nargs=2, type=int, default=None, metavar=("FIRST", "LAST"),
                         help="apply with --eval-component: first and last realisation to apply to, inclusive (e.g. 100 199).")
 
@@ -246,6 +251,7 @@ def step_prepare_data(args) -> None:
         prefetch=args.prefetch,
         produce_residuals=False,
         run_id=args.run_id.strip(),
+        mask_index=args.mask_index,
     )
     dataset.produce_residuals()
     print(f"[Prepare] Input/target maps ready for {args.realisations} realisations.")
@@ -286,6 +292,7 @@ def step_train(args) -> str:
         run_id=(args.run_id.strip() or None),
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
+        mask_index=args.mask_index,
     )
     cfg_path = trainer.save_run_config(vars(args))
     print(f"[train] run_id={trainer.run_id}")
@@ -394,7 +401,7 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
     # 3) auto-spectra: ilc_ml (MW) -> alm -> C_ell
     ilc_ml_filename = os.path.basename(ft["ilc_ml"].format(
         mode=mode,
-        ml=ml_tag(args.masked),
+        ml=ml_tag(args.masked, args.mask_index),
         extract_comp=args.extract_comp,
         component=args.component,
         frequencies=freq_tag,
@@ -525,9 +532,9 @@ def generate_spectrum_for_one(args=None, ckpt_dir: str | None = None, mask_hp: n
 def step_evaluate(args, ckpt_dir: str | None = None):
     """
     Predict the held-out test split of the training mixture (--component) with the checkpoint in ckpt_dir. Same
-    outputs as `apply --eval-component` (see apply_to_realisations): per test realisation the cleaned CMB map, the
-    maps figure and the spectra figure + npz, plus one combined npz with the D_ell of processed cmb / ILC / ILC + ML
-    of every test realisation and their mean / std (pseudo-C_ell inside the Planck mask with --masked-spectra).
+    outputs as `apply --eval-component` (see apply_to_realisations): per test realisation the cleaned CMB map and the
+    maps figure, plus one npz with the full-sky alm of processed cmb / ILC / ILC + ML of every test realisation and,
+    for a masked run, one with their pseudo-alm inside the training mask.
     Returns the test realisation ids.
     """
     inference = Inference(
@@ -554,6 +561,7 @@ def step_evaluate(args, ckpt_dir: str | None = None):
         run_id=args.run_id,
         masked=args.masked,
         split=args.split,
+        mask_index=args.mask_index,
     )
     model = inference.load_model(force_load=True)
     if not model:
@@ -562,21 +570,24 @@ def step_evaluate(args, ckpt_dir: str | None = None):
     test_ids = [int(r) for r in inference.data_handler.get_split_indices()["test"]]
     if not test_ids:
         raise ValueError("[Evaluate] The test split is empty; adjust --split / --realisations.")
-    print(f"[Evaluate] Predicting the {len(test_ids)} test realisations r{test_ids[0]:04d}-r{test_ids[-1]:04d} of '{args.component}'...")
-    apply_to_realisations(args, inference, args.component, test_ids)
+    # one group per part of a mixed training tag "A+B" (a single mixture gives one group), each with its own spectra npz
+    groups = {}
+    for r in test_ids:
+        groups.setdefault(inference.data_handler.component_of(r), []).append(r)
+    for component, ids in groups.items():
+        print(f"[Evaluate] Predicting the {len(ids)} test realisations r{ids[0]:04d}-r{ids[-1]:04d} of '{component}'...")
+        apply_to_realisations(args, inference, component, ids)
     return test_ids
 
 
 def step_apply(args, ckpt_dir: str | None = None) -> str:
     """
     Apply the trained model to the observed Planck sky (Inference.predict_and_visualise_real_sky): saves the
-    cleaned CMB map (MW .npy), the ILC / ILC + ML / difference map figure and the D_ell ratio figure of the
-    ILC and ILC + ML maps over the processed simulated CMB (true input CMB reference) under <directory>/ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/.
-    With --masked (model trained masked) every output is tagged ml-masked instead of ml.
-    With --masked-spectra the spectra are pseudo-C_ell of the masked maps divided by f_sky2 = <mask^2>, saved with a _pseudo suffix
-    (the ratios ILC / processed cmb and masked ML / processed cmb are stored in the npz as ratio_ilc, ratio_ilc_ml).
+    cleaned CMB map (MW .npy), the ILC / ILC + ML / difference map figure and the alm npz of the ILC and ILC + ML maps
+    (see apply_to_realisations; the observed sky has no processed cmb) under <directory>/ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/.
+    With --masked (model trained masked) every output is tagged ml-masked instead of ml (ml-masked-mask<KK> with --mask-index).
     Needs the SILC pipeline run with --components real --wavelet-components real (same lmax/N/lam/nsamp).
-    Returns the .npy path.
+    Returns the path of the full-sky alm npz.
     """
     inference = Inference(
         extract_comp=args.extract_comp,
@@ -602,27 +613,27 @@ def step_apply(args, ckpt_dir: str | None = None) -> str:
         run_id=args.run_id,
         masked=args.masked,
         split=args.split,
+        mask_index=args.mask_index,
     )
     model = inference.load_model(force_load=True)
     if not model:
         raise RuntimeError("[Apply] Model failed to load (load_model returned falsy).")
 
     if args.eval_component:
-        return step_apply_simulations(args, inference)
+        return [step_apply_simulations(args, inference, component) for component in args.eval_component][-1]
 
     # The observed sky has no realisations; SILC still tags its from-real outputs with r0000
     # (its --start-realisation, assumed 0), so that index is used to locate the ilc_synth file.
     print("[Apply] Predicting the observed Planck sky...")
-    real = inference.predict_and_visualise_real_sky(realisation=0, masked_spectra=args.masked_spectra)
-    print(f"[Apply] Outputs saved under: {os.path.dirname(real['save_path'])}")
-    return real["save_path"]
+    return apply_to_realisations(args, inference, "real", [0])
 
 
-def step_apply_simulations(args, inference: Inference) -> str:
+def step_apply_simulations(args, inference: Inference, component: str) -> str:
     """
-    Apply the trained model to the simulated SILC maps of another foreground mixture (--eval-component) for the
-    realisations --eval-realisations FIRST LAST (inclusive), with the normalisation statistics of the training
-    mixture (--component). Outputs as apply_to_realisations, tagged from-<eval component>. Returns the combined npz path.
+    Apply the trained model to the simulated SILC maps of another foreground mixture `component` (one of
+    --eval-component) for the realisations --eval-realisations FIRST LAST (inclusive), with the normalisation
+    statistics of the training set (--component). Outputs as apply_to_realisations, tagged from-<component>.
+    Returns the combined npz path.
     """
     if args.eval_realisations is None:
         raise ValueError("--eval-component needs --eval-realisations FIRST LAST.")
@@ -633,60 +644,50 @@ def step_apply_simulations(args, inference: Inference) -> str:
     # template sets Inference reads from
     out_dirs = inference.file_templates.output_directories
     for templates in (inference.file_templates.file_templates, inference.data_handler.file_templates):
-        register_pixel_ps_component_template(templates, out_dirs, args.eval_component)
-        register_mixture_component_template(templates, out_dirs, args.eval_component)
+        register_pixel_ps_component_template(templates, out_dirs, component)
+        register_mixture_component_template(templates, out_dirs, component)
     print(f"[Apply] Applying the model trained on '{args.component}' to the simulated realisations r{first:04d}-r{last:04d} "
-          f"of '{args.eval_component}' (normalisation statistics of '{args.component}')...")
-    return apply_to_realisations(args, inference, args.eval_component, list(range(first, last + 1)))
+          f"of '{component}' (normalisation statistics of '{args.component}')...")
+    return apply_to_realisations(args, inference, component, list(range(first, last + 1)))
 
 
 def apply_to_realisations(args, inference: Inference, component: str, realisations: list) -> str:
     """
-    Run the loaded model on the given simulated realisations of `component` (the training mixture for the test split,
-    another mixture for --eval-component). Per realisation Inference.predict_and_visualise_real_sky saves, under
-    <directory>/ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/ with the from-<component> tag, the
-    cleaned CMB map (MW .npy), the ILC / ILC + ML / difference figure and the spectra figure + npz (D_ell of the
-    processed cmb, ILC and ILC + ML and their ratios; pseudo-C_ell / <M^2> inside the Planck mask with
-    --masked-spectra, _pseudo suffix). The spectra of all realisations are then collected into one
-    <stem with r<FIRST>-<LAST>>_spectra[_pseudo].npz (ell, realisations, Dl_<comp> of shape (n, lmax+1), Dl_<comp>_mean/_std).
-    Returns the path of that npz.
+    Run the loaded model on the given realisations of `component` (the training mixture for the test split, another
+    mixture for --eval-component, "real" for the observed sky). Per realisation Inference.predict_and_visualise_real_sky
+    saves, under <directory>/ML/cmb_prediction/<run_id>/ilc_ml_maps/checkpoint_<epoch>/ with the from-<component> tag,
+    the cleaned CMB map (MW .npy) and the ILC / ILC + ML / difference figure. The alm of all realisations are then
+    saved next to them (<stem> = the map name with r<FIRST>-<LAST>; it carries ml-masked-mask<KK> with --mask-index):
+      <stem>_alm_fullsky.npz : always. alm_processed_cmb, alm_ilc, alm_ilc_ml of shape (n_realisations, n_alm),
+                               complex128, K, healpy ordering (no alm_processed_cmb for the observed sky);
+                               hp.alm2cl(alm[, alm_y]) is the full-sky auto / cross spectrum
+      <stem>_alm_pseudo.npz  : masked run only. The same arrays for (map x training mask), plus apodisation_deg,
+                               f_sky, f_sky2 of that mask; hp.alm2cl is the pseudo-C_ell (to decouple with NaMaster)
+    Both hold realisations, component, stats_component, checkpoint and lmax, and for a masked run mask_index
+    (0 = Planck 2018 common mask). Returns the path of the full-sky npz.
     """
     realisations = [int(r) for r in realisations]
     first, last = min(realisations), max(realisations)
-    keys = ("Dl_processed_cmb", "Dl_ilc", "Dl_ilc_ml")
-    collected = {k: [] for k in keys}
-    ell = None
-    extra = {}
-    stem = None
+    alms = {"fullsky": {}, "pseudo": {}}  # kind -> map name -> list of alm, one per realisation
     for realisation in realisations:
-        out = inference.predict_and_visualise_real_sky(realisation=realisation, masked_spectra=args.masked_spectra,
-                                                       component=component)
-        ell = np.asarray(out["ell"], dtype=float)
-        for k in keys:
-            collected[k].append(np.asarray(out[k], dtype=float))
-        if args.masked_spectra:
-            extra = {"f_sky": float(out["f_sky"]), "f_sky2": float(out["f_sky2"])}
-        stem = os.path.splitext(out["save_path"])[0]
+        out = inference.predict_and_visualise_real_sky(realisation=realisation, component=component)
+        for kind, key in (("fullsky", "alm"), ("pseudo", "alm_pseudo")):
+            for name, alm in out[key].items():
+                alms[kind].setdefault(name, []).append(alm)
 
-    suffix = "_pseudo" if args.masked_spectra else ""
-    bundle_stem = stem.replace(f"_r{realisations[-1]:04d}_", f"_r{first:04d}-{last:04d}_", 1)
-    bundle_path = bundle_stem + f"_spectra{suffix}.npz"
-    arrays = {k: np.asarray(v, dtype=float) for k, v in collected.items()}
-    np.savez(
-        bundle_path,
-        ell=ell,
-        realisations=np.asarray(realisations, dtype=int),
-        component=component,
-        stats_component=args.component,
-        checkpoint=int(inference.loaded_checkpoint_epoch),
-        masked_spectra=bool(args.masked_spectra),
-        **arrays,
-        **{f"{k}_mean": v.mean(axis=0) for k, v in arrays.items()},
-        **{f"{k}_std": v.std(axis=0) for k, v in arrays.items()},
-        **extra,
-    )
-    print(f"[Spectra] wrote the spectra of {len(realisations)} realisations of '{component}': {bundle_path}")
-    return bundle_path
+    stem = os.path.splitext(out["save_path"])[0]
+    if first != last:
+        stem = stem.replace(f"_r{realisations[-1]:04d}_", f"_r{first:04d}-{last:04d}_", 1)
+    info = {"realisations": np.asarray(realisations, dtype=int), "component": component, "stats_component": args.component,
+            "checkpoint": int(inference.loaded_checkpoint_epoch), "lmax": int(args.lmax)}
+    mask_info = out["mask_info"]  # empty for an unmasked run
+    for kind, extra in (("fullsky", {k: v for k, v in mask_info.items() if k == "mask_index"}), ("pseudo", mask_info)):
+        if alms[kind]:
+            path = f"{stem}_alm_{kind}.npz"
+            np.savez(path, **info, **extra,
+                     **{f"alm_{name}": np.asarray(v, dtype=np.complex128) for name, v in alms[kind].items()})
+            print(f"[Alm] wrote the {kind} alm of {len(realisations)} realisation(s) of '{component}': {path}")
+    return f"{stem}_alm_fullsky.npz"
 
 
 def resolve_checkpoint_dir(args, model_dir: str) -> str:
@@ -709,6 +710,12 @@ def main():
         raise ValueError(
             "prepare mode requires --run-id: the normalisation statistics are saved in ML/models/<run_id>/."
         )
+    if args.mask_index is not None:  # one of the masks_fsky_078_to_099 masks: masked ML, run id tagged with the mask
+        if not args.run_id.strip():
+            raise ValueError("--mask-index requires --run-id (the suffix _mask<KK> is appended to it).")
+        args.masked = True
+        args.run_id = f"{args.run_id.strip()}_mask{args.mask_index:02d}"
+        print(f"[Mask] --mask-index {args.mask_index}: masked ML with mask {args.mask_index:02d}, run id {args.run_id}")
     needs_model = [s for s in ("evaluate", "apply") if s in steps]
     if needs_model and "train" not in steps and not args.run_id.strip() and not args.model_dir.strip():
         raise ValueError(
@@ -739,7 +746,7 @@ def main():
 
     if "apply" in steps:
         print("[Apply] Applying the trained model to "
-              + (f"the simulated '{args.eval_component}' maps..." if args.eval_component else "the observed Planck sky..."))
+              + (f"the simulated maps of {', '.join(args.eval_component)}..." if args.eval_component else "the observed Planck sky..."))
         if model_dir_from_train is None:
             model_dir_from_train = resolve_evaluate_target(args)
             print(f"Model directory: {model_dir_from_train}")
@@ -763,7 +770,7 @@ if __name__ == "__main__":
 #   prepare  = data-preparation step: generate model input/target maps from the SILC outputs and fit the normalisation
 #              statistics into ML/models/<run-id>/ (CPU; needs --run-id)
 #   train    = training step (GPU): reuses prepared maps/stats if they exist, otherwise generates them first
-#   evaluate = predict and score the held-out test split
+#   evaluate = predict the held-out test split and save the alm of its maps
 #   apply    = apply the trained model to the observed Planck sky (SILC run with --components real --wavelet-components real)
 # --deproject tsz reads the cILC SILC outputs (tagged cilc-dp-tsz) instead of the plain ILC ones (tagged ilc); the ML
 #   maps, statistics and predictions carry the same tag, so ILC and cILC products never overwrite each other.
@@ -795,7 +802,8 @@ python3 -m skyclean.ml.pipeline_ml \
 
   --resume-training \
   --masked            # masked ML: training loss restricted to the Planck 2018 common mask; outputs tagged ml-masked
-  --masked-spectra    # evaluate/apply: spectra inside the mask (pseudo-C_ell); spectra files get a _pseudo suffix
+  --mask-index 7      # masked ML with mask 07 of <directory>/masks_fsky_078_to_099 (1 = fsky 0.78 ... 30 = fsky 0.99) instead;
+                      # implies --masked, run id becomes <run-id>_mask07, outputs tagged ml-masked-mask07
 
 # Apply a trained run to the real Planck sky:
 python3 -m skyclean.ml.pipeline_ml \
@@ -816,8 +824,7 @@ python3 -m skyclean.ml.pipeline_ml \
   --momentum 0.90 \
   --directory /Scratch/cindy/testing/Skyclean/skyclean/data/
 
-  --masked            # the run was trained masked
-  --masked-spectra    # spectra inside the mask
+  --masked            # the run was trained masked (or --mask-index <K> for a run trained with that mask)
 
 # Apply a run trained on one foreground mixture to the simulated SILC maps of another mixture (same lmax/N/lam/nsamp;
 # realisations FIRST..LAST inclusive, normalisation statistics of --component), e.g. trained on the PySM mixture
@@ -829,16 +836,32 @@ python3 -m skyclean.ml.pipeline_ml \
   --component cfn-a1-d1-f1-s1 \
   --eval-component cfn-dust-ff-spindust-sync \
   --eval-realisations 200 299 \
-  --masked --masked-spectra \
+  --masked \
   ... (the training arguments: --frequencies, --realisations 200, --split, --lmax, --N-directions, --chs, --epochs, ...)
-# Outputs per realisation as for the observed sky, tagged from-<eval component>_..._r<NNNN>_..., plus one
-#   ..._r0200-0299_..._ckpt<epoch>_spectra[_pseudo].npz   D_ell of processed cmb / ILC / ILC + ML for every realisation + mean/std
+# Outputs per realisation as for the observed sky, tagged from-<eval component>_..._r<NNNN>_..., plus
+#   ..._r0200-0299_..._ckpt<epoch>_alm_fullsky.npz   full-sky alm of processed cmb / ILC / ILC + ML for every realisation
+#   ..._r0200-0299_..._ckpt<epoch>_alm_pseudo.npz    masked run: their pseudo-alm inside the training mask (2 deg apodised)
 # 'evaluate' writes the same files for the test split of --component (tagged from-<component>, r<first>-<last> of the split).
+
+# Mixed training set (option 3): a '+'-joined --component trains on the first half of --realisations from the first
+# mixture and the second half from the second (r0-99 FFP10 subset, r100-199 PySM for 200), --split applied inside each
+# half (80 / 10 / 10 of each). evaluate writes the alm npz per mixture (test splits r0090-0099 and r0190-0199);
+# apply takes several --eval-component values and runs them one after the other (here both mixtures on r200-299):
+python3 -m skyclean.ml.pipeline_ml \
+  --mode prepare+train+evaluate+apply \
+  --run-id CFN-dust-ff-spindust-sync+CFN-a1-d1-f1-s1_ilc_lmax511_N2_r200_masked \
+  --component cfn-dust-ff-spindust-sync+cfn-a1-d1-f1-s1 \
+  --eval-component cfn-dust-ff-spindust-sync cfn-a1-d1-f1-s1 \
+  --eval-realisations 200 299 \
+  --realisations 200 --split 0.8 0.1 0.1 \
+  --masked \
+  ... (the other training arguments as above)
 
 # --checkpoint-epoch = optional; default: latest checkpoint in the run folder
 # The SILC real run is assumed to use --start-realisation 0 (its outputs are tagged r0000).
 # Outputs: <directory>/ML/cmb_prediction/<run-id>/ilc_ml_maps/checkpoint_<epoch>/
-#   <mode>_ml[-masked]_cmb_from-real_f..._ckpt<epoch>.npy   cleaned CMB map (MW sampling)
+#   <mode>_ml[-masked[-mask<KK>]]_cmb_from-real_f..._ckpt<epoch>.npy   cleaned CMB map (MW sampling)
 #   ..._ckpt<epoch>_maps.png                                ILC / ILC + ML / difference mollviews
-#   ..._ckpt<epoch>_spectra[_pseudo].png / .npz             ratio of TT D_ell: ILC / processed cmb, ILC + ML / processed cmb (npz also has the spectra)
+#   ..._ckpt<epoch>_alm_fullsky.npz                         full-sky alm of the ILC and ILC + ML maps (healpy ordering, complex128, K)
+#   ..._ckpt<epoch>_alm_pseudo.npz                          masked run: alm of (map x training mask), with apodisation_deg, f_sky, f_sky2
 '''
