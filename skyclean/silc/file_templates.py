@@ -331,7 +331,7 @@ class FileTemplates():
             "{mode}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}.npy"
         ),
 
-        # ML-cleaned map; {ml} is "ml" or "ml-masked" (model trained with the masked loss), see utils.ml_tag
+        # ML-cleaned map; {ml} is "ml", "ml-masked" (model trained with the masked loss) or "ml-masked-mask<KK>" (--mask-index), see utils.ml_tag
         'ilc_ml': os.path.join(
             self.output_directories["ilc_ml_maps"], 
             "{mode}_{ml}_{extract_comp}_from-{component}_f{frequencies}_r{realisation:04d}_lmax{lmax}_N{N_directions}_lam{lam}_nsamp{nsamp}_{btol}_rn{rn}_batch{batch}_epo{epochs}_lr{lr}_mom{momentum}_chs{chs}.npy"
@@ -377,6 +377,8 @@ class FileTemplates():
         # ---------------- mask for ML ----------------
         # "mask": os.path.join(directory, "HFI_Mask_GalPlane-apo{apodization}_2048_R2.00.fits"),  # Planck 2015 Galactic-plane masks
         "mask": os.path.join(directory, "COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits"),  # Planck 2018 common CMB intensity mask
+        # glob pattern of mask {index} (1..30, fsky 0.78 -> 0.99) of the masks_fsky_078_to_099 set, selected with --mask-index
+        "mask_fsky": os.path.join(directory, "masks_fsky_078_to_099", "mask_{index:02d}_fsky_*_nside256.fits"),
 
         }
 
