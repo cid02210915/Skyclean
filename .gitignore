@@ -7,3 +7,4 @@ s2wav/
 skyclean/data
 __pycache__/
 *.pyc
+skyclean/silc/*.ipynb
