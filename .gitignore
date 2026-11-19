@@ -8,3 +8,4 @@ skyclean/data
 __pycache__/
 *.pyc
 skyclean/silc/*.ipynb
+skyclean/silc/create_mask.py
