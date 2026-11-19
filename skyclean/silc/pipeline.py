@@ -42,6 +42,7 @@ class Pipeline:
         pcilc_eps: float | None = None,
         pcilc_pick: str = "minvar",
         topology: str | None = None,
+        sim: str = "Planck",
         #scales: list | None = None,   # optional: let caller pin j-scales
     ):
         self.components = components
@@ -72,6 +73,14 @@ class Pipeline:
 
         self.topology = topology
 
+        self.sim = str(sim).strip().lower()
+
+        if self.sim not in {"planck", "so"}:
+            raise ValueError(
+                f"Unknown sim='{sim}'. "
+                "Allowed values are 'Planck' and 'SO'."
+            )
+        
     # -------------------------
     # Steps
     # -------------------------
@@ -92,6 +101,7 @@ class Pipeline:
             self.realisations,
             start_realisation=self.start_realisation,
             directory=self.directory,
+            sim=self.sim,
         )
         downloader.download_all()
 
@@ -105,6 +115,7 @@ class Pipeline:
                  f"bytes_limit={ms['bytes_limit']}",
                  f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
                  f"num_allocs={ms.get('num_allocs', 'n/a')}")
+           
         processor = ProcessMaps(
             self.components,
             self.wavelet_components,
@@ -116,6 +127,7 @@ class Pipeline:
             method=self.method,
             overwrite=self.overwrite,
             topology=self.topology,
+            sim=self.sim,
         )
         processor.produce_and_save_maps()
 
@@ -129,6 +141,7 @@ class Pipeline:
                   f"bytes_limit={ms['bytes_limit']}",
                   f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
                   f"num_allocs={ms.get('num_allocs', 'n/a')}")
+            
         processor = ProcessMaps(
             self.components,
             self.wavelet_components,
@@ -140,6 +153,7 @@ class Pipeline:
             method=self.method,
             overwrite=self.overwrite,
             topology=self.topology,
+            sim=self.sim,
         )
         processor.produce_and_save_wavelet_transforms(
             self.N_directions,
@@ -159,9 +173,9 @@ class Pipeline:
                   f"bytes_limit={ms['bytes_limit']}",
                   f"largest_free_chunk={ms.get('largest_free_chunk', 'n/a')}",
                   f"num_allocs={ms.get('num_allocs', 'n/a')}")
-              
-        ft = FileTemplates(self.directory).file_templates
-    
+            
+        ft = FileTemplates(self.directory,topology=self.topology).file_templates
+
         # Templates
         file_template = ft.get("wavelet_coeffs") or ft.get("wavelet_c_j")
         if file_template is None:
@@ -316,7 +330,7 @@ class Pipeline:
         N_directions_ = self.N_directions if N_directions is None else int(N_directions)
 
         # --- templates + processed-CFN detection ---
-        ft = FileTemplates(self.directory).file_templates
+        ft = FileTemplates(self.directory, topology=self.topology).file_templates
         has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
 
         # --- choose source automatically (prefer processed CFN if present) ---
@@ -330,9 +344,19 @@ class Pipeline:
 
         # --- make a local copy of templates and alias processed_cfn -> cfn if needed ---
         ft_local = dict(ft)
-        if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
-            ft_local["processed_cfn"] = ft_local["cfn"]
-
+        if self.sim == "so":
+            ft_local["processed_cmb"] = ft_local[
+                "so_processed_cmb"
+            ]
+            ft_local["processed_cfn"] = ft_local[
+                "so_cfn"
+            ]
+        else:
+            if (
+                ("processed_cfn" not in ft_local)
+                and ("cfn" in ft_local)
+            ):
+                ft_local["processed_cfn"] = ft_local["cfn"]
         conv = MapAlmConverter(ft_local)
 
         # ---- load selected map ----
@@ -434,7 +458,6 @@ class Pipeline:
                 [(ell, Dl, label, style)],
                 save_path=plot_save_path, show=True
             )
-
         return ell, cl
     
     
@@ -488,7 +511,7 @@ class Pipeline:
         overwrite = self.overwrite if overwrite is None else overwrite
     
         # templates + processed-CFN detection (mirror)
-        ft = FileTemplates(self.directory).file_templates
+        ft = FileTemplates(self.directory, topology=self.topology).file_templates
         has_processed_cfn = ("processed_cfn" in ft) or ("cfn" in ft)
         ft_local = dict(ft)
         if ("processed_cfn" not in ft_local) and ("cfn" in ft_local):
@@ -660,6 +683,8 @@ def main():
     parser.add_argument('--save-ilc-intermediates', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--directory', type=str, default='/Scratch/agnes/data')
+    parser.add_argument('--topology', type=str, choices=['Toy', 'E1', 'E2', 'E3'], default=None)
+    parser.add_argument('--sim', type=str, choices=['Planck', 'SO'], default='Planck')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--steps', nargs='+',
                         choices=['download', 'process', 'wavelets', 'ilc', 'all'],
@@ -684,5 +709,7 @@ def main():
         save_ilc_intermediates=args.save_ilc_intermediates,
         overwrite=args.overwrite,
         directory=args.directory,
+        topology=args.topology,
+        sim=args.sim,
     )
     pipeline.run(steps=args.steps)

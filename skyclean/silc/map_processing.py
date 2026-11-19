@@ -18,6 +18,7 @@ class ProcessMaps():
                  method = "jax_cuda", 
                  overwrite: bool = False, 
                  topology: str | None = None,
+                 sim: str = "Planck",
                 ): 
         """
         Parameters: 
@@ -41,13 +42,44 @@ class ProcessMaps():
         self.desired_lmax = desired_lmax
         self.directory = directory
         self.overwrite = overwrite
-        self.templates = FileTemplates(directory="/Scratch/agnes/data")
 
+        self.sim = str(sim).strip().lower()
+        if self.sim not in {"planck", "so"}:
+            raise ValueError(
+                f"Unknown sim='{sim}'. "
+                "Allowed values are 'Planck' and 'SO'."
+            )
+        self.templates = FileTemplates(directory="/Scratch/agnes/data")
         files = FileTemplates(directory, topology=topology,)
         self.file_templates = files.file_templates
+        self.so_file_templates = files.so_file_templates
         # file_template, file_templates
         
-
+    def _apply_so_footprint(self, hp_map):
+    
+        nside = hp.get_nside(hp_map)
+        footprint_path = os.path.join(
+            os.path.dirname(__file__),
+            f"SO_LAT_classical_mask_nside{nside}.fits",
+        )
+        if not os.path.exists(footprint_path):
+            raise FileNotFoundError(
+                f"No SO LAT footprint found for Nside={nside}: "
+                f"{footprint_path}"
+            )
+        footprint = hp.read_map(
+            footprint_path,
+            field=0,
+            nest=False,
+            dtype=np.float64,
+        )
+        if hp.get_nside(footprint) != nside:
+            raise ValueError(
+                f"SO footprint Nside={hp.get_nside(footprint)} "
+                f"does not match map Nside={nside}."
+            )
+        return hp_map * footprint
+    
     def _find_max_noise_realisation(self, frequency: str):
         """
         Find the maximum noise realisation number available for a given frequency.
@@ -85,8 +117,23 @@ class ProcessMaps():
             print(f"Warning: Could not parse realisation numbers for frequency {frequency}.")
             raise ValueError(f"Could not parse realisation numbers for frequency {frequency}.")
 
-
     def create_cfn(self, frequency: str, realisation: int, save=True):
+        #Dispatch CFN construction to the selected simulation.
+
+        if self.sim == "planck":
+            return self.create_cfn_planck(
+                frequency,
+                realisation,
+                save=save,
+            )
+        elif self.sim == "so":
+            return self.create_cfn_so(
+                frequency,
+                realisation,
+                save=save,
+            )
+    
+    def create_cfn_planck(self, frequency: str, realisation: int, save=True):
         """
         Create a CFN (Cmb + Foreground + Noise) for a given frequency and realisation, by convolving
         the CMB with the standard beam and 
@@ -108,7 +155,6 @@ class ProcessMaps():
         cfn = np.zeros(hp.nside2npix(nside), dtype=np.float64)
     
         for comp in self.components:
-        
             if comp == "cib" and frequency not in {"353", "545", "857"}:
                 continue
             
@@ -217,18 +263,15 @@ class ProcessMaps():
             realisation=realisation,
             lmax=desired_lmax,
         )
-
         hp_map = hp.read_map(
             filepath,
             field=0,
         )
-
         # 545 / 857 MJy/sr -> K_CMB
         hp_map = HPTools.unit_convert(
             hp_map,
             frequency,
         )
-
         # Native Planck beam
         beam_path = None
 
@@ -255,7 +298,6 @@ class ProcessMaps():
             )
         )
         if save:
-
             output_path = (
                 self.file_templates["processed_real"]
                 .format(
@@ -269,9 +311,207 @@ class ProcessMaps():
                 hp_map_processed,
                 self.overwrite,
             )
-
         return hp_map_processed
         
+    def create_cfn_so(
+        self,
+        frequency: str,
+        realisation: int,
+        save=True,
+    ):
+        """
+        Create one SO CFN frequency map by processing
+        and summing the requested SO components.
+        """
+        desired_lmax = self.desired_lmax
+        nside = HPTools.get_nside_from_lmax(desired_lmax)
+
+        standard_fwhm_rad = (
+            HPTools.get_so_common_fwhm_rad(
+                self.frequencies
+            )
+        )
+        cfn = np.zeros(
+            hp.nside2npix(nside),
+            dtype=np.float64,
+        )
+
+        for comp in self.components:
+            processed_comp = "so_processed_" + comp
+            output_path = self.file_templates[
+                processed_comp
+            ].format(
+                frequency=frequency,
+                realisation=realisation,
+                lmax=desired_lmax,
+            )
+
+            if (os.path.exists(output_path) and self.overwrite is False):
+                hp_map_processed = hp.read_map(
+                    output_path
+                )
+
+            elif comp == "noise":
+                # Generate native SO LAT white noise
+                hp_map_processed = (
+                    HPTools.generate_so_lat_white_noise(
+                        frequency=frequency,
+                        nside=nside,
+                        realisation=realisation,
+                    )
+                )
+                # Native SO LAT beam
+                input_fwhm_rad = (
+                    HPTools.get_so_lat_fwhm_rad(
+                        frequency
+                    )
+                )
+                # Native beam -> common beam
+                hp_map_processed = (
+                    HPTools.beam_deconvolve_and_convolve_so(
+                        hp_map_processed,
+                        lmax=desired_lmax,
+                        input_fwhm_rad=input_fwhm_rad,
+                        standard_fwhm_rad=standard_fwhm_rad,
+                    )
+                )
+                hp_map_processed = self._apply_so_footprint(hp_map_processed)
+            else:
+                hp_map_processed = self.process_so_map(
+                    comp,
+                    frequency,
+                    realisation,
+                )
+                
+            if save and (
+                self.overwrite
+                or not os.path.exists(output_path)
+            ):
+                save_map(
+                    output_path,
+                    hp_map_processed,
+                    self.overwrite,
+                )
+
+            cfn += hp_map_processed
+        return cfn
+
+    def process_so_map(self, comp: str, frequency: str, realisation: int):
+        """
+        Process one mock SO LAT frequency map.
+
+        Component construction:
+            CMB
+                K_CMB -> native SO beam
+
+            kSZ / CIB / radio / dust
+                uK_CMB -> K_CMB -> native SO beam
+
+            tSZ
+                Compton-y -> K_CMB -> native SO beam
+
+            low-frequency Galactic
+                pre-beamed at 17 arcmin -> handled separately
+
+            noise
+                SO white-noise depth [uK-arcmin] -> K_CMB noise map -> added after native SO beam
+
+        Final processing:
+            summed SO frequency map
+                -> deconvolve native SO beam
+                -> convolve to common SO beam
+                -> reduce to target lmax / NSIDE
+        """
+        desired_lmax = self.desired_lmax
+        nside = HPTools.get_nside_from_lmax(desired_lmax)
+
+        # Common SO beam = largest native LAT beam
+        # among the frequencies selected for this run.
+        standard_fwhm_rad = (
+            HPTools.get_so_common_fwhm_rad(
+                self.frequencies
+            )
+        )
+
+        # ==================================================
+        # Input path
+        # ==================================================
+        if comp == "cmb":
+            # Use existing unlensed CMB realisation.
+            # Keep existing CMB path handling unchanged.
+            filepath = self.file_templates[
+                "cmb"
+            ].format(realisation=realisation)
+        else:
+            filepath = self.so_file_templates[
+                comp
+            ].format(frequency=frequency)
+
+        # ==================================================
+        # Load map
+        # ==================================================
+        hp_map = hp.read_map(
+            filepath,
+            field=0,
+        )
+
+        # ==================================================
+        # Unit conversion
+        # ==================================================
+        if comp == "cmb":
+            # Existing CMB realisation is already in K.
+            pass
+
+        elif comp == "tsz":
+            # LAMBDA tSZ:
+            # Compton-y -> K_CMB.
+            hp_map = HPTools.tsz_y_to_kcmb(hp_map, frequency)
+
+        else:
+            # LAMBDA kSZ, CIB, radio, dust,
+            # low-frequency Galactic maps:
+            # uK -> K.
+            hp_map = HPTools.unit_convert_so(hp_map)
+
+        # ==================================================
+        # Beam + target NSIDE
+        # ==================================================
+        if comp == "lowfreq_galactic":
+            # This LAMBDA map already has
+            # a documented 17 arcmin filter.
+            input_fwhm_rad = np.radians(17.0 / 60.0)
+
+            hp_map_processed = (
+                HPTools.deconvolve_and_convolve_and_reduce_so(
+                    hp_map,
+                    lmax=desired_lmax,
+                    nside=nside,
+                    input_fwhm_rad=input_fwhm_rad,
+                    standard_fwhm_rad=standard_fwhm_rad,
+                )
+            )
+        else:
+            # No documented input beam:
+            # directly convolve to common SO beam,
+            # then reduce to target NSIDE.
+            hp_map_processed = (
+                HPTools.convolve_and_reduce(
+                    hp_map,
+                    lmax=desired_lmax,
+                    nside=nside,
+                    standard_fwhm_rad=standard_fwhm_rad,
+                )
+            )
+        # ==================================================
+        # SO LAT survey footprint
+        # ==================================================
+        hp_map_processed = self._apply_so_footprint(
+            hp_map_processed
+        )
+
+        return hp_map_processed
+    
+
     def process_single_component(self, comp: str, frequency: str, realisation: int,
                              save: bool = True, noise_realisation: int | None = None):
         """
@@ -329,12 +569,24 @@ class ProcessMaps():
             )
         else:
             hp_map_reduced = HPTools.convolve_and_reduce(
-                hp_map, lmax=desired_lmax, nside=nside, standard_fwhm_rad=standard_fwhm_rad
+                hp_map,
+                lmax=desired_lmax,
+                nside=nside,
+                standard_fwhm_rad=standard_fwhm_rad,
             )
-            
+        # ==================================================
+        # SO LAT survey footprint
+        # ==================================================
+        if self.sim == "so":
+            hp_map_reduced = self._apply_so_footprint(
+                hp_map_reduced
+            )
         if save:
-            save_map(out_path, hp_map_reduced, self.overwrite)
-    
+            save_map(
+                out_path,
+                hp_map_reduced,
+                self.overwrite,
+            )
         return hp_map_reduced
 
 
@@ -345,19 +597,14 @@ class ProcessMaps():
         cfn  -> construct simulated CFN
         real -> process observed Planck frequency map
         """
-
         desired_lmax = self.desired_lmax
 
         for realisation in range(self.realisations):
-
             realisation += self.start_realisation
-
             for frequency in self.frequencies:
-
                 # ==========================================
                 # Real Planck data
                 # ==========================================
-
                 if self.wavelet_components[0] == "real":
 
                     output_path = (
@@ -369,7 +616,6 @@ class ProcessMaps():
                             lmax=desired_lmax,
                         )
                     )
-
                     if (
                         os.path.exists(output_path)
                         and self.overwrite == False
@@ -380,7 +626,6 @@ class ProcessMaps():
                             f"Skipping processing."
                         )
                         continue
-
                     real_map = self.process_real_map(
                         frequency,
                         realisation,
@@ -391,28 +636,25 @@ class ProcessMaps():
                         real_map,
                         overwrite=True,
                     )
-
                     print(
                         f"Processed real map at "
                         f"{frequency} GHz saved to "
                         f"{output_path}"
                     )
 
-
                 # ==========================================
                 # Simulated CFN
                 # ==========================================
-
                 else:
-
                     output_path = (
-                        self.file_templates["cfn"].format(
+                        self.file_templates[
+                            "so_cfn" if self.sim == "so" else "cfn"
+                        ].format(
                             frequency=frequency,
                             realisation=realisation,
                             lmax=desired_lmax,
                         )
                     )
-
                     if (
                         os.path.exists(output_path)
                         and self.overwrite == False
@@ -430,13 +672,11 @@ class ProcessMaps():
                         realisation,
                         save=True,
                     )
-
                     hp.write_map(
                         output_path,
                         cfn_map,
                         overwrite=True,
                     )
-
                     print(
                         f"CFN map at {frequency} GHz "
                         f"for realisation {realisation} "
@@ -473,26 +713,51 @@ class ProcessMaps():
                 lam=lam,
             )
         else:
-        
+            if self.sim == "so":
+                map_key = (
+                    "so_cfn"
+                    if comp == "cfn"
+                    else "so_processed_" + comp
+                )
+            else:
+                map_key = (
+                    "cfn"
+                    if comp == "cfn"
+                    else "processed_" + comp
+                )
             filepath = self.file_templates[
-                comp
+                map_key
             ].format(
                 frequency=frequency,
                 realisation=realisation,
                 lmax=lmax,
                 lam=lam,
             )
-        wavelet_coeffs_path = self.file_templates["wavelet_coeffs"]
-        scaling_coeffs_path = self.file_templates["scaling_coeffs"]
-        if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, N_directions=N_directions,
-                                                     realisation=realisation, lmax=lmax, lam = lam)) and self.overwrite == False:
-            # test if scale 0 exists; this means the transform has already been created
-            print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation} already exist. Skipping generation.")
-            return None
-        hp_map = hp.read_map(filepath)
+            wavelet_coeffs_path = self.file_templates[
+                "so_wavelet_coeffs"
+                if self.sim == "so"
+                else "wavelet_coeffs"
+            ]
+            scaling_coeffs_path = self.file_templates[
+                "so_scaling_coeffs"
+                if self.sim == "so"
+                else "scaling_coeffs"
+            ]
+            
+            if os.path.exists(wavelet_coeffs_path.format(comp=comp, frequency=frequency, scale=0, N_directions=N_directions,
+                                                         realisation=realisation, lmax=lmax, lam=lam)) and self.overwrite == False:
+                # test if scale 0 exists; this means the transform has already been created
+                print(f"Wavelet coefficients for {comp} at {frequency} GHz for realisation {realisation} already exist. Skipping generation.")
+                return None
+            hp_map = hp.read_map(
+                filepath,
+                dtype=np.float64,
+        )
+
         L = lmax + 1
-        mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method = method)
-        MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional = False)
+        mw_map = SamplingConverters.hp_map_2_mw_map(hp_map, lmax=lmax, method=method)
+
+        MWTools.visualise_mw_map(mw_map, title=f"{comp}", directional=False)
         wavelet_coeffs, scaling_coeffs = MWTools.wavelet_transform_from_map(mw_map, L=L, N_directions=N_directions, lam=lam)
         MWTools.save_wavelet_scaling_coeffs(
             wavelet_coeffs,

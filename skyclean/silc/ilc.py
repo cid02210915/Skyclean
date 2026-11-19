@@ -16,6 +16,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 import s2wav.filters as filters
 
+from s2fft.utils.quadrature import quad_weights
+from numpy.polynomial.legendre import legval
+
 from .map_tools import *
 from .utils import *
 from .custom_s2wav_bandlimits import *
@@ -133,7 +136,7 @@ class SILCTools():
                     L=L,
                     N=N,
                     sampling="mw",
-                    method=method,
+                    method="jax",
                     reality=False,
                 )
             )
@@ -248,7 +251,7 @@ class SILCTools():
         Ndeproj: int = 0,
         N_directions: int = 1,
         direction_index: int | None = None,
-        b_tol: float = 0.02,
+        b_tol: float = 0.01,
     ) -> float:
         """
         Paper Eqs (42)-(44): per-band real-space Gaussian FWHM
@@ -366,7 +369,7 @@ class SILCTools():
         J: int,
         Nfreq: int,
         Ndeproj: int = 0,
-        b_tol: float = 0.02,
+        b_tol: float = 0.01,
         scal_ell_cut: float = 64.0,
         scal_ell_max: int = 64,
     ) -> float:
@@ -500,7 +503,7 @@ class SILCTools():
         scaling: bool = False,
         Nfreq: int | None = None,
         Ndeproj: int = 0,
-        b_tol: float = 0.02,
+        b_tol: float = 0.01,
         # For diagnostics:
         nside_nmodes: int = 2048,
         k_sigma: float = 3.0,
@@ -641,7 +644,7 @@ class SILCTools():
             smoothed = np.asarray(jnp.real(out))
 
         return (smoothed, info) if return_info else smoothed
-
+     
 
     @staticmethod
     def compute_covariance(task):
@@ -734,7 +737,7 @@ class SILCTools():
                                     component: str = "cfn", lmax: int, lam: float | None = None,
                                     N_directions: int = 1,
                                     nsamp: float = 1200, overwrite: bool = False,
-                                    Ndeproj: int = 0, b_tol: float = 0.02,):
+                                    Ndeproj: int = 0, b_tol: float = 0.01,):
         
         #print("calculate_covariance_matrix", flush = True)
 
@@ -1335,7 +1338,7 @@ class SILCTools():
                 L=L2,
                 N=N,
                 sampling="mw",
-                method=method,
+                method="jax",
                 reality=False,
             )
 
@@ -1715,7 +1718,7 @@ class ProduceSILC():
         Ndeproj = 0
         
         print(f"Derived Ndeproj={Ndeproj}")
-        b_tol = 0.02
+        b_tol = 0.01
             
         synthesized_map = []
         
@@ -1743,7 +1746,7 @@ class ProduceSILC():
                 frequencies,
                 scales,
                 realisation,
-                method="jax_cuda",  # or "jax"
+                method="jax",  # or "jax_cuda"
                 path_template=output_templates['doubled_maps'],
                 component=comp,
                 lmax=L_max-1,
@@ -1942,7 +1945,7 @@ class ProduceSILC():
                         MW_Doubled_Map=arr,
                         scale=int(sc),
                         realisation=int(realisation),
-                        method='jax_cuda',
+                        method='jax',
                         path_template=output_templates["trimmed_maps"],
                         component=comp,
                         extract_comp=extract_comp,

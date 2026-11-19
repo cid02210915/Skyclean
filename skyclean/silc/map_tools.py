@@ -353,7 +353,188 @@ class HPTools():
         min_nside = lmax / 2
         nside = 2 ** np.ceil(np.log2(min_nside)) # find the smallest power of 2 greater than or equal to min_nside
         return int(nside)
-    
+
+    @staticmethod
+    def unit_convert_so(hp_map: np.ndarray) -> np.ndarray:
+        """
+        Convert LAMBDA SO forecast temperature maps
+        from uK to K.
+        """
+        return np.asarray(hp_map, dtype=np.float64) * 1e-6
+
+    @staticmethod
+    def tsz_y_to_kcmb(
+        y_map: np.ndarray,
+        frequency: str,
+        Tcmb: float = 2.726,
+    ) -> np.ndarray:
+        """
+        Convert the LAMBDA tSZ Compton-y map to K_CMB
+        at the requested frequency.
+        """
+
+        h = 6.62607015e-34
+        k_b = 1.380649e-23
+
+        nu_hz = float(frequency) * 1e9
+
+        x = h * nu_hz / (k_b * Tcmb)
+
+        g_nu = x / np.tanh(x / 2.0) - 4.0
+
+        return (
+            np.asarray(y_map, dtype=np.float64)
+            * Tcmb
+            * g_nu
+        )
+
+    @staticmethod
+    def get_so_lat_fwhm_rad(frequency: str) -> float:
+        """
+        Nominal SO LAT beam FWHM for the 2019 forecast bands.
+        """
+        fwhm_arcmin = {
+            "027": 7.4,
+            "039": 5.1,
+            "093": 2.2,
+            "145": 1.4,
+            "225": 1.0,
+            "280": 0.9,
+        }
+        if frequency not in fwhm_arcmin:
+            raise ValueError(
+                f"Unsupported SO LAT frequency: {frequency}"
+            )
+
+        return np.radians(
+            fwhm_arcmin[frequency] / 60.0
+        )
+
+    @staticmethod
+    def get_so_common_fwhm_rad(frequencies) -> float:
+        """
+        Common SO LAT instrumental beam.
+
+        Uses the largest FWHM among the frequency channels
+        included in the current run.
+        """
+        if len(frequencies) == 0:
+            raise ValueError(
+                "frequencies cannot be empty"
+            )
+
+        return max(
+            HPTools.get_so_lat_fwhm_rad(frequency)
+            for frequency in frequencies
+        )
+
+    @staticmethod
+    def beam_deconvolve_and_convolve_so(
+        hp_map: np.ndarray,
+        lmax: int,
+        input_fwhm_rad: float,
+        standard_fwhm_rad: float,
+    ) -> np.ndarray:
+        """
+        Deconvolve a known Gaussian input beam and
+        reconvolve to the requested common Gaussian beam.
+        """
+
+        if standard_fwhm_rad < input_fwhm_rad:
+            raise ValueError(
+                "Requested common beam is narrower than "
+                "the input beam."
+            )
+        nside = hp.get_nside(hp_map)
+        alm = hp.map2alm(hp_map,lmax=lmax)
+
+        input_bl = hp.gauss_beam(input_fwhm_rad, lmax=lmax, pol=False)
+        standard_bl = hp.gauss_beam(standard_fwhm_rad, lmax=lmax, pol=False)
+
+        alm_beamed = hp.almxfl(alm, standard_bl / input_bl)
+
+        return hp.alm2map(alm_beamed, nside=nside)
+
+    @staticmethod
+    def deconvolve_and_convolve_and_reduce_so(
+        hp_map: np.ndarray,
+        lmax: int,
+        nside: int,
+        input_fwhm_rad: float,
+        standard_fwhm_rad: float,
+    ) -> np.ndarray:
+        """
+        Deconvolve a known Gaussian input beam,
+        reconvolve to the common beam,
+        then reduce to the requested NSIDE.
+        """
+        hp_map_beamed = (
+            HPTools.beam_deconvolve_and_convolve_so(
+                hp_map,
+                lmax=lmax,
+                input_fwhm_rad=input_fwhm_rad,
+                standard_fwhm_rad=standard_fwhm_rad,
+            )
+        )
+        hp_map_reduced, _ = (
+            HPTools.reduce_hp_map_resolution(
+                hp_map_beamed,
+                lmax=lmax,
+                nside=nside,
+            )
+        )
+        return hp_map_reduced
+
+    @staticmethod
+    def generate_so_lat_white_noise(
+        frequency: str,
+        nside: int,
+        realisation: int,
+    ) -> np.ndarray:
+        """
+        Generate one SO LAT baseline temperature
+        white-noise map in K_CMB.
+        """
+
+        noise_uk_arcmin = {
+            "027": 71.0,
+            "039": 36.0,
+            "093": 8.0,
+            "145": 10.0,
+            "225": 22.0,
+            "280": 54.0,
+        }
+
+        if frequency not in noise_uk_arcmin:
+            raise ValueError(
+                f"Unsupported SO LAT frequency: {frequency}"
+            )
+
+        # HEALPix pixel area in arcmin^2
+        pixel_area_arcmin2 = hp.nside2pixarea(nside, degrees=True)* 60.0**2
+
+        # uK-arcmin -> per-pixel RMS in K_CMB
+        sigma_pix_k = (
+            noise_uk_arcmin[frequency]
+            / np.sqrt(pixel_area_arcmin2)
+            * 1e-6
+        )
+
+        # Reproducible independent realisation
+        seed = (
+            12345
+            + 10000 * realisation
+            + int(frequency)
+        )
+
+        rng = np.random.default_rng(seed)
+
+        return rng.normal(
+            loc=0.0,
+            scale=sigma_pix_k,
+            size=hp.nside2npix(nside),
+        )
+
 
 class MWTools():
     """Tools to process maps in MW (McEwen & Wiaux) sampling"""
@@ -1059,8 +1240,8 @@ class SamplingConverters():
         Returns:
             hp_map (numpy.ndarray): The converted Healpix map.
         """
-        L = lmax + 1 
-        mw_alm = s2fft.forward(mw_map, L=L, method=method, reality = True)
+        L = lmax + 1
+        mw_alm = s2fft.forward(mw_map, L=L, method=method, reality=True)
         hp_alm = SamplingConverters.mw_alm_2_hp_alm(mw_alm, lmax)
         hp_map = hp.alm2map(hp_alm, nside=HPTools.get_nside_from_lmax(lmax))
         return hp_map

@@ -1,5 +1,3 @@
-
-
 import os
 import requests
 import numpy as np
@@ -16,7 +14,8 @@ class DownloadData():
                  frequencies: list, 
                  realisations: int, 
                  start_realisation: int,
-                 directory: str = "data/"): 
+                 directory: str = "data/",
+                 sim: str = "Planck",): 
         """
         Parameters: 
             components (list): List of components to download. Includes: 'cmb', 'sync', 'dust' (synchrotron)
@@ -30,10 +29,22 @@ class DownloadData():
         self.realisations = realisations
         self.start_realisation = start_realisation
         self.directory = directory
+        self.sim = str(sim).strip().lower()
 
+        if self.sim not in {"planck", "so"}:
+            raise ValueError(
+                f"Unknown sim='{sim}'. "
+                "Allowed values are 'Planck' and 'SO'."
+            )
         files = FileTemplates(directory)
+
+        # Planck
         self.download_templates = files.download_templates
         self.file_templates = files.file_templates
+        # SO
+        self.so_download_templates = files.so_download_templates
+        self.so_file_templates = files.so_file_templates
+
 
     @staticmethod
     def _validate_fits_file(path: str) -> tuple[bool, str]:
@@ -74,8 +85,12 @@ class DownloadData():
                 print(f"Skipping CO download at {freq} GHz.")
                 return
 
-            template = self.download_templates[component]
+            if component == "real":
+                template = self.download_templates["real"][freq]
+            else:
+                template = self.download_templates[component]
             file_template = self.file_templates[component]
+
             if realisation is None: 
                 # foreground components same across realisations
                 filename = file_template.format(frequency=frequency)
@@ -103,7 +118,13 @@ class DownloadData():
             if component == "noise" and realisation is not None:
                 remote_realisation = int(realisation) % 300
 
-            url = template.format(frequency=remote_frequency, realisation=remote_realisation)
+            if component == "real":
+                url = template
+            else:
+                url = template.format(
+                    frequency=remote_frequency,
+                    realisation=remote_realisation,
+                )
 
             
             # stronguchii @ 070 is "_full.f" on PLA, but we want to save as ".fits" locally
@@ -167,9 +188,131 @@ class DownloadData():
                 f"Failed to download {component} at {frequency} after {max_attempts} attempts. "
                 f"Last error: {last_error}"
             )
-            
-            
-        
+                   
+    def download_so_component(
+        self,
+        component: str,
+        frequency: str | None = None,
+    ):
+        """
+        Download one SO LAMBDA component.
+        """
+        template = self.so_download_templates[component]
+        file_template = self.so_file_templates[component]
+
+        # kSZ and tSZ are frequency-independent input maps
+        if component in {"ksz", "tsz"}:
+            url = template
+            filename = file_template
+
+        # CIB, radio, dust and low-frequency Galactic maps
+        # are frequency dependent
+        else:
+            if frequency is None:
+                raise ValueError(
+                    f"Frequency required for SO component '{component}'."
+                )
+            frequency = str(frequency).zfill(3)
+
+            url = template.format(
+                frequency=frequency
+            )
+
+            filename = file_template.format(
+                frequency=frequency
+            )
+        # Skip only if existing file is valid
+        if os.path.exists(filename):
+            valid, reason = self._validate_fits_file(filename)
+            if valid:
+                print(
+                    f"File {filename} already exists and is valid. "
+                    "Skipping download."
+                )
+                return
+            print(
+                f"Existing file {filename} is invalid "
+                f"({reason}). Redownloading."
+            )
+            os.remove(filename)
+        os.makedirs(
+            os.path.dirname(filename),
+            exist_ok=True,
+        )
+        max_attempts = 5
+        last_error = None
+        for attempt in range(max_attempts):
+
+            tmp_filename = (
+                f"{filename}.tmp."
+                f"{os.getpid()}."
+                f"{time.time_ns()}"
+            )
+            try:
+                with requests.get(
+                    url,
+                    stream=True,
+                    timeout=120,
+                ) as response:
+                    response.raise_for_status()
+                    bytes_written = 0
+                    with open(tmp_filename, "wb") as f:
+                        for chunk in response.iter_content(
+                            chunk_size=8192
+                        ):
+                            if chunk:
+                                f.write(chunk)
+                                bytes_written += len(chunk)
+                if bytes_written == 0:
+                    raise RuntimeError(
+                        "Downloaded 0 bytes."
+                    )
+                valid, reason = self._validate_fits_file(
+                    tmp_filename
+                )
+                if not valid:
+                    raise RuntimeError(
+                        f"Downloaded invalid FITS ({reason})."
+                    )
+                os.replace(
+                    tmp_filename,
+                    filename,
+                )
+                print(
+                    f"Downloaded SO {component}"
+                    + (
+                        f" at {frequency} GHz."
+                        if frequency is not None
+                        else "."
+                    )
+                )
+                return
+            except (
+                requests.exceptions.RequestException,
+                RuntimeError,
+                OSError,
+            ) as exc:
+                last_error = exc
+                print(
+                    f"Download failed "
+                    f"({attempt + 1}/{max_attempts}): "
+                    f"{exc}"
+                )
+                time.sleep(
+                    10 * (attempt + 1)
+                )
+            finally:
+                if os.path.exists(tmp_filename):
+                    try:
+                        os.remove(tmp_filename)
+                    except OSError:
+                        pass
+
+        raise RuntimeError(
+            f"Failed to download SO {component} "
+            f"after {max_attempts} attempts. "
+            f"Last error: {last_error}"
+        )
 
     def download_cmb_spectrum(self):
         """
@@ -256,9 +399,76 @@ class DownloadData():
                 print(f"Downloaded CMB realisation {realisation}.")
             else:
                 raise ValueError("No theoretical CMB spectrum found. Please provide cmb_spectrum_theory.txt in the data directory.")
+            
+    def download_all(self):
+        """
+        Dispatch to Planck or SO downloader.
+        """
 
+        if self.sim == "planck":
+            return self.download_all_planck()
 
-    def download_all(self): 
+        elif self.sim == "so":
+            return self.download_all_so()
+    
+    def download_all_so(self):
+        """
+        Download requested SO components.
+        """
+        requests.adapters.DEFAULT_RETRIES = 5
+        print("Downloading SO components...")
+
+        if "all" in self.components:
+            components = list(
+                self.so_download_templates.keys()
+            )
+        else:
+            components = self.components
+
+        for component in components:
+            # CMB is generated below.
+            # SO noise is generated later during processing.
+            if component in {
+                "cmb",
+                "noise",
+                "extra_feature",
+            }:
+                continue
+            if component not in self.so_download_templates:
+                raise ValueError(
+                    f"Unknown SO component: {component}"
+                )
+            # kSZ and tSZ have one frequency-independent map
+            if component in {"ksz", "tsz"}:
+                self.download_so_component(
+                    component
+                )
+            # CIB / radio / dust / low-frequency Galactic
+            # have one file per SO frequency
+            else:
+                for frequency in self.frequencies:
+                    self.download_so_component(
+                        component,
+                        frequency,
+                    )
+        # Generate our existing unlensed CMB realisation
+        if (
+            "cmb" in self.components
+            or "all" in self.components
+        ):
+            for realisation in range(
+                self.start_realisation,
+                self.start_realisation + self.realisations,
+            ):
+                print(
+                    f"Generating CMB realisation "
+                    f"{realisation}..."
+                )
+                self.generate_and_save_cmb_realisation(
+                    realisation
+                )
+
+    def download_all_planck(self): 
         """
         Downloads all specified foreground components, noise and CMB realisations.
 
